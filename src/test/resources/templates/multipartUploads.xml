@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ListMultipartUploadsResult>
+  <Bucket>{{mulRes.bucket}}</Bucket>
+  <!--MOSS 暂不支持<KeyMarker/>-->
+  <!--MOSS 暂不支持<UploadIdMarker/>-->
+  <!--MOSS 暂不支持<NextKeyMarker/>-->
+  <!--MOSS 暂不支持<NextUploadIdMarker/>-->
+  <!--MOSS 暂不支持<Delimiter>/</Delimiter>-->
+  <!--MOSS 暂不支持<Prefix/>-->
+  <MaxUploads>{{ mulRes.maxUploads }}</MaxUploads>
+  <IsTruncated>false</IsTruncated>
+  {% for uploadModel in mulRes.uploadList %}
+   <Upload>
+    <Key>{{ uploadModel.key }}</Key>
+    <UploadId>{{ uploadModel.uploadId }}</UploadId>
+    <Initiator>
+        <ID>{{ uploadModel.id }}</ID>
+        <DisplayName>{{ uploadModel.displayName }}</DisplayName>
+    </Initiator>
+    <Owner>
+        <ID>{{ uploadModel.id }}</ID>
+        <DisplayName>{{ uploadModel.displayName }}</DisplayName>
+    </Owner>
+    <!--MOSS 暂不支持 <StorageClass>STANDARD</StorageClass>-->
+    <Initiated>{{ uploadModel.initiated }}</Initiated>
+   </Upload>
+  {% endfor %}
+</ListMultipartUploadsResult>

@@ -1,0 +1,626 @@
+-106=TimeTooSkewed/The difference between the request time and current time is too large./403
+
+-201=TooManyBuckets/You have attempted to create more buckets than allowed./400
+
+-202=BucketAlreadyExists/The bucket resource already exists./409
+
+-205=NoSuchBucket/The resource you requested does not exist./404
+
+-213=BucketNotEmpty/The bucket you tried to delete is not empty./409
+
+-214=BucketNotEmpty/The bucket you tried to delete is not empty in cluster 0./409
+
+-215=BucketNotEmpty/The bucket you tried to delete is not empty in cluster 1./409
+
+-216=BucketNotEmpty/The bucket you tried to delete is not empty in cluster 2./409
+
+-218=NoSuchUserID/The resource you requested does not exist./404
+
+-220=NFSNotStop/The bucket nfs is on, please stop nfs before delete bucket./403
+
+-221=NFSConflict/Conflicts exist between some advanced features of NFS functionality and bucket configuration./409
+
+-222=FileMountTooMany/The number of buckets for file sharing exceeds 1024./400
+
+-223=RefererNotAllowed/The resource is protected.Please check your bucket setting./404
+
+-224=TooManyReferer/The length of referer over 1024./400
+
+-225=BucketRefererNotExist/The referer configration of the bucket is not exist./404
+
+-226=NoSuchSoftQuota/The soft quota of the bucket have not been set./400
+
+-227=TooManyCORSRules/The cors rules number over the limitation(10)./400
+
+-228=NoBucketTagging/the bucket tag is not exist./404
+
+-229=BucketOwnerMissingUID/The s3 account does not match any file system ID, please complete account configuration before enabling file permissions and using the file protocol./403
+
+-404=SignatureDoesNotMatch/The request signature we calculated does not match the signature you provided. Check your key and signing method./403
+
+-408=AccessDenied/The validation fails, refused to visit./403
+
+-409=SignatureDoesNotMatch/The request signature we calculated does not match the signature you provided. Check your key and signing method./403
+
+-410=AccessForbidden/Insufficient privilege./403
+
+-415=AccountNotExist/The account you requested does not exist./404
+
+-416=InvalidAccessKeyId/The access_key doesn't exist./403
+
+-417=InvalidAccessKey/The input ak is invalid./403
+
+-418=InvalidSecretKey/The input sk is invalid./403
+
+-420=AccessDenied/There were headers present in the request which were not signed/403
+
+-421=AccessDenied/AWS authentication requires a valid Date or x-amz-date header/403
+
+-422=InvalidRequest/Missing required header for this request: x-amz-content-sha256/400
+
+-423=InvalidArgument/Unsupported Authorization Type/400
+
+-424=AccessDenied/Request has expired/403
+
+-425=AuthorizationHeaderMalformed/The authorization header is malformed/400
+
+-426=AuthorizationHeaderMalformed/The authorization header is malformed; Invalid credential date. Date is not the same as X-Amz-Date./400
+
+-427=AuthorizationHeaderMalformed/The authorization header is malformed; the authorization header requires three components: Credential, SignedHeaders, and Signature./400
+
+-428=AuthorizationHeaderMalformed/The authorization header is malformed; This endpoint belongs to "s3"./400
+
+-429=XAmzContentSHA256Mismatch/The provided 'x-amz-content-sha256' header does not match what was computed./400
+
+-430=SignatureDoesNotMatch/The request signature we calculated does not match the signature you provided. Check your key and signing method./403
+
+-431=AuthorizationHeaderMalformed/The authorization header is malformed; This date in the credential must be in the format "yyyyMMdd"./400
+
+-432=InvalidArgument/x-amz-content-sha256 must be UNSIGNED-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, or a valid sha256 value./400
+
+-433=MissingContentLength/You must provide the Content-Length HTTP header./411
+
+-434=NotImplemented/A header you provided implies functionality that is not implemented/501
+
+-435=InvalidArgument/Authorization header is invalid -- one and only one ' ' (space) required/400
+
+-436=IncompleteBody/The request body terminated unexpectedly/400
+
+-437=AuthorizationQueryParametersError/X-Amz-Algorithm only supports "AWS4-HMAC-SHA256"/400
+
+-438=AuthorizationQueryParametersError/X-Amz-Expires should be a number/400
+
+-439=AuthorizationQueryParametersError/X-Amz-Expires must be less than a week (in seconds); that is, the given X-Amz-Expires must be less than 604800 seconds/400
+
+-440=UnExpectedContent/This request does not support content./400
+
+-441=MissingSecurityHeader/Your request was missing a required header./400
+
+-502=NoSuchKey/The specified key does not exist./404
+
+-505=AccessForbidden/The request access forbidden./403
+
+-507=NoSuchUpload/The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed./404
+
+-508=TooManyIncompleteUploads/You have too many incompete uploads, please complete uploads task./400
+
+-509=InsufficientStorageSpace/Insufficient storage space./400
+
+-510=EntityTooLarge/Users to upload object size is greater than the MOSS to allow maximum size./400
+
+-511=MetadataTooLarge/Metadata header exceeded the maximum allowable size of metadata./400
+
+-512=EntityTooLarge/Users to upload object size is greater than the MOSS to allow maximum size./400
+
+-513=NoSuchBucketPermission/No Such bucket operation permission./404
+
+-514=NoSuchObjectPermission/No such object operation permission./404
+
+-519=FileSyncConflict/File gateway conflicts with bucket sync./400
+
+-522=TooSmallPart/Too small part when check in Complete Multipart Upload./400
+
+-523=InvalidPart/Part invalid, one or more fragmentation could not be found, please check you data./400
+
+-524=MalformedXML/The XML you provided was not well-formed or did not validate against our published schema./400
+
+-525=AccessForbidden/The request access forbidden./403
+
+-526=InvalidArgument/Invalid parameter./400
+
+-527=InvalidDigest/The Content-MD5 you specified did not match what we received./400
+
+-528=InvalidRequest/A key must be specified./400
+
+-529=InvalidRange/Requested Range Not Satisfiable./416
+
+-530=MissingContentLength/Upload object operation miss ContentLength header./411
+
+-531=TooManyObjects/The number of batch delete objects exceeds the limit./400
+
+-532=MalformedXML/The number of the body is too long./400
+
+-533=INPUT_EMPTY_OBJECT/The request body is empty./400
+
+-534=InvalidPartOrder/The list of parts was not in ascending order. Parts must be ordered by part number./400
+
+-535=ObjectImmutable/Object is immutable./409
+
+-536=InvalidArgument/Invalid tagging parameter./400
+
+-537=BucketMetaSearchOFF/Bucket metadata search switch is off./400
+
+-538=NoSuchVersion/The specified key version does not exist./404
+
+-539=InvalidArgument/A version-id marker cannot be specified without a key marker./400
+
+-540=EsSearchBufferExceeded/The result exceeded es buffer limit./400
+
+-541=HeaderNotAllowed/The request header content-length is not allowed when using Chunked transfer encoding./400
+
+-545=GetObjectTimeOut/Get Object TimeOut./500
+
+-546=MissingRequestBody/The request body cannot be empty./400
+
+-547=InvalidArgument/Invalid model/400
+
+-548=NoSuchClearModelConfiguration/The bucket don't have the clear model configuration./400
+
+-549=InvalidArgument/the startTime or endTime is empty./400
+
+-550=InvalidArgument/the startTime or endTime is invalid./400
+
+-551=InvalidArgument/the capacityRemaining or objectRemaining is invalid./400
+
+-552=InvalidArgument/the tag you provide is invalid,please check the xml./400
+
+-553=EmptyTag/the object tag is empty./404
+
+-554=NoCORSConfiguration/the CORS configuration is not exist./404
+
+-555=MissingFileLength/Post object operation miss FileLength header./411
+
+-701=InvalidObjectName/The object name specified in the request is invalid./400
+
+-703=InvalidBucketName/The specified bucket is not valid./400
+
+-704=InvalidBucketQuota/The bucket quota specified in the request is invalid./400
+
+-705=InvalidAccountName/The AccountName is not exist./400
+
+-706=NoSuchPerfType/No Such Performance Type./400
+
+-1901=SpaceQuotaExceeded/No enough space because of the capacity quota./400
+
+-1902=ObjectsQuotaExceeded/The hard-max-objects was exceeded./400
+
+-1903=QuotaConflict/the capacitySoftQuota or objectSoftQuota can not be set zero when clear model is enabled./400
+
+-2001=MalformedError/The XML you provided was not wellformed or did not validate against our published schema./400
+
+-2002=NoSuchLifecycleConfiguration/The lifecycle configuration does not exist./404
+
+-2003=InvalidArgument/ID length should not exceed allowed limit of 255./400
+
+-2004=InvalidArgument/'Date' must be at midnight GMT./400
+
+-2005=InvalidRequest/The maximum size of a prefix is 1024./400
+
+-2006=InvalidStorageClass/Invalid lifecycle storage strategy./400
+
+-2007=LifecycleTimeConflict/Rules have time conflicts./409
+
+-2008=InvalidLifecycleOrder/The Expiration time cannot be earlier than the Transition time./400
+
+-2009=LifecyclePrefixCover/The rule prefixes have inclusion relationships./400
+
+-2010=InvalidLifecycleTime/Found mixed 'Date' and 'Days' based Expiration or Transition actions in a rule./400
+
+-2011=InvalidArgument/Prefix cannot be used with Filter./400
+
+-2012=InvalidLifecycleFilter/Invalid conditions prefix or tag./400
+
+-2013=InvalidArgument/The key or value of tags cannot be empty or duplicate./400
+
+-2014=InvalidArgument/Rule ID must be unique. Found same ID for more than one rule./400
+
+-2015=RuleConflict/The set rule conflicts with the setting rules./400
+
+-2016=InvalidArgument/The prefix of rule contains illegal characters./400
+
+-2017=InvalidArgument/The ID of rule contains illegal characters./400
+
+-2018=InvalidArgument/Invalid source cluster name./400
+
+-2019=InvalidArgument/Invalid backup cluster name./400
+
+-2020=InvalidArgument/The sourceSite and backupSite conflict./400
+
+-2201=PreconditionFailed/At least one of the preconditions you specified did not hold./412
+
+-2202=InvalidRequest/The specified copy source is larger than the maximum allowable size for a copy source./400
+
+-2203=NoSuchConfiguration/The specified configuration does not exist./404
+
+-2204=TooManyConfigurations/You are attempting to create a new configuration but have already reached the 10-configuration limit./400
+
+-2205=InvalidArgument/The inventory ID cannot be invalid and the inventory id in the request parameters must be consistent with the parameter identification in the InventoryConfiguration ID./400
+
+-2206=InvalidArgument/Schedule Frequency cannot be empty and can only be Daily or Weekly./400
+
+-2207=InvalidArgument/OptionField contains an invalid field./400
+
+-2208=InvalidArgument/IncludeObjectVersions cannot be empty and can only be All or Current./400
+
+-2209=InvalidArgument/The inventory file format is invalid./400
+
+-2210=InvalidArgument/The specified account ID is not the owner of the target bucket./400
+
+-2211=NoSuchBucket/The inventory destination bucket does not exists./404
+
+-2212=InvalidArgument/Target bucket for which inventory is not specified./400
+
+-2213=PrefixExistInclusionRelationship/The filter prefix exist inclusion relationship./400
+
+-2214=InvalidS3DestinationBucketPrefix/S3BucketDestination Prefix cannot be longer than 512 bytes./400
+
+-2215=InvalidFilterPrefix/Filter Prefix only support all objects,so Filter Prefix must be empty./400
+
+-2216=InvalidS3DestinationBucket/S3Destination bucket is invalid./400
+
+-2217=InvalidInventoryType/InventoryType is invalid./400
+
+-2218=InvalidInventoryType/InventoryType is invalid when bucket hash is on./400
+
+-2303=InvalidBucketState/The request is not valid with the current state of the bucket whose versioning status is not enabled./409
+
+-2304=InvalidRequest/Bucket is missing Object Lock Configuration./400
+
+-2305=InvalidArgument/The retain until date must be in the future!/400
+
+-2306=NoSuchObjectLockConfiguration/The specified object does not have a ObjectLock configuration./404
+
+-2307=InvalidRequest/Content-MD5 or x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters./400
+
+-2308=InvalidRequest/The maximum number of object versions has been reached./400
+
+-2309=InvalidRequest/InvalidBucketVersionQuota./400
+
+-2401=SendTestMessageError/Send test message error./500
+
+-2402=InvalidArgument/Unable to validate the following destination configurations./400
+
+-2403=EventNotExist/The event does not exist./400
+
+-2404=CreateChannelFail/Create the channel fail. please check that the configuration is correct./400
+
+-2405=ExchangeNotExist/The exchange does not exist./400
+
+-2406=InvalidArgument/Size of filter rule value cannot exceed 1024 bytes in UTF-8 representation./400
+
+-2407=InvalidArgument/The MRN is not well formed./400
+
+-2408=ConnectedFail/Connect the rabbitmq server fail./400
+
+-2409=InvalidArgument/Configurations overlap. Configurations on the same bucket cannot share a common event type./400
+
+-2410=InvalidArgument/filter rule name must be either prefix or suffix./400
+
+-2411=InvalidArgument/Field exceeds 512 bytes./400
+
+-2412=TargetBucketDeleted/Target bucket deleted./500
+
+-2413=InvalidTargetBucketForLogging/The target bucket for logging does not exist./400
+
+-2414=CrossLocationLoggingProhibited/Cross-location logging not allowed. Buckets in one geographic location cannot log information to a bucket in another location./403
+
+-2415=InvalidArgument/Encryption algorithm parameter error or encryption algorithm is not supported/400
+
+-2416=ServerSideEncryptionConfigurationNotFoundError/The server side encryption configuration was not found./404
+
+-2417=InvalidArgument/The encryption method specified is not supported./400
+
+-2418=InvalidStatement/The encryption method specified is not supported because of deduplicated./400
+
+-2420=EntityTooLarge/The trash directory name too long./400
+
+-2421=InvalidTrashDirectoryName/The trash directory name has invalid chars./400
+
+-2422=MalformedJson/JSON characters are not compliant./400
+
+-2423=NoSuchTrashDirectory/The bucket does not have the trash function enabled./404
+
+-2424=InvalidBucketState/The bucket does not meet the conditions./409
+
+-2425=MissingPostion/Upload object operation miss Position header./411
+
+-2426=PositionNotEqualToLength/Position is not equal to file length./409
+
+-2427=ObjectNotAppendable/The object is not appendable./409
+
+-2501=TheSettingError/The setting is error./400
+
+-2502=TimeFormatError/The time is error./400
+
+-3002=GetDateError/The data may have been corrupted./500
+
+-1=InternalError/Encountered an internal error./500
+
+101=UserNotExists/The user not exist./404
+
+102=UserNameInputErr/The input of user name is error./400
+
+103=TooManyUser/The number of user has reached the upper limit./400
+
+104=UserExisted/The user already existed./400
+
+105=TooManyGroupInUser/The number of group for the user has reached the upper limit./400
+
+106=InvalidPassWd/The password is invalid./400
+
+107=DenyProgramAccess/Deny to access the program./403
+
+108=UserAddedGroup/The user has added the group./400
+
+109=UserAttachPolicy/The user has attached the policy./400
+
+110=UserPasswordError/The user password is error./400
+
+111=UserPasswordInputErr/The input of user password is error./400
+
+112=UserPasswordNotExists/The password is not exists./404
+
+201=TooManyAk/The number of ak for the user has reached the upper limit./400
+
+202=AkNotExist/The ak does not exist./404
+
+203=DeleteAkFail/Delete Ak failed./500
+
+204=AkExist/The ak exists./400
+
+205=InvalidAkAcl/The acl of ak is invalid./400
+
+301=ResourceLocked/The resource is locked./400
+
+401=PolicyExisted/The policy existed./400
+
+402=PolicyNotExists/The policy does not exist./404
+
+403=TooManyPolicy/The number of policy has reached upper limit./400
+
+404=PolicyTextFormatError/The json format of the policy is not correct./500
+
+405=PolicyAttachedError/Policy attached error./500
+
+406=DeletePolicyFail/Delete Policy failed./500
+
+407=PolicyNameInputErr/The input of policy name is error./400
+
+408=PolicyCannotBeDeleted/The policy cannot be deleted./500
+
+501=GroupNotExists/The group does not exist./404
+
+502=TooManyGroup/The number of group has reached upper limit./400
+
+503=GroupExisted/The group existed./400
+
+504=GroupHadUser/The group has already included the user./400
+
+505=TooManyUserInGroup/The number of user in the group has reached upper limit./400
+
+506=NoSuchUserInGroup/No such user in the group./404
+
+507=GroupHasUsersError/The group has users, please remove users first./400
+
+508=GroupAttachPolicy/The group has attached policy./400
+
+509=DeleteGroupFail/Delete group failed./500
+
+510=GroupNameInputErr/The input of group name is error./400
+
+601=NoSuchAccount/No such account./404
+
+602=AccountPasswordError/The input of account oldpassword is error./400
+
+603=AccountExists/The account already existed./400
+
+605=AccountHasUsers/The account has users./400
+
+606=AccountHasGroups/The account has groups./400
+
+607=TooManyAccount/The number of account is over 5000./400
+
+608=AccountHasPolicies/The account has policies./400
+
+609=AccountNameInputErr/The account name input is error./400
+
+610=AccountUpdateErr/The account update error./500
+
+611=RedisSavedFail/Redis saved fail./500
+
+612=AddAccountFail/Add account fail./500
+
+613=InconsistentStorageStrategy/The storage policy specified by the account is inconsistent among different sites./400
+
+614=ValidityTimeIllegal/ValidityTime is illegal check your validityTime./400
+
+615=AccountIDExists/The account id already existed./400
+
+616=ValidityGradeIllegal/ValidityGrade is illegal check your validityGrade./400
+
+617=AccountHasRoles/The account has roles./400
+
+702=ListLenDiff/The length of type list is not matched to the length of entity list./500
+
+703=AuthExists/The policy authorization already exists./400
+
+704=AuthNotExisted/The policy authorization does not exist./404
+
+705=TooManyAuth/The number of policies to the entity has reached upper limit./400
+
+706=DeleteAuthFail/Policy detached error./500
+
+707=PolicyCannotBeAttached/Policies are not allowed to be attached./500
+
+801=InvalidLength/Input length is invalid./400
+
+901=MOSSOperationFail/MOSS operation failed./500
+
+902=AccountHasBucket/The account has bucket./400
+
+1101=AccessForbidden/No such object read permission./403
+
+1102=AccessForbidden/No such object write permission./403
+
+1103=NoSuchKey/The specified key does not exist./404
+
+2401=InvalidLocationConstraint/the specified location constraint is not valid./400
+
+2403=InvalidSiteConstraint/The specified site constraint is not valid./400
+
+2405=InsufficientSiteConditions/The current site does not meet the setting conditions./400
+
+2406=SourceBucketNotSync/the bucket does not belong to the current site./400
+
+2407=InvalidSiteConstraint/The bucket does not open the data sync switch./400
+
+2408=NoSuchClusterName/The cluster name does not exist./404
+
+-2301=InvalidBucketState/The bucket state of version is invalid./409
+
+-2302=MethodNotAllowed/The specified method is not allowed against this resource./405
+
+2501=NoSupportMetadataSearch/The bucket does not support metadata search./400
+
+-4001=ObjectLockConfigurationNotFoundError/Object Lock configuration does not exist for this bucket./404
+
+2601=NoSuchBucketPolicy/The bucket does not has bucket policy./404
+
+2602=MalformedPolicy/The bucket policy has invalid action or field./400
+
+2603=MalformedPolicy/The bucket policy has invalid principal./400
+
+2604=MalformedPolicy/The bucket policy has invalid resource./400
+
+2605=MalformedPolicy/The bucket policy has invalid action./400
+
+2606=MalformedPolicy/The bucket policy has invalid effect./400
+
+2607=MalformedPolicy/The bucket policy has invalid version./400
+
+2608=MalformedPolicy/The bucket policy has invalid statement./400
+
+2609=MalformedPolicy/The bucket policy has invalid condition./400
+
+2610=MalformedPolicy/The bucket policy has invalid sid./400
+
+1201=NoSuchStorageStrategy/The specified storage strategy does not exist./404
+
+1301=InvalidStorageStrategy/The strategy does not init data and meta./400
+
+2703=NoSuchLimitStrategy/The query limit strategy is not valid./400
+
+2704=InvalidQoSConfiguration/The time set for this QoS strategy is illegal./400
+
+2706=QoSSetError/Failed to set QoS strategies./400
+
+2808= MirrorFaild/Mirroring failed./402
+
+2901=NoSuchComponentStrategy/no such component strategy./404
+
+2905=DeleteComponentStrategyFail/this strategy is being used by some tasks and cannot be deleted./500
+
+2907=StrategyDestinationAlreadyExists/destination already used by other strategies./409
+
+2909=StrategyNameAlreadyExists/The strategy name already exists./409
+
+2910=StrategyDestinationContains/The destination has an contains relationship with other strategies./400
+
+2911=NoSuchComponentTask/no such component task./404
+
+2913=TaskNameAlreadyExists/The task name already exists./409
+
+2921=InvalidComponentParam/invalid component param./400
+
+2922=TargetBucketNotExists/The target bucket does not exists./404
+
+2923=SourceBucketNotExists/The source bucket does not exists./404
+
+2924=StrategyAlreadyExists/The component strategy already exists./409
+
+2925=ImageFormatNotSupported/The Image Format Not Supported./400
+2926=ImageFormatNotEmpty/The Image Format Not Empty./400
+2927=NoSuchProcess/no such process./400
+2928=UnsupportedSourceFileFormat/The source file format unsupported./400
+2929=StrategyNotExists/The component strategy not exists./404
+2930=NoSuchProcessType/no such process type./400
+2931=NotBase64Decoding/Input is not base64 decoding./400
+2932=InvalidIntervalParam/Interval cannot be less than 200 ms./400
+2933=IntervalNotEmpty/Interval cannot be empty./400
+2934=DeleteSourceConflict/Delete source conflict./400
+2935=ImageSizeTooLarge/The image size too large./400
+
+2707=RoleNotExists/The requested role does not exist./404
+2708=RoleExisted/Role already exists./400
+2709=AccessDenied/You are not authorized to perform this operation./403
+2710=MalformedRoleMrn/The roleMrn is not valid./400
+2711=AccessForbidden/Policy not attached to requested role./403
+2712=InvalidDurationSeconds/The input 'DurationSeconds' is invalid./400
+2713=AccessForbidden/it's not authorized to perform: sts:AssumeRole./403
+2714=MissingParameter/Missing required parameter for this request: 'RoleName'/400
+2715=PolicyNotAttachable/The policy is not attachable to the role./400
+2716=PolicyExisted/The policy is already attached to the role./400
+2717=PolicyNotExists/The policy does not exist in the role./404
+2718=DeleteConflict/Cannot delete the policy. it is not created by the role./400
+2719=InvalidRoleSessionName/Missing required parameter for this request: 'RoleSessionName'./400
+2720=InvalidRoleSessionName/The input 'RoleSessionName' is invalid./400
+2721=InvalidPath/The input 'Path' is invalid./400
+2722=RoleNameInputErr/The input 'RoleName' is invalid./400
+2723=InvalidRoleDescription/The input 'RoleDescription' is invalid./400
+2724=InvalidMaxSessionDuration/The input 'MaxSessionDuration' is invalid./400
+2725=InvalidPolicyName/Missing required parameter for this request: 'PolicyName'./400
+2726=MalformedPolicyMrn/The PolicyMrn is not valid./400
+2727=InvalidPolicyArn/Missing required parameter for this request: 'PolicyArn'./400
+2728=InvalidAssumeRolePolicyDocument/Missing required parameter for this request: 'AssumeRolePolicyDocument'./400
+2729=InvalidMarker/The input 'Marker' is invalid./400
+2730=InvalidMaxItems/The input 'MaxItems' is invalid./400
+2731=TooManyAuth/The number of policyMrns is over 10./400
+2732=PolicyTextFormatError/The request was rejected because the policy document was malformed./500
+2733=PolicyNameInputErr/The input 'PolicyName' is invalid./400
+2734=InvalidDescription/Missing required parameter for this request: 'Description'./400
+2735=RoleSessionNameExisted/RoleSessionName already exists./400
+2736=TooManyRole/The number of role is over 50./400
+2737=RoleAttachPolicy/The role has attached the policy./400
+
+2801=NoSuchEntity/The request was rejected because it referenced a resource entity that does not exist./404
+
+2851=BucketSnapshotNameInvalid/The bucket snapshot name is invalid./400
+2852=NoSuchRollbackTargetSnapshot/no such roll back target snapshot./404
+2853=BucketSnapshotSizeExceeded/bucket snapshot size exceed./400
+2854=BucketSnapshotNotAllowed/The bucket snapshot not allowed./405
+2856=SnapshotMarkOverflow/The bucket snapshot mark overflow./405
+2857=NoSuchBucketSnapshot/no such bucket snapshot./404
+2858=BucketSnapshotNotEmpty/The bucket you tried to delete is not empty./409
+2859=OperationConflict/The operation conflicts with bucket snapshot./409
+2860=SnapshotConflict/The Bucket snapshot conflicts with some other features./409
+2861=RollbackQuantityExceedsLimit/The rollback quantity exceeds limit./400
+2862=CurrentlyRecoveringLatestData/The currently recovering latest data./400
+2863=CurrentlyIsLatestData/The currently is latest data./400
+2864=CurrentlyIsNotLatestData/The currently is not latest data./400
+2865=RollbackSnapshotMarkInvalid/The rollback target snapshot mark is invalid./400
+
+3201=InvalidCacheWaterMarkConfig/The config param is invalid./400
+3202=NoSuchCachePool/The cache pool is not exit./404
+
+3901=NoSuchDir/The dir is not exit./404
+3902=QuotaIsSetting/The dir is setting quota info./400
+3903=QuotaHasSetting/The dir quota has been set by other client./400
+3904=QuotaTooMuch/The dir has set too much quota info./400
+3905=CreateQuotaFrequent/The dir set and delete quota too frequent./400
+3906=QuotaMethodConflict/The exits limit method quota,can not set statistics method quota./400
+3907=QuotaCapExceedHard/exceed exits quota cap hard quota./400
+3908=QuotaFileExceedHard/exceed exits quota file hard quota./400
+3909=QuotaNotExit/The quota info does not exits./404
+3910=QuotaLessThanUsed/The hard quota in quota info is less than used./400
+3911=BucketNotStartFS/The bucket do not start FS./404
+3912=DirIsRenaming/The dir is renaming./400

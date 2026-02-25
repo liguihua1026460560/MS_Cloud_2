@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<AccessControlPolicy xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Owner>
+    <ID>{{ id }}</ID>
+    <DisplayName>{{ name }}</DisplayName>
+  </Owner>
+  <AccessControlList>
+    {% for acl in acls %}
+    <Grant>
+      <Grantee xsi:type="CanonicalUser">
+        <ID>{{ acl.user_id }}</ID>
+        <DisplayName>{{ acl.user_name }}</DisplayName>
+      </Grantee>
+      <Permission>{{ acl.acl }}</Permission>
+    </Grant>
+     {% endfor %}
+  </AccessControlList>
+</AccessControlPolicy>

@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ListEsResult>
+    <Count>{{ count }}</Count>
+    <NextNumber>{{ nextNumber }}</NextNumber>
+    <Lists>
+        {% for list in lists %}
+            <List>
+                <Userid>{{ list.userid}}</Userid>
+                <BucketName>{{ list.bucketName}}</BucketName>
+                <Obj_name>{{ list.obj_name}}</Obj_name>
+                <Size>{{ list.size}}</Size>
+                <ETag>{{ list.ETag}}</ETag>
+                <Path>{{ list.path }}</Path>
+                <LastModify>{{ list.lastModified}}</LastModify>
+                {% for meta in list.metalists %}
+                    <Metas>
+                        <Meta>{{ meta }}</Meta>
+                    </Metas>
+                {% endfor %}
+            </List>
+        {% endfor %}
+    </Lists>
+</ListEsResult>

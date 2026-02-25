@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ListAllMyBucketsResult>
+  <Owner>
+    <ID>{{ id }}</ID>
+    <DisplayName>{{ displayname }}</DisplayName>
+  </Owner>
+  <Buckets>
+    {% for bucket in buckets %}
+    <Bucket>
+        <Name>{{ bucket.name }}</Name>
+        <CreationDate>{{ bucket.date }}</CreationDate>
+    </Bucket>
+    {% endfor %}
+  </Buckets>
+</ListAllMyBucketsResult>

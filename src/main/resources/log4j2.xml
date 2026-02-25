@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" monitorInterval="0">
+    <properties>
+        <property name="LOG_HOME">/var/log/moss</property>
+        <property name="FILE_NAME">moss</property>
+        <property name="TAKE_OVER_FILE_NAME">moss_peer</property>
+        <property name="LOG_PATTERN">[%d{yyyy-MM-dd HH:mm:ss,SSS} %c{1}:%L][%p] %m%n</property>
+        <property name="REBUILD">rebuild</property>
+        <property name="NOTIFICATION">notification</property>
+    </properties>
+    <Appenders>
+        <Routing name="RollingFile">
+            <Script name="RoutingInit" language="JavaScript"><![CDATA[
+            "1".equals(java.lang.System.getProperty("com.macrosan.takeOver")) ? "takeover" : "normal";;]]>
+            </Script>
+            <Routes>
+                <Route key="normal">
+                    <RollingRandomAccessFile name="RollingFile-1" fileName="${LOG_HOME}/${FILE_NAME}.log"
+                                             filePattern="${LOG_HOME}/${FILE_NAME}.log.%i.gz">
+                        <PatternLayout pattern="${LOG_PATTERN}"/>
+                        <Policies>
+                            <SizeBasedTriggeringPolicy size="20 MB"/>
+                        </Policies>
+                        <DefaultRolloverStrategy max="20" fileIndex="1"/>
+                    </RollingRandomAccessFile>
+                </Route>
+                <Route key="takeover">
+                    <RollingRandomAccessFile name="RollingFile-2" fileName="${LOG_HOME}/${TAKE_OVER_FILE_NAME}.log"
+                                             filePattern="${LOG_HOME}/${TAKE_OVER_FILE_NAME}.log.%i.gz">
+                        <PatternLayout pattern="${LOG_PATTERN}"/>
+                        <Policies>
+                            <SizeBasedTriggeringPolicy size="20 MB"/>
+                        </Policies>
+                        <DefaultRolloverStrategy max="20" fileIndex="1"/>
+                    </RollingRandomAccessFile>
+                </Route>
+            </Routes>
+        </Routing>
+
+        <RollingRandomAccessFile name="RebuildFile" fileName="${LOG_HOME}/${REBUILD}.log"
+                                 filePattern="${LOG_HOME}/${REBUILD}.log.%i.gz" immediateFlush="false">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="20 MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="20" fileIndex="1"/>
+        </RollingRandomAccessFile>
+
+        <RollingRandomAccessFile name="Notification" fileName="${LOG_HOME}/${NOTIFICATION}.log"
+                                 filePattern="${LOG_HOME}/${NOTIFICATION}.log.%i.gz" immediateFlush="false">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="20 MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="20" fileIndex="1"/>
+        </RollingRandomAccessFile>
+
+        <DeleteObject name="DeleteObj">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+        </DeleteObject>
+    </Appenders>
+    <Loggers>
+        <Logger name="EventLogger" level="info" additivity="false" includeLocation="true">
+            <AppenderRef ref="RollingFile"/>
+        </Logger>
+        <Root level="info" additivity="false" includeLocation="true">
+            <AppenderRef ref="RollingFile"/>
+        </Root>
+        <logger name="io.lettuce.core.RedisClient" additivity="false" level="error" includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.RedisChannelHandler" additivity="false" level="error" includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.protocol.CommandHandler" additivity="false" level="error" includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.protocol.DefaultEndpoint" additivity="false" level="error" includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.protocol.RedisStateMachine" additivity="false" level="error"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.protocol.ConnectionWatchdog" additivity="false" level="error"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.lettuce.core.protocol.CommandEncoder" additivity="false" level="error"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="io.rsocket.FrameLogger" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="reactor.core.publisher.Operators" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="reactor.netty.resources.PooledConnectionProvider" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="reactor.netty.ReactorNetty" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="reactor.netty.channel.FluxReceive" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="reactor.netty.channel.BootstrapHandlers" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="org.quartz.core.QuartzSchedulerThread" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+        <logger name="org.apache.kafka" additivity="false" level="info"
+                includeLocation="true">
+            <appender-ref ref="Notification"/>
+        </logger>
+        <logger name="com.rabbitmq.client.impl.ForgivingExceptionHandler" additivity="false" level="error"
+                includeLocation="true">
+            <appender-ref ref="RollingFile"/>
+        </logger>
+
+        <logger name="RebuildLog" level="all" additivity="false" includeLocation="true">
+            <appender-ref ref="RebuildFile"/>
+        </logger>
+
+        <Logger name="Notification" level="all" additivity="false" includeLocation="true">
+            <appender-ref ref="Notification"/>
+        </Logger>
+
+        <Logger name="DeleteObjLog" level="all" additivity="false" includeLocation="true">
+            <appender-ref ref="DeleteObj"/>
+        </Logger>
+    </Loggers>
+</Configuration>

@@ -1,0 +1,228 @@
+BucketService-listBuckets                            = GET/
+BucketService-putBucket                              = PUT/bucket/
+BucketService-deleteBucket                           = DELETE/bucket/
+BucketService-putBucketAcl                           = PUT/bucket/?acl
+BucketService-getBucketAcl                           = GET/bucket/?acl
+BucketService-headBucket                             = HEAD/bucket/
+BucketService-putBucketQuota                         = PUT/bucket/?quota
+BucketService-getBucketQuota                         = GET/bucket/?quota
+BucketService-putBucketObjectsQuota                  = PUT/bucket/?objects-quota
+BucketService-getBucketObjectsQuota                  = GET/bucket/?objects-quota
+BucketService-putBucketVersioning                    = PUT/bucket/?versioning
+BucketService-getBucketVersioning                    = GET/bucket/?versioning
+BucketService-putBucketReferer                       = PUT/bucket/?referer
+BucketService-getBucketReferer                       = GET/bucket/?referer
+BucketService-putBucketClearConfiguration             = PUT/bucket/?clear
+BucketService-getBucketClearConfiguration             = GET/bucket/?clear
+BucketService-deleteBucketClearConfiguration          = DELETE/bucket/?clear
+BucketService-putBucketCors                          = PUT/bucket/?cors
+BucketService-getBucketCors                          = GET/bucket/?cors
+BucketService-deleteBucketCors                       = DELETE/bucket/?cors
+BucketService-putBucketTagging                       = PUT/bucket/?tagging
+BucketService-getBucketTagging                       = GET/bucket/?tagging
+BucketService-deleteBucketTagging                    = DELETE/bucket/?tagging
+BucketPolicyService-putBucketPolicy                  = PUT/bucket/?policy
+BucketPolicyService-getBucketPolicy                  = GET/bucket/?policy
+BucketPolicyService-deleteBucketPolicy               = DELETE/bucket/?policy
+EsService-metaDataSearch                             = GET/bucket/?metaDataSearch
+EsService-metaDataSearchObject                       = GET/bucket/object/?metaDataSearch
+EsService-metaDataSearchVersion                      = GET/bucket/?metaDataSearch&versionId
+BucketService-getMetadata                            = GET/bucket/?metadata
+BucketService-putMetadataAnalysisSwitch              = PUT/bucket/?putMetadataAnalysisSwitch
+BucketService-getBucketDataSynchronizationSwitch     = GET/bucket/?datasynchronization
+CapacityService-getSysCapacityInfo                   = GET/?syscapinfo
+PerformanceService-getPerformanceQuota               = GET/?account-name&performancequota
+PerformanceService-putPerformanceQuota               = PUT/?account-name&performancequota&quota&type
+PerformanceService-getBucketPerfQuota                = GET/bucket/?performancequota
+PerformanceService-putBucketPerfQuota                = PUT/bucket/?performancequota&quota&type
+PerformanceService-getSysPerformanceQuota            = GET/?performancequota
+PerformanceService-putSysPerformanceQuota            = PUT/?performancequota&quota&type
+BucketLifecycleService-putBucketLifecycle            = PUT/bucket/?lifecycle
+BucketLifecycleService-getBucketLifecycle            = GET/bucket/?lifecycle
+BucketLifecycleService-deleteBucketLifecycle         = DELETE/bucket/?lifecycle
+BucketLifecycleService-putBucketBackup               = PUT/bucket/?backup
+BucketLifecycleService-getBucketBackup               = GET/bucket/?backup
+BucketLifecycleService-deleteBucketBackup            = DELETE/bucket/?backup
+ObjectLockService-putObjectLockConfiguration         = PUT/bucket/?object-lock
+ObjectLockService-getObjectLockConfiguration         = GET/bucket/?object-lock
+BucketInventoryService-putBucketInventory            = PUT/bucket/?id&inventory
+BucketInventoryService-getBucketInventory            = GET/bucket/?id&inventory
+BucketInventoryService-deleteBucketInventory         = DELETE/bucket/?id&inventory
+BucketInventoryService-listBucketInventory           = GET/bucket/?continuation-token&inventory
+BucketInventoryService-listBucketInventory           = GET/bucket/?inventory
+BucketEncryptionService-putBucketEncryption          = PUT/bucket/?encryption
+BucketEncryptionService-getBucketEncryption          = GET/bucket/?encryption
+BucketEncryptionService-deleteBucketEncryption       = DELETE/bucket/?encryption
+
+
+AccountService-createAccount                   = PUT/?createaccount
+AccountService-deleteAccount                   = DELETE/?deleteaccount
+AccountService-putCapacityQuota                = PUT/?accountcapacityquota
+AccountService-getCapacityQuota                = GET/?accountcapacityquota
+AccountService-putAccountObjectsQuota          = PUT/?accountobjectsquota
+AccountService-getAccountObjectsQuota          = GET/?accountobjectsquota
+AccountService-updateAccount                   = PUT/?updateaccount
+AccountService-listAccounts                    = GET/?listaccounts
+AccountService-getAccount                      = GET/?getaccount
+AccountService-getAccountInfo                  = GET/?accountinfo
+AccountService-resetAccountPasswd              = PUT/?resetaccountpassword
+AccessKeyService-createAccountAccessKey        = PUT/?createaccountaccesskey
+AccessKeyService-createAdminAccessKey          = PUT/?createadminaccesskey
+AccessKeyService-deleteAccountAccessKey        = DELETE/?deleteaccountaccesskey
+AccessKeyService-deleteAdminAccessKey          = DELETE/?deleteadminaccesskey
+UserService-createUser                         = PUT/?createuser
+UserService-deleteUser                         = DELETE/?deleteuser
+UserService-updateUser                         = PUT/?updateuser
+UserService-updateUserPasswd                   = PUT/?updateuserpasswd
+UserService-listUsers                          = GET/?listusers
+UserService-getUser                            = GET/?getuser
+AccessKeyService-createAccessKey               = PUT/?createaccesskey
+AccessKeyService-deleteAccessKey               = DELETE/?deleteaccesskey
+AccessKeyService-listAccessKeys                = GET/?listaccesskeys
+AccessKeyService-listAccountAccessKeys         = GET/?listaccountaccesskeys
+GroupService-createGroup                       = PUT/?creategroup
+GroupService-deleteGroup                       = DELETE/?deletegroup
+GroupService-updateGroup                       = PUT/?updategroup
+GroupService-listGroups                        = GET/?listgroups
+GroupService-getGroup                          = GET/?getgroup
+GroupService-addUsersToGroups                  = PUT/?adduserstogroups
+GroupService-removeUserFromGroup               = DELETE/?removeuserfromgroup
+GroupService-listUsersForGroup                 = GET/?listusersforgroup
+GroupService-listGroupsForUser                 = GET/?listgroupsforuser
+PolicyService-createPolicy                     = PUT/?createpolicy
+PolicyService-deletePolicy                     = DELETE/?deletepolicy
+PolicyService-updatePolicy                     = PUT/?updatepolicy
+PolicyService-listPolicies                     = GET/?listpolicies
+PolicyService-getPolicy                        = GET/?getpolicy
+PolicyService-listEntitiesForPolicy            = GET/?listentitiesforpolicy
+PolicyService-attachUserPolicy                 = PUT/?attachuserpolicy
+PolicyService-attachEntitiesPolicy             = PUT/?attachentitiespolicy
+PolicyService-detachUserPolicy                 = DELETE/?detachuserpolicy
+PolicyService-listUserPolicies                 = GET/?listuserpolicies
+PolicyService-attachGroupPolicy                = PUT/?attachgrouppolicy
+PolicyService-detachGroupPolicy                = DELETE/?detachgrouppolicy
+PolicyService-listGroupPolicies                = GET/?listgrouppolicies
+PolicyService-listAuths                        = GET/?listauths
+PerformanceService-getPerformanceQuota         = GET/?account-name&performancequota
+PerformanceService-putPerformanceQuota         = PUT/?account-name&performancequota&quota&type
+PerformanceService-getBucketPerfQuota          = GET/bucket/?performancequota
+PerformanceService-putBucketPerfQuota          = PUT/bucket/?performancequota&quota&type
+PerformanceService-putQosLimitStrategy         = PUT/?qoslimitstrategy
+PerformanceService-getQosLimitStrategy         = GET/?qoslimitstrategy
+PerformanceService-deleteQosLimitStrategy      = DELETE/?qoslimitstrategy
+BackUpService-postBackupInfo                   = POST/?backupInfo
+
+RegionsService-getBucketLocation               = GET/bucket/?location
+RegionsService-multiRegionInfo                 = POST/?multiRegionInfo
+RegionsService-getLocation                     = GET/?locationInfo
+
+BucketLogService-putBucketLog                  = PUT/bucket/?logging
+BucketLogService-getBucketLog                  = GET/bucket/?logging
+
+BucketNotificationService-putBucketNotification = PUT/bucket/?notification
+BucketNotificationService-getBucketNotification = GET/bucket/?notification
+BucketNotificationService-getTopic = GET/?notification&type
+BucketNotificationService-deleteBucketNotification = DELETE/bucket/?notification
+
+BucketTrashService-putBucketTrash = PUT/bucket/?trash
+BucketTrashService-getBucketTrash = GET/bucket/?trash
+BucketTrashService-deleteBucketTrash = DELETE/bucket/?trash
+
+BucketService-getClusterName                    =GET/bucket/?clustername
+
+ComponentStrategyService-putComponentStrategy      =PUT/?componentStrategy&strategyName
+ComponentStrategyService-listComponentStrategies   =GET/?componentStrategies
+ComponentStrategyService-getComponentStrategy      =GET/?componentStrategy&strategyName
+ComponentStrategyService-deleteComponentStrategy   =DELETE/?componentStrategy&strategyName
+
+ComponentTaskService-putComponentTask          =PUT/?componentTask&strategyName&taskName
+ComponentTaskService-listComponentTasks        =GET/?componentTasks
+ComponentTaskService-getComponentTask          =GET/?componentTask&taskName
+ComponentTaskService-deleteComponentTask       =DELETE/?componentTask&taskName
+
+ObjectCheckService-putObjectCheck =PUT/?objectCheck
+ObjectCheckService-getObjectCheck =GET/?objectCheck
+
+GetTokenService-getToken =POST///
+
+FSPerformanceService-getBucketFSPerformanceQuota            = GET/bucket/?fsperformancequota
+FSPerformanceService-putBucketFSPerformanceQuota            = PUT/bucket/?fsperformancequota&quota&type
+FSPerformanceService-getBucketAddress                       = GET/bucket/?fsaddressperformancequota
+FSPerformanceService-getBucketAddressPerformanceQuota       = GET/bucket/?address&fsaddressperformancequota
+FSPerformanceService-putBucketAddressPerformanceQuota       = PUT/bucket/?address&fsaddressperformancequota&quota&type
+FSPerformanceService-putBucketMultipleFSPerformanceQuota    = POST/bucket/?fsperformancequota
+
+SyncSignService-getAWSSigns                              = GET/bucket/?getAWSSigns
+SyncSignService-setAWSSign                               = PUT/bucket/?dstIndex&setAWSSign&signType&srcIndex
+SyncSignService-deleteAWSSign                            = DELETE/bucket/?deleteAWSSign&dstIndex&srcIndex
+
+# Aws Iam Sdk
+IamUserService-createUser = POST/?Action=CreateUser
+IamUserService-listUsers = POST/?Action=ListUsers
+IamUserService-getUser = POST/?Action=GetUser
+IamUserService-deleteUser = POST/?Action=DeleteUser
+IamUserService-updateUser = POST/?Action=UpdateUser
+
+IamLoginProfileService-createLoginProfile = POST/?Action=CreateLoginProfile
+IamLoginProfileService-deleteLoginProfile = POST/?Action=DeleteLoginProfile
+IamLoginProfileService-getLoginProfile = POST/?Action=GetLoginProfile
+IamLoginProfileService-updateLoginProfile = POST/?Action=UpdateLoginProfile
+IamLoginProfileService-changePassword = POST/?Action=ChangePassword
+
+IamAccessKeyService-listAccessKeys = POST/?Action=ListAccessKeys
+IamAccessKeyService-createAccessKey = POST/?Action=CreateAccessKey
+IamAccessKeyService-deleteAccessKey = POST/?Action=DeleteAccessKey
+
+IamGroupService-createGroup = POST/?Action=CreateGroup
+IamGroupService-deleteGroup = POST/?Action=DeleteGroup
+IamGroupService-listGroups = POST/?Action=ListGroups
+IamGroupService-getGroup = POST/?Action=GetGroup
+IamGroupService-addUserToGroup = POST/?Action=AddUserToGroup
+IamGroupService-removeUserFromGroup = POST/?Action=RemoveUserFromGroup
+IamGroupService-listGroupsForUser = POST/?Action=ListGroupsForUser
+
+IamPolicyService-createPolicy = POST/?Action=CreatePolicy
+IamPolicyService-deletePolicy = POST/?Action=DeletePolicy
+IamPolicyService-listPolicies = POST/?Action=ListPolicies
+IamPolicyService-getPolicy = POST/?Action=GetPolicy
+IamPolicyService-attachUserPolicy = POST/?Action=AttachUserPolicy
+IamPolicyService-detachUserPolicy = POST/?Action=DetachUserPolicy
+IamPolicyService-listAttachedUserPolicies = POST/?Action=ListAttachedUserPolicies
+IamPolicyService-attachGroupPolicy = POST/?Action=AttachGroupPolicy
+IamPolicyService-detachGroupPolicy = POST/?Action=DetachGroupPolicy
+IamPolicyService-listAttachedGroupPolicies = POST/?Action=ListAttachedGroupPolicies
+IamPolicyService-listEntitiesForPolicy = POST/?Action=ListEntitiesForPolicy
+IamPolicyService-updatePolicy = POST/?Action=CreatePolicyVersion
+RoleService-assumeRole = POST/?Action=AssumeRole
+RoleService-createRole = POST/?Action=CreateRole
+RoleService-deleteRole = POST/?Action=DeleteRole
+RoleService-getRole = POST/?Action=GetRole
+RoleService-updateRole = POST/?Action=UpdateRole
+RoleService-listRoles = POST/?Action=ListRoles
+RoleService-attachRolePolicy = POST/?Action=AttachRolePolicy
+RoleService-detachRolePolicy = POST/?Action=DetachRolePolicy
+RoleService-deleteRolePolicy = POST/?Action=DeleteRolePolicy
+RoleService-getRolePolicy = POST/?Action=GetRolePolicy
+RoleService-putRolePolicy = POST/?Action=PutRolePolicy
+RoleService-listRolePolicies = POST/?Action=ListRolePolicies
+RoleService-updateAssumeRolePolicy = POST/?Action=UpdateAssumeRolePolicy
+RoleService-listAttachedRolePolicies = POST/?Action=ListAttachedRolePolicies
+RoleService-updateRoleDescription = POST/?Action=UpdateRoleDescription
+
+ComponentErrorService-listTaskComponentErrors = GET/?componentErrors&taskName
+ComponentErrorService-deleteTaskComponentErrors = POST/?componentErrors&taskName
+
+ComponentErrorService-listBucketComponentErrors = GET/bucket/?componentErrors
+ComponentErrorService-deleteBucketComponentErrors = POST/bucket/?componentErrors
+
+BucketSnapshotService-postBucketSnapshot = POST/bucket/?snapshot
+BucketSnapshotService-putBucketSnapshot = PUT/bucket/?snapshot
+BucketSnapshotService-getBucketSnapshot = GET/bucket/?snapshot
+BucketSnapshotService-deleteBucketSnapshot = DELETE/bucket/?snapshot
+FsQuotaService-putFsDirQuotaInfo = PUT/bucket/?PutFsDirQuotaInfo
+FsQuotaService-putFsUserQuotaInfo = PUT/bucket/?PutFsUserQuotaInfo
+FsQuotaService-putFsGroupQuotaInfo = PUT/bucket/?PutFsGroupQuotaInfo
+FsQuotaService-delFsQuotaInfo = DELETE/bucket/?DelFsQuotaInfo
+
+CacheFlushConfigService-putCacheFlushConfig = PUT/?cacheFlushConfig
+CacheFlushConfigService-getCacheFlushConfig = GET/?cacheFlushConfig

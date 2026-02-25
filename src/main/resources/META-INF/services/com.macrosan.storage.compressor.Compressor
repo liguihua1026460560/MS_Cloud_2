@@ -1,0 +1,3 @@
+com.macrosan.storage.compressor.impl.SnappyCompressor
+com.macrosan.storage.compressor.impl.ZstdCompressor
+com.macrosan.storage.compressor.impl.ZlibCompressor

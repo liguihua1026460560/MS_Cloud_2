@@ -1,0 +1,27 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ListPartsResult>
+  <Bucket>{{ res.bucket }}</Bucket>
+  <Key>{{ res.key }}</Key>
+  <UploadId>{{ res.uploadId }}</UploadId>
+  <Initiator>
+    <ID>{{ res.id }}</ID>
+    <DisplayName>{{ res.displayName }}</DisplayName>
+  </Initiator>
+  <Owner>
+    <ID>{{ res.id }}</ID>
+    <DisplayName>{{ res.displayName }}</DisplayName>
+  </Owner>
+  <!--MOSS 暂不支持 <StorageClass>STANDARD</StorageClass>-->
+  <PartNumberMarker>{{ res.partNumberMarker }}</PartNumberMarker>
+  <NextPartNumberMarker>{{ res.nextPartNumberMarker }}</NextPartNumberMarker>
+  <MaxParts>{{ res.maxParts }}</MaxParts>
+  <IsTruncated>{{ res.truncated|lower }}</IsTruncated>
+  {% for part in res.partList %}
+  <Part>
+    <PartNumber>{{ part.partNumber }}</PartNumber>
+    <LastModified>{{ part.lastModified }}</LastModified>
+    <ETag>{{ part.Etag }}</ETag>
+    <Size>{{ part.partSize }}</Size>
+  </Part>
+  {% endfor %}
+</ListPartsResult>

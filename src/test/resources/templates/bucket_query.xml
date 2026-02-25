@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<ListBucketResult>
+  <Name>{{ bucket_query.bucket }}</Name>
+  <Prefix>{{ bucket_query.prefix }}</Prefix>
+  <Marker>{{ bucket_query.marker }}</Marker>
+  <NextMarker>{{ bucket_query.nextMarker }}</NextMarker>
+  <MaxKeys>{{ bucket_query.maxKeys }}</MaxKeys>
+  <IsTruncated>{{ bucket_query.truncated }}</IsTruncated>
+  <Delimiter>{{ bucket_query.delimiter }}</Delimiter>
+  {% for s3_item in bucket_query.contents %}
+  <Contents>
+    <Key>{{ s3_item.key }}</Key>
+    <LastModified>{{ s3_item.lastModified }}</LastModified>
+    <ETag>&quot;{{ s3_item.etag }}&quot;</ETag>
+    <Size>{{ s3_item.size }}</Size>
+    <!--MOSS <StorageClass>STANDARD</StorageClass>-->
+    <Owner>
+      <ID>{{ s3_item.id }}</ID>
+      <DisplayName>{{ s3_item.displayName }}</DisplayName>
+    </Owner>
+  </Contents>
+  {% endfor %}
+  {% for s3_dir in bucket_query.commonPrefixes %}
+  <CommonPrefixes>
+      <Prefix>{{ s3_dir }}</Prefix>
+  </CommonPrefixes>
+  {% endfor %}
+</ListBucketResult>

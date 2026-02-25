@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Grant>
+    <Grantee
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser">
+        <ID>test</ID>
+        <DisplayName>test</DisplayName>
+    </Grantee>
+    <Permission>test</Permission>
+</Grant>

@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Error>
+  <Code>{{ code }}</Code>
+  <Message>{{ message }}</Message>
+  <Resource>{{ resource }}</Resource>
+  <HostId>{{ hostid }}</HostId>
+  <RequestId>{{ requestid }}</RequestId>
+</Error>
