@@ -134,6 +134,11 @@ public class FileMetaSerializer extends JsonSerializer<FileMeta> {
             gen.writeFieldName("flushStamp");
             MsStringJson.serialize0(flushStamp, gen, serializers);
         }
+        String lastAccessStamp = value.getLastAccessStamp();
+        if (lastAccessStamp != null) {
+            gen.writeFieldName("lastAccessStamp");
+            MsStringJson.serialize0(lastAccessStamp, gen, serializers);
+        }
         gen.writeEndObject();
     }
 }

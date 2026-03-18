@@ -1076,8 +1076,8 @@ public class AddClusterHandler {
                                 // 列出的对象名不超过该stamp生成的rocksKey前缀
                                 .put("stamp", stampMarker)
                                 .put("retryTimes", "0")
-                                .put("beginPrefix", beginPrefix);
-                        reqMsg.put("beginPrefix", beginPrefix);
+                                .put("beginPrefix", beginPrefix)
+                                .put("syncHis", "1");
                         metaPool.mapToNodeInfo(bucketVnode)
                                 .publishOn(SCAN_SCHEDULER)
                                 .flatMap(infoList -> {

@@ -321,12 +321,13 @@ public class RebuildCache {
                 String crypto = task.map.get("crypto");
                 String secretKey = task.map.get("secretKey");
                 String flushStamp = task.map.get("flushStamp");
+                String lastAccessStamp = task.map.get("lastAccessStamp");
                 taskRes = Mono.just(fileName.contains("#"))
                         .flatMap(isCopyObjFileMeta -> {
                             if (isCopyObjFileMeta) {
-                                return runningTask.task.copyObjectFileRebuilder.rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, 0);
+                                return runningTask.task.copyObjectFileRebuilder.rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, 0);
                             } else {
-                                return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp);
+                                return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp);
                             }
                         })
                         .doOnNext(b -> {
@@ -498,7 +499,7 @@ public class RebuildCache {
             }
             return true;
         } else {
-            return RebuildRateLimiter.getInstance().tryAcquire(runningTask.task.disk);
+            return RebuildRateLimiter.getInstance().tryAcquire();
         }
     }
 }

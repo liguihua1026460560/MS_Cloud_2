@@ -8,6 +8,7 @@ import com.macrosan.component.pojo.ComponentStrategy;
 import com.macrosan.component.utils.ParamsUtils;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.ec.ErasureClient;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.MetaData;
@@ -36,10 +37,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
+import static com.macrosan.component.ComponentStarter.DICOM_SUPPORT_DESTINATION;
 import static com.macrosan.component.ComponentStarter.MAX_IMAGE_SIZE;
 import static com.macrosan.component.pojo.ComponentRecord.ERROR_COMPONENT_RECORD;
 import static com.macrosan.component.pojo.ComponentRecord.NOT_FOUND_COMPONENT_RECORD;
-import static com.macrosan.component.pojo.ComponentRecord.Type.VIDEO;
 import static com.macrosan.constants.ErrorNo.TARGET_BUCKET_NOT_EXISTS;
 import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
 import static com.macrosan.constants.ServerConstants.*;
@@ -86,7 +87,9 @@ public class ComponentService extends BaseService {
         if (StringUtils.isEmpty(contentLength) || Integer.parseInt(contentLength) == 0) {
             throw new MsException(ErrorNo.MISSING_CONTENT_LENGTH, "put object component error, no content-length param");
         }
-
+        if (CheckUtils.bucketFsCheck(bucket)) {
+            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not add objectComponentStrategy");
+        }
         MultiMap paramMap = request.params();
         //  判断源对象是否存在
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
@@ -179,14 +182,28 @@ public class ComponentService extends BaseService {
         for (String processItem : processArray) {
             ParamsUtils.getParams(processType, processItem).checkParams();
         }
-        //判断destination是否为/开头或结尾
-        if (!StringUtils.isEmpty(destination) && (destination.startsWith("/") || destination.endsWith("/"))) {
-            throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "invalid component param");
+        if (ComponentRecord.Type.DICOM.equals(type) && !DICOM_SUPPORT_DESTINATION) {
+            // 影像压缩策略，不支持删源和目标位置
+            if (StringUtils.isNotEmpty(destination) || deleteSource) {
+                throw new MsException(ErrorNo.NOT_SUPPORTED_COMPONENT_PARAM, "not supported component param");
+            }
+        } else {
+            //判断destination是否为/开头或结尾
+            if (!StringUtils.isEmpty(destination) && (destination.startsWith("/") || destination.endsWith("/"))) {
+                throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "invalid component param");
+            }
+            // 判断和删源是覆盖否冲突
+            if (type == ComponentRecord.Type.IMAGE && StringUtils.isBlank(destination) && deleteSource) {
+                throw new MsException(ErrorNo.DELETE_SOURCE_CONFLICT, "destination is empty, delete source conflict");
+            }
         }
-        // 判断和删源是覆盖否冲突
-        if (type == ComponentRecord.Type.IMAGE && StringUtils.isBlank(destination) && deleteSource) {
-            throw new MsException(ErrorNo.DELETE_SOURCE_CONFLICT, "destination is empty, delete source conflict");
+
+        if (ComponentUtils.hasCompressed(metaData, type)) {
+            // 已经处理过，直接返回
+            res.onNext(true);
+            return;
         }
+
         // 格式校验
         if (!ComponentUtils.isSupportFormat(metaData.getKey(), type)) {
             throw new MsException(ErrorNo.IMAGE_FORMAT_NOT_SUPPORTED, "image format not supported");

@@ -1,6 +1,7 @@
 package com.macrosan.storage.client;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.macrosan.doubleActive.DataSynChecker;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.ErasureServer.PayloadMetaType;
 import com.macrosan.filesystem.utils.timeout.FastMonoTimeOut;
@@ -32,9 +33,11 @@ import java.util.concurrent.TimeoutException;
 
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.filesystem.cache.Vnode.INODE_HEART_DOWN_ERROR;
+import static com.macrosan.httpserver.MossHttpClient.LOCAL_NODE_IP;
 import static com.macrosan.message.jsonmsg.Inode.HEART_DOWN_INODE;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
+import static com.macrosan.rsocket.server.Rsocket.DA_RSOCKET_PORT;
 
 /**
  * @author gaozhiyuan
@@ -124,6 +127,7 @@ public class ClientTemplate {
         fastSocketMap.put(PUT_OBJECT_META.ordinal(), PUT_OBJECT_META);
         fastSocketMap.put(WRITE_CACHE.ordinal(), WRITE_CACHE);
         fastSocketMap.put(FLUSH_WRITE_CACHE.ordinal(), FLUSH_WRITE_CACHE);
+        fastSocketMap.put(FILE_ASYNC.ordinal(), FILE_ASYNC);
         FAST_SOCKET_MAP = ImmutableIntObjectMapFactoryImpl.INSTANCE.ofAll(fastSocketMap);
     }
 
@@ -138,6 +142,10 @@ public class ClientTemplate {
                 || LIST_VNODE_OBJ.equals(msgType)) {
             timeout = Duration.ofMinutes(5);
         }
+        int port = BACK_END_PORT;
+        if (msgType.equals(FILE_ASYNC)) {
+            port = DA_RSOCKET_PORT;
+        }
 
         for (int i = 0; i < nodeList.size(); i++) {
             int index = i;
@@ -149,19 +157,24 @@ public class ClientTemplate {
             errorRes[0].var3 = null;
 
             Payload payload;
-            if (CURRENT_IP.equalsIgnoreCase(tuple.var1) && FAST_SOCKET_MAP.containsKey(msgType.ordinal())) {
+            boolean islocal = CURRENT_IP.equalsIgnoreCase(tuple.var1) || LOCAL_NODE_IP.equalsIgnoreCase(tuple.var1);
+            if (islocal && FAST_SOCKET_MAP.containsKey(msgType.ordinal())) {
                 payload = new LocalPayload<>(msgType, msgs.get(index));
             } else {
                 ByteBuf buf = FAST_SOCKET_MAP.containsKey(msgType.ordinal()) ? msgs.get(i).toBytes() : Unpooled.wrappedBuffer(Json.encode(msgs.get(i)).getBytes());
                 payload = DefaultPayload.create(buf, Unpooled.wrappedBuffer(msgType.name().getBytes()));
             }
 
-            Mono<Tuple3<Integer, PayloadMetaType, T>> response = RSocketClient.getRSocket(tuple.var1, BACK_END_PORT)
+            Mono<Tuple3<Integer, PayloadMetaType, T>> response = RSocketClient.getRSocket(tuple.var1, port)
                     .flatMap(rSocket -> rSocket.requestResponse(payload))
                     .map(p -> mapFunction.apply(index, p));
 
+            int finalPort = port;
             response = FastMonoTimeOut.fastTimeout(response, timeout)
                     .doOnError(e -> {
+                        if (DataSynChecker.isDebug && finalPort == DA_RSOCKET_PORT) {
+                            log.error("FILE_ASYNC error, ip {}", tuple.var1, e);
+                        }
                         if (!(e instanceof EscapeException)) {
                             if (e instanceof TimeoutException || "closed connection".equals(e.getMessage())
                                     || (e.getMessage() != null && e.getMessage().startsWith("No keep-alive acks for"))) {
@@ -242,15 +255,26 @@ public class ClientTemplate {
 
     public static <T> ResponseInfo<T> multiResponse(List<? extends Flux<Payload>> payloads, Class<T> responseClass,
                                                     List<Tuple3<String, String, String>> nodeList) {
+        return multiResponse(payloads, responseClass, nodeList, BACK_END_PORT);
+    }
+
+    public static <T> ResponseInfo<T> multiResponse(List<? extends Flux<Payload>> payloads, Class<T> responseClass,
+                                                    List<Tuple3<String, String, String>> nodeList, int port) {
         Flux<Tuple3<Integer, PayloadMetaType, T>> responses = Flux.empty();
         for (int i = 0; i < nodeList.size(); i++) {
             int index = i;
             Tuple3<String, String, String> tuple = nodeList.get(i);
 
-            Flux<Tuple3<Integer, PayloadMetaType, T>> response = RSocketClient.getRSocket(tuple.var1, BACK_END_PORT)
+            Flux<Tuple3<Integer, PayloadMetaType, T>> response = RSocketClient.getRSocket(tuple.var1, port)
                     .flatMapMany(rSocket -> rSocket.requestChannel(payloads.get(index)))
                     .map(p -> mapPayloadToTuple(index, p, responseClass))
-                    .doOnError(e -> log.debug("", e))
+                    .doOnError(e -> {
+                        if (port == DA_RSOCKET_PORT && DataSynChecker.isDebug) {
+                            log.info("", e);
+                        } else {
+                            log.debug("", e);
+                        }
+                    })
                     .onErrorReturn(new Tuple3<>(index, ERROR, null));
 
             responses = responses.mergeWith(response);

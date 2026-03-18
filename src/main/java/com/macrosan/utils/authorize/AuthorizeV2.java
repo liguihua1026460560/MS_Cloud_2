@@ -81,7 +81,7 @@ public class AuthorizeV2 extends Authorize {
                         if (!request.headers().contains(COMPONENT_USER_ID)) {
                             return findSecretAccessKeyByIam(request, sign, accessKey);
                         } else {
-                            return  findComponentSecretAccessKey(request, accessKey);
+                            return findComponentSecretAccessKey(request, accessKey);
                         }
                     } else {
                         return Mono.just(secretKeyMap);
@@ -165,11 +165,13 @@ public class AuthorizeV2 extends Authorize {
      * @return sign 字节
      */
     public static byte[] buildSign(MsHttpRequest request) {
-        StringBuilder builder = new StringBuilder(256);
-        MultiMap headMap = request.headers();
+        return buildSign(request.getUri(), request.method().name(), request.getCodec(), request.headers(), request.params());
+    }
 
+    public static byte[] buildSign(String uri, String method, String codec, MultiMap headMap, MultiMap paramMap) {
+        StringBuilder builder = new StringBuilder(256);
         /* 取出Content—MD5，Content-Type以及Date，并且加上换行符 */
-        builder.append(request.method().name()).append(LINE_BREAKER)
+        builder.append(method).append(LINE_BREAKER)
                 .append(Optional.ofNullable(headMap.get(CONTENT_MD5)).orElse("")).append(LINE_BREAKER)
                 .append(Optional.ofNullable(headMap.get(CONTENT_TYPE)).orElse("")).append(LINE_BREAKER)
                 .append(Optional.ofNullable(headMap.get(DATE)).orElse("")).append(LINE_BREAKER);
@@ -196,28 +198,43 @@ public class AuthorizeV2 extends Authorize {
         }
 
         /* 取出查询参数，排序后连成字符串 */
-        String paramStr = request.params().entries().stream()
+        String paramStr = paramMap.entries().stream()
                 .filter(entry -> SIG_INCLUDE_PARAM_LIST.contains(entry.getKey().hashCode()))
                 .map(entry -> {
                     /* 不需要进行对其parameter值进行encode的参数，放在这个list中  */
                     if (NO_ENCODE_PARAM_LIST.contains(entry.getKey().hashCode())) {
                         return StringUtils.isBlank(entry.getValue()) ? entry.getKey() : entry.getKey() + EQUAL + entry.getValue();
                     } else {
-                        return StringUtils.isBlank(entry.getValue()) ? entry.getKey() : entry.getKey() + EQUAL + UrlEncoder.encode(entry.getValue(), request.getCodec());
+                        return StringUtils.isBlank(entry.getValue()) ? entry.getKey() : entry.getKey() + EQUAL + UrlEncoder.encode(entry.getValue(), codec);
                     }
                 })
                 .sorted().collect(Collectors.joining("&"));
 
         /* 获取之前计算的uri */
-        builder.append(request.getUri());
-
+        builder.append(uri);
         /* 如果查询参数不为空，就将uri和查询参数拼起来 */
         if (StringUtils.isNotBlank(paramStr)) {
             builder.append('?').append(paramStr);
         }
-
-
         return builder.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 获取v2签名请求头
+     * @return v2签名
+     */
+    public static String getAuthorizationHeader(String ak, String sk, String uri, String method, String codec, MultiMap headMap) {
+        Mac mac = getMac();
+        try {
+            SecretKeySpec secretKeySpec = new SecretKeySpec(sk.getBytes(), ALGORITHM_HMACSHA1);
+            mac.init(secretKeySpec);
+            byte[] bytes = buildSign(uri, method, codec, headMap, params(uri));
+            return "AWS " + ak + ":" + new String(Base64.encodeBase64(mac.doFinal(bytes)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            mac.reset();
+        }
     }
 
     /**

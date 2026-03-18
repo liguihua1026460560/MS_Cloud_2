@@ -43,11 +43,13 @@ public class WriteCacheClient {
         return existCacheSet.contains(smb2FileId);
     }
 
-    public static void clear(long id) {
+    public static void clear(long id, SMB2FileId.FileInfo fileInfo) {
         SMB2FileId smb2FileId = new SMB2FileId()
                 .setPersistent(id)
                 .setVolatile_(0);
-        existCacheSet.remove(smb2FileId);
+        if (existCacheSet.remove(smb2FileId) && fileInfo.openInode != null) {
+            Node.getInstance().flushWriteCache(fileInfo.openInode, 0, 0, 1).subscribe();
+        }
     }
 
     public static Mono<Boolean> cifsWrite(SMB2FileId smb2FileId, long offset, byte[] bytes, Inode inode, int flag, long allocationSize) {
@@ -160,6 +162,19 @@ public class WriteCacheClient {
         } else {
             return Mono.just(true);
         }
+    }
+
+    // END_OF_FILE使用
+    public static Mono<Boolean> flush(Inode inode, long offset, int count, long end, SMB2FileId smb2FileId) {
+        if (existCacheSet.remove(smb2FileId)) {
+            return Node.getInstance().flushWriteCache(inode, offset, count, end, 1);
+        } else {
+            return Mono.just(true);
+        }
+    }
+
+    public static Mono<Boolean> flush(Inode inode, long offset, int count) {
+        return Node.getInstance().flushWriteCache(inode, offset, count, 1);
     }
 
     public static Mono<Boolean> remove(Inode inode, long offset, int count, SMB2FileId smb2FileId) {

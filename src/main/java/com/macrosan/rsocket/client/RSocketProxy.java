@@ -3,6 +3,7 @@ package com.macrosan.rsocket.client;
 import com.macrosan.ServerStart;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.httpserver.MossHttpClient;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.rabbitmq.RabbitMqChannels;
 import com.macrosan.rsocket.server.Rsocket;
@@ -115,7 +116,7 @@ public class RSocketProxy implements RSocket {
     private boolean isReachable() {
         try {
             //本节点跳过检查
-            if (ServerConfig.getInstance().getHeartIp1().equals(ip)) {
+            if (ServerConfig.getInstance().getHeartIp1().equals(ip) || MossHttpClient.LOCAL_NODE_IP.equals(ip)) {
                 return true;
             }
 

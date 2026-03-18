@@ -41,7 +41,7 @@ public class TaskHandler {
     }
 
     public static Mono<Boolean> rebuildObjFile(StoragePool storagePool, String metaKey, String lun, String errorIndex, String fileName, String endIndex, String fileSize, String crypto, String secretKey,
-                                               List<Tuple3<String, String, String>> nodeList, String flushStamp) {
+                                               List<Tuple3<String, String, String>> nodeList, String flushStamp, String lastAccessStamp) {
         List<Integer> errorChunksList = Arrays.asList(Integer.parseInt(errorIndex));
         int i = Integer.parseInt(errorIndex);
         SocketReqMsg msg = new SocketReqMsg("", 0)
@@ -55,6 +55,9 @@ public class TaskHandler {
 
         if (flushStamp != null) {
             msg.put("flushStamp", flushStamp);
+        }
+        if (StringUtils.isNotEmpty(lastAccessStamp)) {
+            msg.put("lastAccessStamp", lastAccessStamp);
         }
         CryptoUtils.putCryptoInfoToMsg(crypto, secretKey, msg);
 

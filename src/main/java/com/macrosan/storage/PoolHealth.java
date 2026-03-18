@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -31,7 +32,7 @@ public class PoolHealth {
     public static Set<String> repairLun = new ConcurrentSkipListSet<>();
 
     public static Set<String> recoverLun = new ConcurrentSkipListSet<>();
-
+    public static Map<String, Integer> errorMap = new ConcurrentHashMap<>();
     public static Set<String> MSRocksDBErrorLun = new ConcurrentSkipListSet<>();
     public static Set<String> BatchRocksDBErrorLun = new ConcurrentSkipListSet<>();
     public static boolean isHealth(String lun, Set<String> toAddRepairLun, Set<String> toRemoveRepairLun, String node) {
@@ -57,7 +58,12 @@ public class PoolHealth {
             boolean health = MSRocksDB.getRocksDB(lun) != null && !MSRocksDB.errorLun.contains(lun) && !BatchRocksDB.errorLun.contains(lun);
             StoragePool pool = StoragePoolFactory.getStoragePoolByDisk(lun);
             //走到这里说明rocksdb打开没问题
-            RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_POOL_INDEX).srem("open_error_lun", fsName);
+            try {
+                RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_POOL_INDEX).srem("open_error_lun", fsName);
+                errorMap.remove(fsName);
+            } catch (Exception e) {
+                log.info("remove open_error_lun error {}", fsName);
+            }
             if (null == pool) {
                 log.info("getStoragePoolByDisk error {}", lun);
                 return health;
@@ -76,10 +82,11 @@ public class PoolHealth {
             return health;
         } catch (Exception e) {
             Boolean exist = RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_POOL_INDEX).sismember("open_error_lun", fsName);
-            if (!exist){
+            if (!exist && errorMap.getOrDefault(fsName,0) > 2){
                 RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_POOL_INDEX).sadd("error_lun", fsName);
                 RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_POOL_INDEX).sadd("open_error_lun", fsName);
             }
+            errorMap.put(fsName, errorMap.getOrDefault(fsName,0) + 1);
             return false;
         }
     }
@@ -189,7 +196,11 @@ public class PoolHealth {
             log.error("update pool health fail {}", pool.getVnodePrefix(), e);
         }
 
-        DISK_SCHEDULER.schedule(() -> updateHealth(pool), 30, TimeUnit.SECONDS);
+        if (pool.isStopHealthCheck()) {
+            log.info("pool is reload ,stop old health check {}", pool.getVnodePrefix());
+        } else {
+            DISK_SCHEDULER.schedule(() -> updateHealth(pool), 30, TimeUnit.SECONDS);
+        }
     }
 
     public static void checkErrorLun() {

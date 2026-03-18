@@ -16,7 +16,6 @@ import java.util.stream.Collectors;
 import static com.macrosan.constants.SysConstants.REDIS_BUCKETINFO_INDEX;
 import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 import static com.macrosan.filesystem.FsConstants.*;
-import static com.macrosan.filesystem.FsConstants.NFS4_LEASE_TIME;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.FSID_BUCKET;
 import static com.macrosan.filesystem.nfs.api.NFS4Proc.ROOT_INODE;
 import static com.macrosan.filesystem.nfs.call.v4.SetAttrV4Call.NFS4_SET_TO_CLIENT_TIME;
@@ -291,7 +290,7 @@ public class FAttr4 {
         }).sum();
         int mask2Len = mask2s.stream().mapToInt(mask2 -> mask2.len).sum();
         int mask3Len = mask3s.stream().mapToInt(mask3 -> mask3.len).sum();
-        return mask1Len + mask2Len + mask3Len;
+        return mask1Len + mask2Len + mask3Len + 8 + 4 * mask.length;
     }
 
     public void readStruct(ByteBuf buf, int offset) {

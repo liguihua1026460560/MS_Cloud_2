@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.macrosan.database.redis.IamRedisConnPool;
 import com.macrosan.database.redis.Redis6380ConnPool;
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.doubleActive.HeartBeatChecker;
 import com.macrosan.filesystem.FsConstants;
 import com.macrosan.filesystem.ReqInfo;
 import com.macrosan.filesystem.cifs.types.smb2.SID;
@@ -12,7 +13,9 @@ import com.macrosan.filesystem.nfs.RpcCallHeader;
 import com.macrosan.filesystem.nfs.auth.AuthUnix;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
 import com.macrosan.filesystem.utils.InodeUtils;
-import com.macrosan.message.jsonmsg.*;
+import com.macrosan.message.jsonmsg.FSIdentity;
+import com.macrosan.message.jsonmsg.Inode;
+import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.rabbitmq.RabbitMqUtils;
 import com.macrosan.rsocket.client.RSocketClient;
@@ -59,7 +62,7 @@ import static com.macrosan.filesystem.FsConstants.NFSACLType.*;
 import static com.macrosan.filesystem.FsConstants.ProtoFlag.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEFlag.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEType.*;
-import static com.macrosan.filesystem.FsConstants.SMB2ACEType.SYSTEM_SCOPED_POLICY_ID_ACE_TYPE;
+import static com.macrosan.filesystem.async.AsyncUtils.MOUNT_CLUSTER;
 import static com.macrosan.filesystem.nfs.reply.AccessReply.*;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
 
@@ -90,6 +93,7 @@ public class ACLUtils {
     public static boolean CIFS_ACL_START = false;
     public static int MAX_ID = 65533;
     public static int MIN_ID = 1000;
+    public static boolean notAllowInvalidSID = true;
 
     public static enum ProtoType {
         S3(0),
@@ -225,6 +229,9 @@ public class ACLUtils {
                 String maxIdStr = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).get("fs_max_id");
                 MAX_ID = Integer.parseInt(maxIdStr);
             }
+
+            String notAllowInvalid = pool.getCommand(REDIS_SYSINFO_INDEX).get("not_allow_invalid_sid");
+            notAllowInvalidSID = !"0".equals(notAllowInvalid);
         } catch (Exception e) {
             log.error("nfs acl start flag check error ", e);
         }
@@ -637,6 +644,43 @@ public class ACLUtils {
         return s3IDToGids.get(s3Id);
     }
 
+    /**
+     * @param opt 请求的操作
+     * @param identity 请求的身份(若访问旧版本数据可能经过权限提升)
+     * @param isIdtPromote 请求的身份是否经过了权限提升
+     * @param srcHeader 请求头
+     **/
+    public static RpcCallHeader createNfsHeader(int opt, FSIdentity identity, boolean isIdtPromote, RpcCallHeader srcHeader) {
+        RpcCallHeader reqHeader = new RpcCallHeader(null);
+        AuthUnix auth = new AuthUnix();
+        auth.flavor = 1;
+
+        auth.setUid(identity.getUid());
+        auth.setGid(identity.getGid());
+
+        if (isIdtPromote) {
+            //访问旧数据，账户权限提升的情况下不使用请求头中的gids
+            //s3进来的请求不会携带gid，应当把gid设置为reqID对应的gid；如果不存在组，按nfs的方式，把uid当成gid
+            Set<Integer> gids = s3IDToGids.get(identity.getS3Id());
+            if (gids == null) {
+                auth.setGidN(1);
+                auth.setGids(new int[]{identity.getGid()});
+            } else {
+                auth.setGidN(gids.size());
+                auth.setGids(gids.stream().mapToInt(Integer::intValue).toArray());
+            }
+        } else {
+            if (srcHeader.auth.flavor == 1) {
+                int[] gids = ((AuthUnix) (srcHeader.auth)).getGids();
+                auth.setGids(gids);
+            }
+        }
+
+        reqHeader.auth = auth;
+        reqHeader.opt = opt;
+        return reqHeader;
+    }
+
     public static RpcCallHeader createCallHeader(int opt, FSIdentity identity) {
         RpcCallHeader reqHeader = new RpcCallHeader(null);
         AuthUnix auth = new AuthUnix();
@@ -881,6 +925,44 @@ public class ACLUtils {
                 return proIdt;
             } else {
                 return identity;
+            }
+        }
+    }
+
+    /**
+     * 根据请求的s3Id获取用于判断权限的请求者身份，并根据inode是否为旧版本文对请求者身份进行权限的提升
+     *
+     * @param inode 待判断是否要提升请求者权限的 inode
+     * @return 返回一个经过权限提升的请求者身份
+     **/
+    public static Tuple2<FSIdentity, Boolean> getIdtAndJudgeByUidAndInode(Inode inode, RpcCallHeader callHeader) {
+        int[] uidAndGid = ACLUtils.getUidAndGid(callHeader);
+        int reqUid = uidAndGid[0];
+        int reqGid = uidAndGid[1];
+        FSIdentity identity = null;
+        if (!uidToS3ID.containsKey(reqUid)) {
+            identity = new FSIdentity(DEFAULT_USER_ID, reqUid, reqGid, FSIdentity.getUserSIDByUid(reqUid), FSIdentity.getGroupSIDByGid(reqGid));
+        } else {
+            //root账户对应的s3Id是"0"
+            String reqS3Id = ACLUtils.getS3IdByUid(reqUid);
+            identity = ACLUtils.userInfo.get(reqS3Id);
+        }
+
+        if (checkNewInode(inode)) {
+            //不需要进行权限的提升
+            return new Tuple2<>(identity, false);
+        } else {
+            //【宗旨】nfs权限开以后，nfs端如果uid没有配置moss账户，s3Owner的身份就应该是匿名，此时不允许访问其它uid或者已有
+            // moss账户创建的数据，但后续uid配置moss账户后，则可以访问之前没有配置uid时创建的数据
+            //【只要配置账户前后，uid或者s3Id有一个相等，则允许其继续访问】
+            //这样处理可能会导致，nfs端旧版本root创建的文件，能够在新版本配置uid之后，被桶拥有者对应的uid控制
+            if (isOldInodeOwner(inode, reqUid)) {
+                FSIdentity proIdt = identity.cloneIdentity();
+                proIdt.setUid(inode.getUid())
+                        .setUserSid(FSIdentity.getUserSIDByUid(inode.getUid()));
+                return new Tuple2<>(proIdt, true);
+            } else {
+                return new Tuple2<>(identity, false);
             }
         }
     }
@@ -1679,6 +1761,34 @@ public class ACLUtils {
         return mask;
     }
 
+    public static boolean checkSIDFormat(String sid) {
+        try {
+            if (StringUtils.isBlank(sid)) {
+                return false;
+            }
+
+            if (sid.startsWith(FSIdentity.USER_SID_PREFIX)) {
+                String uidStr = sid.substring(FSIdentity.USER_SID_PREFIX.length());
+                int uid = Integer.parseInt(uidStr);
+                if (uid >= 0) {
+                    return true;
+                }
+            } else if (sid.startsWith(FSIdentity.GROUP_SID_PREFIX)) {
+                String gidStr = sid.substring(FSIdentity.GROUP_SID_PREFIX.length());
+                int gid = Integer.parseInt(gidStr);
+                if (gid >= 0) {
+                    return true;
+                }
+            } else {
+                return false;
+            }
+        } catch (Exception e) {
+            log.error("sid: {} is invalid", sid);
+        }
+
+        return false;
+    }
+
     /**
      * 检查sid是否符合标准，在S-1-5-0或者S-1-5-1001 - S-1-5-65534之间，若不在则返 false
      * 且sid是否有对应存在的文件账户，若没有则返回 false
@@ -1750,6 +1860,11 @@ public class ACLUtils {
 
     public static int setFsProtoType(Map<String, String> bucketInfo) {
         if (null == bucketInfo || bucketInfo.isEmpty() || null == bucketInfo.get("fsid")) {
+            return 0;
+        }
+
+        if (HeartBeatChecker.isMultiAliveStarted && !"1".equals(bucketInfo.get(MOUNT_CLUSTER))) {
+            // 复制环境的文件如果不是挂在本地站点，客户端发送的原始请求、差异记录的同步请求将跳过acl校验。
             return 0;
         }
 

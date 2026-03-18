@@ -11,8 +11,8 @@ import com.macrosan.filesystem.nfs.reply.MountReply;
 import com.macrosan.filesystem.nfs.reply.NullReply;
 import com.macrosan.filesystem.nfs.types.FH2;
 import com.macrosan.filesystem.utils.CheckUtils;
-import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.filesystem.utils.FSIPACLUtils;
+import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.filesystem.utils.IpWhitelistUtils;
 import io.netty.buffer.ByteBuf;
 import io.vertx.reactivex.core.buffer.Buffer;
@@ -28,6 +28,7 @@ import java.util.Set;
 
 import static com.macrosan.constants.SysConstants.REDIS_BUCKETINFO_INDEX;
 import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
+import static com.macrosan.filesystem.async.AsyncUtils.MOUNT_CLUSTER;
 
 @Log4j2
 public class MountHandler extends RpcHandler {
@@ -136,6 +137,7 @@ public class MountHandler extends RpcHandler {
                                         return Mono.just(reply0);
                                     });
                         }
+                        RedisConnPool.getInstance().getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket, MOUNT_CLUSTER, "1");
                         log.info("mount {},client ip:{}", mountPoint[0],getClientIp());
                     } else {
                         reply0.status = FsConstants.NfsErrorNo.NFS3ERR_NOENT;

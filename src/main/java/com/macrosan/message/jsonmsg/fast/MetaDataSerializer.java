@@ -196,6 +196,11 @@ public class MetaDataSerializer extends JsonSerializer<MetaData> {
             gen.writeFieldName("aggSize");
             gen.writeNumber(aggSize);
         }
+        String lastAccessStamp = value.getLastAccessStamp();
+        if (lastAccessStamp != null) {
+            gen.writeFieldName("lastAccessStamp");
+            MsStringJson.serialize0(lastAccessStamp, gen, serializers);
+        }
 
         gen.writeEndObject();
     }

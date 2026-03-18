@@ -20,6 +20,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -37,11 +38,13 @@ public class FileOrDirRename {
     // 参考 com.macrosan.filesystem.cifs.api.smb2.SetInfo.rename 实现
     public static Mono<Boolean> rename(String bucket, long nodeId, String oldObj, String newObj, boolean canOverWrite, Session session) {
         ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
-        reqHeader.nfsHandler = new NFSHandler();
-
-        return RedLockClient.lock(reqHeader, oldObj, LockType.WRITE, true, true)
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
+                    reqHeader.bucketInfo = bktInfo;
+                    reqHeader.bucket = bucket;
+                    reqHeader.nfsHandler = new NFSHandler();
+                    return RedLockClient.lock(reqHeader, oldObj, LockType.WRITE, true, true);
+                })
                 .flatMap(lock -> {
                     session.lock = reqHeader.lock;
                     return nodeInstance.getInode(bucket, nodeId);
@@ -110,7 +113,7 @@ public class FileOrDirRename {
                                             });
                                     // 如果源是文件
                                 } else {
-                                    return renameFile(nodeId, newInode, oldObjName0[0], newObjName0[0], bucket, overWrite.get())
+                                    return renameFile(nodeId, newInode, oldObjName0[0], newObjName0[0], bucket, overWrite.get(), reqHeader.bucketInfo)
                                             .flatMap(i -> {
                                                 if (InodeUtils.isError(i) || i.isDeleteMark()) {
                                                     if (i.getLinkN() == ERROR_INODE.getLinkN()) {
@@ -146,7 +149,7 @@ public class FileOrDirRename {
     }
 
     public static Mono<Boolean> scanAndReName0(Inode oldInode, String bucket, String newObjName, String oldObjName, long offset, ReqInfo reqHeader) {
-        return scanAndReName(oldInode, bucket, newObjName, offset, reqHeader.nfsHandler)
+        return scanAndReName(oldInode, bucket, newObjName, offset, reqHeader.nfsHandler, reqHeader.bucketInfo)
                 .flatMap(inode -> {
                     if (InodeUtils.isError(inode)) {
                         log.info("rename {}->{} fail: {}", oldInode.getObjName(), newObjName, inode.getLinkN());
@@ -190,7 +193,7 @@ public class FileOrDirRename {
      * @param bucket     桶名
      * @param count      offset
      **/
-    public static Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler nfsHandler) {
+    public static Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler nfsHandler, Map<String, String> bucketInfo) {
         String prefix = dirInode.getObjName();
         AtomicLong offset = new AtomicLong(count);
         return ReadDirCache.listAndCache(bucket, prefix, offset.get(), 1 << 20, nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
@@ -210,10 +213,10 @@ public class FileOrDirRename {
                         if (!curNewName.endsWith("/")) {
                             curNewName = curNewName + "/";
                         }
-                        return scanAndReName(inode, bucket, curNewName, 0, nfsHandler);
+                        return scanAndReName(inode, bucket, curNewName, 0, nfsHandler, bucketInfo);
                     } else {
                         // 如果是文件则进行重命名
-                        return renameFile(inode.getNodeId(), null, curOldName, curNewName, bucket, false);
+                        return renameFile(inode.getNodeId(), null, curOldName, curNewName, bucket, false, bucketInfo);
                     }
                 })
                 .collectList()
@@ -222,17 +225,17 @@ public class FileOrDirRename {
                     return ReadDirCache.listAndCache(bucket, dirInode.getObjName(), offset.get(), 4096, nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
                             .flatMap(list0 -> {
                                 if (list0.isEmpty()) {
-                                    return renameFile(dirInode.getNodeId(), null, dirInode.getObjName(), newObjName, bucket, false);
+                                    return renameFile(dirInode.getNodeId(), null, dirInode.getObjName(), newObjName, bucket, false, bucketInfo);
                                 } else {
-                                    return scanAndReName(dirInode, bucket, newObjName, offset.get(), nfsHandler);
+                                    return scanAndReName(dirInode, bucket, newObjName, offset.get(), nfsHandler, bucketInfo);
                                 }
                             });
                 })
                 .onErrorReturn(ERROR_INODE);
     }
 
-    public static Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String bucket, boolean isOverWrite) {
-        boolean esSwitch = ES_ON.equals(NFSBucketInfo.getBucketInfo(bucket).get(ES_SWITCH));
+    public static Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String bucket, boolean isOverWrite, Map<String, String> bucketInfo) {
+        boolean esSwitch = ES_ON.equals(bucketInfo.get(ES_SWITCH));
         return Mono.just(isOverWrite)
                 .flatMap(b -> {
                     if (b) {

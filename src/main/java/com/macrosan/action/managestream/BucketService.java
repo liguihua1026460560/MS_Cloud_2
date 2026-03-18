@@ -14,6 +14,7 @@ import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.VersionUtil;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.filesystem.utils.IpWhitelistUtils;
 import com.macrosan.filesystem.utils.acl.ACLUtils;
@@ -343,7 +344,7 @@ public class BucketService extends BaseService {
         final boolean doubleFlag = paramMap.containsKey(DOUBLE_FLAG) && "1".equals(paramMap.get(DOUBLE_FLAG));
         paramMap.put("ctime", Long.toString(System.currentTimeMillis()));
 
-        checkCreateBucketParamWithFs(paramMap);
+        checkCreateBucketParamWithFs(paramMap, strategy);
 
         /**主站点执行区域转发**/
         if (!doubleFlag && isMasterCluster && !MultiRegionUtils.dealRegionsCreateBucket(paramMap)) {
@@ -2313,6 +2314,9 @@ public class BucketService extends BaseService {
         }
         if (!(refererConfiguration.getAllowEmptyReferer().equals("true") || refererConfiguration.getAllowEmptyReferer().equals("false"))) {
             throw new MsException(INVALID_ARGUMENT, "AllowEmptyReferer is invalid");
+        }
+        if (CheckUtils.bucketFsCheck(bucketName)){
+            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not enable bucketRefer");
         }
         //3.检查白名单和黑名单长度
         boolean blackListIsEmpty = refererConfiguration.getBlackRefererList() == null || refererConfiguration.getBlackRefererList().getReferer() == null;

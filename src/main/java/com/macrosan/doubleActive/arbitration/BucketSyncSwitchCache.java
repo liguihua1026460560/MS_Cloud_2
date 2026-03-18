@@ -2,12 +2,9 @@ package com.macrosan.doubleActive.arbitration;
 
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.macrosan.database.redis.Connection;
 import com.macrosan.database.redis.RedisConnPool;
-import com.macrosan.doubleActive.DataSynChecker;
-import com.macrosan.doubleActive.deployment.DeployRecord;
+import com.macrosan.filesystem.async.AsyncUtils;
 import com.macrosan.httpserver.DateChecker;
-import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.msutils.MsExecutor;
 import com.macrosan.utils.msutils.MsThreadFactory;
 import io.lettuce.core.ScanArgs;
@@ -15,22 +12,21 @@ import io.lettuce.core.ScanIterator;
 import io.vertx.core.impl.ConcurrentHashSet;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
-import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.macrosan.constants.ServerConstants.PROC_NUM;
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.doubleActive.DataSynChecker.SYNC_BUCKET_STATE_MAP;
 import static com.macrosan.utils.regex.PatternConst.BUCKET_NAME_PATTERN;
 
 /**
@@ -41,6 +37,7 @@ public class BucketSyncSwitchCache {
     final static Map<String, String> switchMap = new ConcurrentHashMap<>();
     final static Map<String, Map<String, Set<Integer>>> syncIndexMap = new ConcurrentHashMap<>();
     final static Map<String, Map<String, Set<Integer>>> archiveIndexMap = new ConcurrentHashMap<>();
+    final static Map<String, Boolean> fsAsyncMap = new ConcurrentHashMap<>();
 
     /**
      * 在默认需要获取主站点syncStamp的场合，使用该key。
@@ -146,6 +143,7 @@ public class BucketSyncSwitchCache {
         switchMap.put(bucket, status);
         archiveIndexMap.put(bucket, archiveMap);
         syncIndexMap.put(bucket, syncMap);
+        fsAsyncMap.put(bucket, AsyncUtils.checkFSProtocol(info));
     }
 
     public static Set<Integer> getSyncIndexMap(String bucket, Integer localIndex) {
@@ -155,6 +153,10 @@ public class BucketSyncSwitchCache {
 
     public static Set<Integer> getArchiveIndexMap(String bucket, Integer localIndex) {
         return archiveIndexMap.computeIfAbsent(bucket, i -> new ConcurrentHashMap<>()).computeIfAbsent(localIndex + "", s -> new ConcurrentHashSet<>());
+    }
+
+    public static boolean isBucketNeedFsAsync(String bucket) {
+        return fsAsyncMap.getOrDefault(bucket, false);
     }
 
     public boolean isSyncSwitchOn(String bucket) {

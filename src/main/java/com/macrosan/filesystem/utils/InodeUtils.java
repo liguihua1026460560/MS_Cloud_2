@@ -25,8 +25,6 @@ import com.macrosan.filesystem.nfs.types.FH2;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
 import com.macrosan.filesystem.quota.FSQuotaRealService;
 import com.macrosan.filesystem.utils.acl.ACLUtils;
-import com.macrosan.filesystem.utils.acl.CIFSACL;
-import com.macrosan.filesystem.utils.acl.NFSACL;
 import com.macrosan.message.jsonmsg.EsMeta;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.MetaData;
@@ -51,7 +49,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static com.macrosan.constants.AccountConstants.DEFAULT_USER_ID;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.GET_INODE;
@@ -469,52 +466,58 @@ public class InodeUtils {
                                     log.info("get inode version {} fail", Json.encode(inode));
                                     return Mono.just(versionInode);
                                 } else {
-                                    inode.setVersionNum(versionInode.getVersionNum());
-                                    MetaData metaData = InodeUtils.newFsMetaMeta(bucket, reqHeader.bucketInfo, inode, stamp, versionInode.getVersionNum(), s3Account, displayName[0]);
-
-                                    StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);
-                                    String bucketVnode = pool.getBucketVnodeId(bucket);
-                                    List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(bucketVnode).block();
-
-                                    String key = Utils.getMetaDataKey(bucketVnode, bucket, inode.getObjName(), metaData.versionId, metaData.stamp);
                                     return RedLockClient.lock(reqHeader, inode.getObjName(), LockType.WRITE, true, NFSV3.NFS_RED_LOCK)
-                                            .flatMap(l -> ErasureClient.getObjectMetaVersionUnlimitedNotRecover(inode.getBucket(), inode.getObjName(), inode.getVersionId(), nodeList, null, null, null))
-                                            .flatMap(oldMeta -> {
-                                                boolean isDeleteMark = false;
-                                                if (oldMeta.isDeleteMark() || oldMeta.isDeleteMarker()) {
-                                                    isDeleteMark = true;
-                                                    if (oldMeta.getVersionNum().compareTo(metaData.versionNum) >= 0) {
-                                                        metaData.versionNum = oldMeta.versionNum + "0";
-                                                    }
-                                                }
-
-                                                if (oldMeta.inode > 0 && !isDeleteMark && StringUtils.isNotBlank(oldMeta.tmpInodeStr)) {
-                                                    Inode resInode = Json.decodeValue(oldMeta.tmpInodeStr, Inode.class);
-                                                    return Mono.just(resInode);
-                                                }
-                                                EsMeta esMeta = null;
-                                                String mda = reqHeader.bucketInfo.get(ES_SWITCH);
-                                                if (ES_ON.equals(mda)) {
-                                                    esMeta = EsMeta.inodeMetaMapEsMeta(metaData, inode);
-                                                }
-                                                return ErasureClient.putMetaData(key, metaData, nodeList, esMeta, mda)
-                                                        .doOnNext(b -> {
-                                                            if (!b) {
-                                                                log.info("put meta {} fail", metaData);
-                                                            }
-                                                            QuotaRecorder.addCheckBucket(bucket);
-                                                        })
-                                                        .map(b -> b ? inode : ERROR_INODE);
-                                            })
-                                            .flatMap(i -> {
-                                                if (ES_ON.equals(reqHeader.bucketInfo.get(ES_SWITCH)) && !isError(i)) {
-                                                    return EsMetaTask.putEsMeta(i).map(b0 -> i);
-                                                }
-                                                return Mono.just(i);
-                                            })
+                                            .flatMap(l -> Node.getInstance().createInode(bucket, inode, nodeId, stamp, versionInode.getVersionNum(), s3Account, displayName[0]))
                                             .doOnNext(i -> releaseLock(reqHeader));
                                 }
                             });
+                });
+    }
+
+
+    public static Mono<Inode> create0(String bucket, Inode inode, long nodeId, long stamp, String version, String s3Account, String displayName) {
+        Map<String, String> bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
+        inode.setVersionNum(version);
+        MetaData metaData = InodeUtils.newFsMetaMeta(bucket, bucketInfo, inode, stamp, version, s3Account, displayName);
+
+        StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);
+        String bucketVnode = pool.getBucketVnodeId(bucket);
+        List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(bucketVnode).block();
+
+        String key = Utils.getMetaDataKey(bucketVnode, bucket, inode.getObjName(), metaData.versionId, metaData.stamp);
+
+        return ErasureClient.getObjectMetaVersionUnlimitedNotRecover(inode.getBucket(), inode.getObjName(), inode.getVersionId(), nodeList, null, null, null)
+                .flatMap(oldMeta -> {
+                    boolean isDeleteMark = false;
+                    if (oldMeta.isDeleteMark() || oldMeta.isDeleteMarker()) {
+                        isDeleteMark = true;
+                        if (oldMeta.getVersionNum().compareTo(metaData.versionNum) >= 0) {
+                            metaData.versionNum = oldMeta.versionNum + "0";
+                        }
+                    }
+
+                    if (oldMeta.inode > 0 && !isDeleteMark && StringUtils.isNotBlank(oldMeta.tmpInodeStr)) {
+                        Inode resInode = Json.decodeValue(oldMeta.tmpInodeStr, Inode.class);
+                        return Mono.just(resInode);
+                    }
+                    EsMeta esMeta = null;
+                    String mda = bucketInfo.get(ES_SWITCH);
+                    if (ES_ON.equals(mda)) {
+                        esMeta = EsMeta.inodeMetaMapEsMeta(metaData, inode);
+                    }
+                    return ErasureClient.putMetaData(key, metaData, nodeList, esMeta, mda)
+                            .doOnNext(b -> {
+                                if (!b) {
+                                    log.info("put meta {} fail", metaData);
+                                }
+                                QuotaRecorder.addCheckBucket(bucket);
+                            })
+                            .map(b -> b ? inode : ERROR_INODE);
+                }).flatMap(i -> {
+                    if (ES_ON.equals(bucketInfo.get(ES_SWITCH)) && !isError(i)) {
+                        return EsMetaTask.putEsMeta(i).map(b0 -> i);
+                    }
+                    return Mono.just(i);
                 });
     }
 

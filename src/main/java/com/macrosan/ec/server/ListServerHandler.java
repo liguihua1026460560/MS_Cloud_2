@@ -12,7 +12,6 @@ import com.macrosan.ec.Utils;
 import com.macrosan.ec.VersionUtil;
 import com.macrosan.ec.rebuild.RebuildCheckpointUtil;
 import com.macrosan.filesystem.utils.CifsUtils;
-import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.inventory.datasource.scanner.InventoryListAllScanner;
 import com.macrosan.message.jsonmsg.*;
 import com.macrosan.message.socketmsg.SocketReqMsg;
@@ -553,7 +552,10 @@ public class ListServerHandler {
             continuationToken = "";
         }
         String finalContinuationToken = continuationToken;
-
+        MSRocksDB rocksDB=  MSRocksDB.getRocksDB(disk);
+        if (rocksDB == null) {
+            return Mono.just(ERROR_PAYLOAD);
+        }
         Function<String, List<Tuple3<Boolean, String, MetaData>>> listObjectsFunction = (snapshotMark) -> {
             ObjectSplitTree objectSplitTree = StoragePoolFactory.getMetaStoragePool(bucket).getBucketShardCache().get(bucket);
             Tuple2<String, String> upperBoundAndLowerBound = objectSplitTree.queryNodeUpperBoundAndLowerBound(vnode);
@@ -572,7 +574,7 @@ public class ListServerHandler {
             try (Slice lowerSlice = new Slice(lowerPrefix.getBytes());
                  Slice upperSlice = new Slice(upperPrefix.getBytes());
                  ReadOptions readOptions = new ReadOptions().setIterateLowerBound(lowerSlice).setIterateUpperBound(upperSlice);
-                 MSRocksIterator keyIterator = MSRocksDB.getRocksDB(disk).newIterator(readOptions)) {
+                 MSRocksIterator keyIterator = rocksDB.newIterator(readOptions)) {
                 String realMarker = "";
                 if (StringUtils.isBlank(marker) && StringUtils.isBlank(prefix) && StringUtils.isBlank(finalContinuationToken)) {
                     keyIterator.seek(Utils.getLatestMetaKey(vnode, bucket, "", snapshotMark).getBytes());
@@ -727,8 +729,26 @@ public class ListServerHandler {
 
                     String objectName = metaData.key;
                     if (!showAll.get()) {
+                        if (metaData.inode > 0 && "1".equals(msg.get("syncHis"))) {
+                            try {
+                                String inodeKey = Inode.getKey(vnode, bucket, metaData.inode);
+                                MSRocksDB db = MSRocksDB.getRocksDB(disk);
+                                if (db != null) {
+                                    byte[] valueI = db.get(inodeKey.getBytes());
+                                    if (valueI != null) {
+                                        Inode inode = Json.decodeValue(new String(valueI), Inode.class);
+                                        inode.setUpdateChunk(null);
+                                        inode.setChunkFileMap(null);
+                                        metaData.setEndIndex(inode.getSize() - 1);
+                                        Inode.mergeMeta(metaData, inode);
+                                    }
+                                }
+                            } catch (RocksDBException e) {
+                                log.error("get inodeValue error {}", bucket, e);
+                            }
+                        }
                         metaData.partInfos = null;
-                        if (!showUsermeta.get()){
+                        if (!showUsermeta.get()) {
                             metaData.userMetaData = null;
                         }
                         metaData.objectAcl = null;
@@ -1284,6 +1304,10 @@ public class ListServerHandler {
         String limit = msg.get("limit");
         String snapshotLink = msg.get("snapshotLink");
         String currentSnapshotMark = msg.get("currentSnapshotMark");
+        MSRocksDB db = MSRocksDB.getRocksDB(msg.get("lun"));
+        if (db == null) {
+            return Mono.just(ERROR_PAYLOAD);
+        }
         Function<String, List<Tuple3<Boolean, String, MetaData>>> listVersionFunction = (snapshotMark) -> {
             String realPrefix = Utils.getMetaDataKey(vnode, bucket, prefix, snapshotMark);
 
@@ -1299,7 +1323,6 @@ public class ListServerHandler {
                     upperPrefix = Utils.getMetaDataKey(vnode, bucket, upperBoundAndLowerBound.var2 + ONE_STR, snapshotMark);
                 }
             }
-            MSRocksDB db = MSRocksDB.getRocksDB(msg.get("lun"));
             int count = 0;
             boolean reverseLookup = false;
             String realMarker;
@@ -1573,7 +1596,7 @@ public class ListServerHandler {
                     }
                 }
                 UnSynchronizedRecord record = Json.decodeValue(new String(iterator.value()), UnSynchronizedRecord.class);
-                if ("1".equals(msg.get("onlyDelete"))){
+                if ("1".equals(msg.get("onlyDelete"))) {
                     // 关同步开关删除时要扫描到after_init
                 } else {
                     if (record.deleteMark || record.type() == UnSynchronizedRecord.Type.NONE) {
@@ -1745,19 +1768,19 @@ public class ListServerHandler {
             // 如果是指定文件模式，匹配项应当是prefix目录下的pattern条目
             AtomicBoolean returnEmpty = new AtomicBoolean(false);
             if (!pattern.contains("*") && !pattern.contains("?")) {
-                seekPattern(realPrefix, pattern, iterator,returnEmpty);
+                seekPattern(realPrefix, pattern, iterator, returnEmpty);
 
             }
             if (!"*".equals(pattern)) {
                 if (pattern.endsWith("*")) {
                     String p0 = pattern.substring(0, pattern.length() - 1);
                     if (!p0.contains("*") && !p0.contains("?")) {
-                        seekPattern(realPrefix, p0, iterator,returnEmpty);
+                        seekPattern(realPrefix, p0, iterator, returnEmpty);
                     }
                 }
             }
 
-            if (returnEmpty.get()){
+            if (returnEmpty.get()) {
                 return Mono.just(DefaultPayload.create(Json.encode(res.toArray()), SUCCESS.name()));
             }
             int size = 0;
@@ -1881,7 +1904,7 @@ public class ListServerHandler {
         return Mono.just(DefaultPayload.create(Json.encode(res.toArray()), SUCCESS.name()));
     }
 
-    public static void seekPattern(String realPrefix, String pattern, MSRocksIterator iterator,AtomicBoolean returnEmpty) {
+    public static void seekPattern(String realPrefix, String pattern, MSRocksIterator iterator, AtomicBoolean returnEmpty) {
         byte[] before = iterator.key();
         boolean isSeekBack = true;
         String patternStart = realPrefix + pattern;
@@ -1905,7 +1928,8 @@ public class ListServerHandler {
         }
     }
 
-    public static <T> List<T> executeListOperation(Function<String, List<T>> listFunction, SnapshotMergeService<T> snapshotObjectService, String currentSnapshotMark, String snapshotLink, int maxKeys) {
+    public static <T> List<T> executeListOperation(Function<String, List<T>> listFunction, SnapshotMergeService<T> snapshotObjectService, String currentSnapshotMark, String snapshotLink,
+                                                   int maxKeys) {
         if (StringUtils.isAnyBlank(currentSnapshotMark, snapshotLink)) {
             // 未开桶快照，或开启桶快照但为创建快照
             return listFunction.apply(currentSnapshotMark);

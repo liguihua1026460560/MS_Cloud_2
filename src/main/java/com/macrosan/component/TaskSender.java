@@ -12,15 +12,17 @@ import com.macrosan.database.redis.IamRedisConnPool;
 import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.doubleActive.DoubleActiveUtil;
 import com.macrosan.ec.ErasureClient;
-import com.macrosan.ec.Utils;
 import com.macrosan.ec.VersionUtil;
+import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.message.jsonmsg.AccessKeyVO;
 import com.macrosan.message.jsonmsg.MetaData;
+import com.macrosan.rsocket.client.RSocketClient;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
+import com.macrosan.utils.ModuleDebug;
 import com.macrosan.utils.functional.Tuple2;
-import com.macrosan.utils.functional.Tuple3;
 import com.macrosan.utils.serialize.JsonUtils;
+import io.rsocket.util.DefaultPayload;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpMethod;
@@ -33,28 +35,26 @@ import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.*;
 import reactor.util.concurrent.Queues;
+import reactor.util.function.Tuples;
 
-import java.time.Duration;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 import static com.macrosan.action.datastream.ActiveService.PASSWORD;
 import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
-import static com.macrosan.component.ComponentStarter.AVAIL_IP_SET;
-import static com.macrosan.component.ComponentStarter.COMP_SCHEDULER;
+import static com.macrosan.component.ComponentStarter.*;
 import static com.macrosan.component.ComponentUtils.addExpire;
+import static com.macrosan.component.enums.ErrorEnum.IMAGE_TOTAL_PIXEL_ERROR;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.ErasureClient.updateMetaDataAcl;
-import static com.macrosan.httpserver.MossHttpClient.DA_PORT;
+import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SEND_DICOM_RECORD;
+import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
+import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
 
 /**
  * 扫描对象存储内部的数据发往外部进程处理。
@@ -130,10 +130,13 @@ public class TaskSender {
                         .publishOn(COMP_SCHEDULER)
                         .filter(meta -> !MetaData.ERROR_META.equals(meta))
                         .flatMap(metaData -> {
-                            if (ComponentUtils.hasDealt(metaData, record.strategy) || metaData.deleteMarker || metaData.deleteMark
-                                    || !record.syncStamp.equals(metaData.syncStamp) || MetaData.NOT_FOUND_META.equals(metaData)) {
+                            if (metaData.deleteMarker || metaData.deleteMark
+                                    || !record.syncStamp.equals(metaData.syncStamp) || MetaData.NOT_FOUND_META.equals(metaData)
+                                    || ComponentUtils.hasCompressed(metaData, record.getStrategy().getType())) {
                                 // 如果已经处理过或者已经被同名对象覆盖或者已经被删除，则删除该record。
-                                log.debug("delete component record. {}, {} ", Json.encode(metaData), Json.encode(record));
+                                if (ModuleDebug.mediaComponentDebug()) {
+                                    log.info("delete component record. {}, {} ", Json.encode(metaData), Json.encode(record));
+                                }
                                 return ComponentUtils.deleteComponentRecord(record)
                                         .flatMap(b -> Mono.just(false));
                             } else {
@@ -200,7 +203,8 @@ public class TaskSender {
                 case IMAGE: {
                     return sendComponentRequest(record, IMG_PORT, "/sendImageRecord");
                 }
-
+                case DICOM:
+                    return sendDicomRequest(record);
                 default:
                     log.error("no such type: {}", record.strategy.getType());
                     return Mono.just(new Tuple2<>(false, null));
@@ -212,11 +216,46 @@ public class TaskSender {
     }
 
     /**
+     * 处理DICOM任务，发出请求
+     *
+     * @param record
+     * @return
+     */
+    private static Mono<Tuple2<Boolean, ErrorEnum>> sendDicomRequest(ComponentRecord record) {
+        String ip = ComponentUtils.getMossServerRadomAvailIp();
+        if (ip.equals(LOCAL_IP_ADDRESS)) {
+            // 发送rsocket请求，将本地ip替换为本地eth4_ip
+            ip = CURRENT_IP;
+        }
+        long startTime = System.currentTimeMillis();
+        String finalIp = ip;
+        return RSocketClient.getRSocket(ip, BACK_END_PORT)
+                .flatMap(rSocket -> rSocket.requestResponse(DefaultPayload.create(Json.encode(record), SEND_DICOM_RECORD.name())))
+                .flatMap(payload -> {
+                    if (payload.getMetadataUtf8().equals(ErasureServer.PayloadMetaType.SUCCESS.name())) {
+                        if (ModuleDebug.mediaComponentDebug()) {
+                            log.info("send dicom request to ip:{} success,bucket:{} object:{} versionId:{} cost: {}", finalIp, record.bucket, record.object, record.versionId, System.currentTimeMillis() - startTime);
+                        }
+                        return Mono.just(new Tuple2<Boolean, ErrorEnum>(true, null));
+                    } else {
+                        if (ModuleDebug.mediaComponentDebug()) {
+                            log.info("send dicom request to ip:{} fail,bucket:{} object:{} versionId:{} cost: {}", finalIp, record.bucket, record.object, record.versionId, System.currentTimeMillis() - startTime);
+                        }
+                        return Mono.just(new Tuple2<Boolean, ErrorEnum>(false, null));
+                    }
+                })
+                .onErrorResume(e -> {
+                    AVAIL_MOSS_SERVER_IP_SET.remove(finalIp);
+                    return Mono.just(new Tuple2<>(false, null));
+                });
+    }
+
+    /**
      * 处理ComponentTask，发出请求
      */
     private static Mono<Tuple2<Boolean, ErrorEnum>> sendComponentRequest(ComponentRecord record, int port, String uri) {
         MonoProcessor<Tuple2<Boolean, ErrorEnum>> res = MonoProcessor.create();
-        String ip = ComponentUtils.getRadomAvailIp();
+        String ip = ComponentUtils.getMediaServerRadomAvailIp();
 
         byte[] bytes = Json.encode(record).getBytes();
         HttpClientRequest request = client.request(HttpMethod.PUT, port, ip, uri);
@@ -228,7 +267,7 @@ public class TaskSender {
                 .putHeader(SYNC_AUTH, PASSWORD)
                 .exceptionHandler(e -> {
                     log.debug("sendComponentRequest to {} error! {}, {}, {}", ip, record, e.getClass().getName(), e.getMessage());
-                    AVAIL_IP_SET.remove(ip);
+                    AVAIL_MEDIA_SERVER_IP_SET.remove(ip);
                     DoubleActiveUtil.closeConn(request);
                     res.onNext(new Tuple2<>(false, null));
                 })

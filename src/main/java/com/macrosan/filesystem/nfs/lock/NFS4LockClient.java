@@ -1,9 +1,11 @@
 package com.macrosan.filesystem.nfs.lock;
 
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.filesystem.cifs.lock.CIFSLock;
 import com.macrosan.filesystem.lock.Lock;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.socketmsg.SocketReqMsg;
+import com.macrosan.storage.NodeCache;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.client.ClientTemplate;
@@ -13,10 +15,13 @@ import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SUCCESS;
+import static com.macrosan.filesystem.lock.LockClient.addCurIpOrNot;
+import static com.macrosan.filesystem.lock.LockClient.getNode;
 
 @Log4j2
 public class NFS4LockClient {
@@ -113,7 +118,7 @@ public class NFS4LockClient {
                 });
     }
 
-    public static Mono<NFS4Lock> unLock(String bucket, String key, NFS4Lock value) {
+    public static Mono<NFS4Lock> unLockOrRemoveWait(String bucket, String key, NFS4Lock value) {
         StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);
         String vnode = pool.getBucketVnodeId(bucket);
         int type = Lock.NFS4_LOCK_TYPE;

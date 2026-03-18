@@ -7,12 +7,10 @@ import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.doubleActive.MsClientRequest;
 import com.macrosan.ec.server.ErasureServer.PayloadMetaType;
-import com.macrosan.filesystem.FsConstants;
 import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.cifs.notify.NotifyServer;
 import com.macrosan.filesystem.cifs.reply.smb2.NotifyReply.NotifyAction;
-import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.filesystem.quota.FSQuotaRealService;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.filesystem.utils.InodeUtils;
@@ -84,17 +82,17 @@ import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.archive.ArchiveAnalyzer.ARCHIVE_ANALYZER_KEY;
 import static com.macrosan.ec.ECUtils.*;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
+import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_UPDATE_FILE_ACCESS_TIME;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.ERROR_PAYLOAD;
+import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.NOT_FOUND;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SUCCESS;
-import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.filesystem.FsConstants.S_IFDIR;
 import static com.macrosan.filesystem.FsConstants.S_IFMT;
 import static com.macrosan.filesystem.cifs.call.smb2.NotifyCall.FILE_NOTIFY_CHANGE_DIR_NAME;
 import static com.macrosan.filesystem.cifs.call.smb2.NotifyCall.FILE_NOTIFY_CHANGE_FILE_NAME;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
-import static com.macrosan.filesystem.utils.ChunkFileUtils.mapToPartInfo;
 import static com.macrosan.filesystem.utils.FSQuotaUtils.addQuotaInfoToMetaData;
 import static com.macrosan.httpserver.MossHttpClient.WRITE_ASYNC_RECORD;
 import static com.macrosan.message.consturct.RequestBuilder.getRequestId;
@@ -110,6 +108,7 @@ import static com.macrosan.message.jsonmsg.UnSynchronizedRecord.ERROR_UNSYNC_REC
 import static com.macrosan.message.jsonmsg.UnSynchronizedRecord.NOT_FOUND_UNSYNC_RECORD;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 import static com.macrosan.storage.move.CacheMove.isEnableCacheOrderFlush;
 import static com.macrosan.utils.msutils.MsException.dealException;
 
@@ -134,6 +133,11 @@ public class ErasureClient {
         // 判断是否开启缓冲池 按序下刷
         if (isEnableCacheOrderFlush(storagePool)) {
             msg.put("flushStamp", meta.stamp);
+        }
+
+        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", meta.lastAccessStamp, isEnableCacheAccessTimeFlush(storagePool));
+        if (isEnableCacheAccessTimeFlush(storagePool) && StringUtils.isNotEmpty(meta.lastAccessStamp)) {//这里应该要和上面按上传时间下刷的配置互斥
+            msg.put("lastAccessStamp", meta.lastAccessStamp);
         }
 
         CryptoUtils.generateKeyPutToMsg(meta.crypto, msg);
@@ -207,7 +211,7 @@ public class ErasureClient {
         ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, nodeList);
 
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        List<Integer> errorChunksList = new ArrayList<>(storagePool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(storagePool.getM());
 //        String storageName = "storage_" + storagePool.getVnodePrefix();
 //        String poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(storageName, "pool");
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(storagePool.getVnodePrefix());
@@ -248,7 +252,7 @@ public class ErasureClient {
                         recoverDataProcessor.subscribe(b -> {
                             if (b) {
                                 SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                        .put("errorChunksList", Json.encode(errorChunksList))
+                                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                         .put("bucket", meta.bucket)
                                         .put("object", meta.key)
                                         .put("fileName", meta.fileName)
@@ -260,6 +264,7 @@ public class ErasureClient {
                                         .put("fileOffset", "");
                                 Optional.ofNullable(meta.snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));
                                 Optional.ofNullable(msg.get("flushStamp")).ifPresent(v -> errorMsg.put("flushStamp", v));
+                                Optional.ofNullable(msg.get("lastAccessStamp")).ifPresent(v -> errorMsg.put("lastAccessStamp", v));
 
                                 CryptoUtils.putCryptoInfoToMsg(meta.crypto, msg.get("secretKey"), errorMsg);
 
@@ -1166,6 +1171,15 @@ public class ErasureClient {
         // 是否所有节点都 覆盖元数据成功
         boolean[] allOverWriteMetaSuccess = {true};
 
+        Comparator<MetaData> comparator = (o1, o2) -> {
+            // 删除标记没有syncStamp
+            if (!VersionUtil.isMultiCluster || o1.syncStamp == null || o2.syncStamp == null || o1.syncStamp.equals(o2.syncStamp)) {
+                return o1.versionNum.compareTo(o2.versionNum);
+            } else {
+                return o1.syncStamp.compareTo(o2.syncStamp);
+            }
+        };
+
         Consumer<Tuple3<Integer, PayloadMetaType, String>> responseHandler = s -> {
             if (s.var2 == SUCCESS) {
                 if (StringUtils.isNotBlank(s.var3)) {
@@ -1217,7 +1231,7 @@ public class ErasureClient {
                             }
                         }
                         if (oldMeta.isAvailable()) {
-                            if (lastMeta[0] == null || oldMeta.versionNum.compareTo(lastMeta[0].versionNum) > 0) {
+                            if (lastMeta[0] == null || comparator.compare(oldMeta, lastMeta[0]) > 0) {
                                 lastMeta[0] = oldMeta;
                             }
                         }
@@ -1256,7 +1270,7 @@ public class ErasureClient {
                     if (!b || allOverWriteMetaSuccess[0] || (dupFiles.isEmpty() && overWriteFiles.isEmpty() && aggregateFiles.isEmpty())) {
                         return Mono.just(b);
                     }
-                    if (!firstWrite[0] || (lastMeta[0] != null && lastMeta[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0) || (lastInode[0] != null && lastInode[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0)) {
+                    if (!firstWrite[0] || (lastMeta[0] != null && comparator.compare(lastMeta[0], metaData) < 0) || (lastInode[0] != null && lastInode[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0)) {
                         return getObjectMetaVersionRes(metaData.getBucket(), metaData.getKey(), metaData.getVersionId(), nodeList, request)
                                 .doOnNext(res -> {
                                     MetaData currentMeta = res.var1;
@@ -1319,7 +1333,7 @@ public class ErasureClient {
 
                         NotifyServer.getInstance().maybeNotify(metaData.bucket, metaData.key, flags, action);
 
-                        if (!firstWrite[0] || (lastMeta[0] != null && lastMeta[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0) || (lastInode[0] != null && lastInode[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0)) {
+                        if (!firstWrite[0] || (lastMeta[0] != null && comparator.compare(lastMeta[0], metaData) < 0) || (lastInode[0] != null && lastInode[0].getVersionNum().compareTo(metaData.getVersionNum()) < 0)) {
                             if (null == lastInode[0]) {
                                 // 覆盖的是对象
                                 if (!metaData.isDeleteMarker() && lastMeta[0] != null && !overWriteFiles.isEmpty()) {
@@ -2370,7 +2384,7 @@ public class ErasureClient {
                                     return tuple.var1;
                                 });
                     }
-                })
+                }, 16)
                 .collectList()
                 .map(l -> true);
     }
@@ -2826,6 +2840,60 @@ public class ErasureClient {
         return res;
     }
 
+    public static Mono<Boolean> updateFileAccessTime(StoragePool storagePool, String fileName, List<Tuple3<String, String, String>> nodeList, String stamp,
+                                                     String storage) {
+        List<SocketReqMsg> msgs = nodeList.stream()
+                .map(tuple -> new SocketReqMsg("", 0)
+                        .put("fileName", fileName)
+                        .put("stamp", stamp)
+                        .put("lun", tuple.var2))
+                .collect(Collectors.toList());
+
+        String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(storagePool.getVnodePrefix());
+
+        MonoProcessor<Boolean> res = MonoProcessor.create();
+        ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, UPDATE_FILE_ACCESS_TIME, String.class, nodeList);
+        List<Integer> errorChunksList = new ArrayList<>(storagePool.getM());
+//        if (chunkFile != null) {
+//            msgs = msgs.stream().map(msg -> msg.put("chunkFile", Json.encode(chunkFile))).collect(Collectors.toList());
+//        }
+        Map<String, Integer> map = new HashMap<>(1);
+        Disposable subscribe = responseInfo.responses.subscribe(s -> {
+            int c = map.getOrDefault("emptyNum", 0);
+            if (s.var2.equals(SUCCESS)) {
+                if ("0".equals(s.var3)) {
+                    map.put("emptyNum", c + 1);
+                    errorChunksList.add(s.var1);
+                }
+            }
+            if (s.var2.equals(ERROR)) {
+                errorChunksList.add(s.var1);
+            }
+        }, e -> log.error("", e), () -> {
+            responseInfo.successNum -= map.getOrDefault("emptyNum", 0);
+            if (responseInfo.successNum == storagePool.getK() + storagePool.getM()) {
+                res.onNext(true);
+            } else if (responseInfo.successNum >= storagePool.getK()) {
+                if (responseInfo.successNum > 0) {
+                    msgs.get(0).put("errorChunksList", Json.encode(errorChunksList));
+                    for (Tuple2<PayloadMetaType, String> re : responseInfo.res) {
+                        if ("0".equals(re.var2) && SUCCESS.equals(re.var1)) {
+                            re.var1 = ERROR;
+                        }
+                    }
+                    msgs.get(0).put("storage", storage);
+                    msgs.get(0).put("poolQueueTag", poolQueueTag);
+                    publishEcError(responseInfo.res, nodeList, msgs.get(0), ERROR_UPDATE_FILE_ACCESS_TIME);
+                }
+                res.onNext(true);
+            } else {
+                res.onNext(false);
+            }
+        });
+
+        return res;
+    }
+
     public static Mono<MetaData> getObjectMetaByUploadId(String bucket, String key, String uploadId,
                                                          List<Tuple3<String, String, String>> nodeList) {
         String vnode = nodeList.get(0).var3;
@@ -2916,7 +2984,8 @@ public class ErasureClient {
         if (sourceMeta.getPartInfos() != null) {
             return partCopyCryptoData(sourcePool, targetPool, sourceMeta, targetMeta, request, recoverDataProcessor, metaKey);
         }
-        String newFileName = Utils.getObjFileName(targetPool, targetMeta.getBucket(), targetMeta.getKey(), requestId);
+        String objectNameWithVersionId = "null".equals(targetMeta.getVersionId()) ? targetMeta.getKey() : targetMeta.getKey() + File.separator + targetMeta.getVersionId();
+        String newFileName = Utils.getObjFileName(targetPool, targetMeta.getBucket(), objectNameWithVersionId, requestId);
         targetMeta.setFileName(newFileName);
         List<Tuple3<String, String, String>> sourceNodeList = sourcePool.mapToNodeInfo(sourcePool.getObjectVnodeId(sourceMeta)).block();
         String newObjectVnodeId = targetPool.getObjectVnodeId(newFileName);
@@ -2993,7 +3062,7 @@ public class ErasureClient {
             processors.add(processor);
         }
         ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(processors, String.class, targetNodeList);
-        List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
         AtomicInteger putNum = new AtomicInteger();
         Disposable disposable = responseInfo.responses.subscribe(s -> {
@@ -3016,7 +3085,7 @@ public class ErasureClient {
                             //若至少成功写了一个partInfo，发送修复数据的消息
                             if (s) {
                                 SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                        .put("errorChunksList", Json.encode(errorChunksList))
+                                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                         .put("bucket", targetMeta.bucket)
                                         .put("object", targetMeta.key)
                                         .put("fileName", targetMeta.fileName)
@@ -3036,7 +3105,7 @@ public class ErasureClient {
                     } else {
                         res.onNext(false);
                         SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                .put("errorChunksList", Json.encode(errorChunksList))
+                                .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                 .put("bucket", targetMeta.bucket)
                                 .put("object", targetMeta.key)
                                 .put("fileName", targetMeta.fileName)
@@ -3170,7 +3239,7 @@ public class ErasureClient {
                     }
                     processors.addAll(partProcessors);
                     ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(partProcessors, String.class, targetNodeList);
-                    List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+                    Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
 //                    String storageName = "storage_" + targetPool.getVnodePrefix();
 //                    String poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(storageName, "pool");
                     String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
@@ -3210,7 +3279,7 @@ public class ErasureClient {
                                                     .put("partNum", partInfo0.partNum)
                                                     .put("fileName", partInfo0.fileName)
                                                     .put("endIndex", String.valueOf(partInfo0.partSize - 1))
-                                                    .put("errorChunksList", Json.encode(errorChunksList))
+                                                    .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                                     .put("versionId", partInfo0.versionId)
                                                     .put("poolQueueTag", poolQueueTag);
                                             Optional.ofNullable(targetMeta.snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));
@@ -3373,7 +3442,7 @@ public class ErasureClient {
                     }
                     processors.addAll(partProcessors);
                     ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(partProcessors, String.class, targetNodeList);
-                    List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+                    Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
 //                    String storageName = "storage_" + targetPool.getVnodePrefix();
 //                    String poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(storageName, "pool");
                     String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
@@ -3417,7 +3486,7 @@ public class ErasureClient {
                                                     .put("partNum", partInfo0.partNum)
                                                     .put("fileName", partInfo0.fileName)
                                                     .put("endIndex", String.valueOf(partInfo0.partSize - 1))
-                                                    .put("errorChunksList", Json.encode(errorChunksList))
+                                                    .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                                     .put("versionId", partInfo0.versionId)
                                                     .put("poolQueueTag", poolQueueTag);
                                             Optional.ofNullable(targetMeta.snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));
@@ -3499,7 +3568,8 @@ public class ErasureClient {
         targetMeta.setPartInfos(null);
         targetMeta.setPartUploadId(null);
 
-        String newFileName = Utils.getObjFileName(targetPool, targetMeta.getBucket(), targetMeta.getKey(), RequestBuilder.getRequestId());
+        String objectNameWithVersionId = "null".equals(targetMeta.getVersionId()) ? targetMeta.getKey() : targetMeta.getKey() + File.separator + targetMeta.getVersionId();
+        String newFileName = Utils.getObjFileName(targetPool, targetMeta.getBucket(), objectNameWithVersionId, RequestBuilder.getRequestId());
         targetMeta.setFileName(newFileName);
         List<Tuple3<String, String, String>> sourceNodeList = sourcePool.mapToNodeInfo(sourcePool.getObjectVnodeId(sourceMeta)).block();
         String newObjectVnodeId = targetPool.getObjectVnodeId(newFileName);
@@ -3571,7 +3641,7 @@ public class ErasureClient {
             processors.add(processor);
         }
         ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(processors, String.class, targetNodeList);
-        List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
         AtomicInteger putNum = new AtomicInteger();
         Disposable disposable = responseInfo.responses.subscribe(s -> {
@@ -3594,7 +3664,7 @@ public class ErasureClient {
                             //若至少成功写了一个partInfo，发送修复数据的消息
                             if (s) {
                                 SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                        .put("errorChunksList", Json.encode(errorChunksList))
+                                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                         .put("bucket", targetMeta.bucket)
                                         .put("object", targetMeta.key)
                                         .put("fileName", targetMeta.fileName)
@@ -3614,7 +3684,7 @@ public class ErasureClient {
                     } else {
                         res.onNext(false);
                         SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                .put("errorChunksList", Json.encode(errorChunksList))
+                                .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                 .put("bucket", targetMeta.bucket)
                                 .put("object", targetMeta.key)
                                 .put("fileName", targetMeta.fileName)

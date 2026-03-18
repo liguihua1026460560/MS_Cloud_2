@@ -9,6 +9,7 @@ import com.macrosan.httpserver.ResponseUtils;
 import com.macrosan.httpserver.RestfulVerticle;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.utils.authorize.AuthorizeFactory;
+import com.macrosan.utils.authorize.AuthorizeV4;
 import com.macrosan.utils.codec.UrlEncoder;
 import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.msutils.MsDateUtils;
@@ -32,6 +33,8 @@ import reactor.util.function.Tuple3;
 
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,8 +44,8 @@ import java.util.concurrent.TimeUnit;
 
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.httpserver.MossHttpClient.WRITE_ASYNC_RECORD;
-import static com.macrosan.utils.authorize.AuthorizeV4.*;
+import static com.macrosan.utils.authorize.AuthorizeV4.SERVICE_S3;
+import static com.macrosan.utils.authorize.AuthorizeV4.X_AMZ_CONTENT_SHA_256;
 import static com.macrosan.utils.store.AWSV2Auth.getCanonicalizedHeaders;
 import static com.macrosan.utils.store.AWSV2Auth.getCanonicalizedResources;
 import static com.macrosan.utils.store.StoreUtils.generateHmacSignature;
@@ -170,7 +173,9 @@ public class StoreManagementServer {
                     String targetIp = request.getMember(TARGET_IP_HEADER);
                     String uri = request.uri();
                     String signPath = RestfulVerticle.getSignPath(request.host(), request.path());
-                    boolean isHost = !Objects.equals(signPath, request.path());
+                    boolean isHost = !Objects.equals(signPath, request.path())
+                            || ((request.getParam(EXPIRES) != null && request.getHeader(DATE) != null)
+                            && !request.params().contains(AuthorizeV4.X_AMZ_SIGNATURE) && request.params().contains(SIGNATURE));
                     if (isHost) {
                         uri = getUri(request);
                     }
@@ -676,20 +681,26 @@ public class StoreManagementServer {
     }
 
     public static String getUri(MsHttpRequest request) {
-        String requestUri = request.uri();
-        int paramIndex = requestUri.indexOf("?");
-        String params = "";
-        if (paramIndex != -1) {
-            params = requestUri.substring(paramIndex);
-        }
         String uri = SLASH;
-        if (StringUtils.isNotBlank(request.getBucketName())) {
-            uri += request.getBucketName();
+        try {
+            String requestUri = request.uri();
+            int paramIndex = requestUri.indexOf("?");
+            String params = "";
+            if (paramIndex != -1) {
+                params = requestUri.substring(paramIndex);
+            }
+            if (StringUtils.isNotBlank(request.getBucketName())) {
+                uri +=URLEncoder.encode(request.getBucketName(), StandardCharsets.UTF_8.name())
+                        .replace("+", "%20");
+            }
+            if (StringUtils.isNotBlank(request.getObjectName())) {
+                uri += SLASH + URLEncoder.encode(request.getObjectName(), StandardCharsets.UTF_8.name())
+                        .replace("+", "%20");
+            }
+            return uri + params;
+        } catch (UnsupportedEncodingException e) {
+            log.info("storeManagement getURI error,{}",e.getMessage(),e);
         }
-        if (StringUtils.isNotBlank(request.getObjectName())) {
-            uri += SLASH + request.getObjectName();
-        }
-        uri += params;
         return uri;
     }
 
@@ -764,7 +775,7 @@ public class StoreManagementServer {
     public static HttpClientRequest buildV2Request(MsHttpRequest request, HttpClientRequest forwardRequest, String bucketName, String objectName,
                                                    TreeMap<String, String> resources, Map<String, String> map, HttpMethod method, boolean isV2, boolean isNew) {
         String date = MsDateUtils.nowToGMT();
-        String canonicalizedResources = getCanonicalizedResources(bucketName, objectName, resources, isV2);
+        String canonicalizedResources = getCanonicalizedResources(bucketName, objectName, resources, isV2, request);
         if (!isNew && getUri(request).contains("?delete")) {
             canonicalizedResources = getUri(request);
         }

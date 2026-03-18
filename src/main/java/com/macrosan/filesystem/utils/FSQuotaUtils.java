@@ -6,7 +6,6 @@ import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.database.rocksdb.batch.BatchRocksDB;
 import com.macrosan.database.rocksdb.batch.WriteBatch;
 import com.macrosan.filesystem.FsUtils;
-import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.filesystem.quota.FSQuotaConstants;
 import com.macrosan.filesystem.quota.FSQuotaRealService;
@@ -20,6 +19,7 @@ import io.lettuce.core.SetArgs;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -40,6 +40,7 @@ import java.util.stream.Collectors;
 import static com.macrosan.constants.ErrorNo.*;
 import static com.macrosan.constants.ServerConstants.SLASH;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.database.rocksdb.MSRocksDB.READ_OPTIONS;
 import static com.macrosan.database.rocksdb.batch.BatchRocksDB.toByte;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.*;
@@ -47,9 +48,7 @@ import static com.macrosan.filesystem.quota.FSQuotaRealService.QUOTA_CONFIG_CACH
 import static com.macrosan.filesystem.quota.FSQuotaRealService.delFsDirQuotaInfo;
 import static com.macrosan.message.jsonmsg.FSQuotaConfig.getCapKey;
 import static com.macrosan.message.jsonmsg.FSQuotaConfig.getNumKey;
-import static com.macrosan.message.jsonmsg.Inode.CAP_QUOTA_EXCCED_INODE;
-import static com.macrosan.message.jsonmsg.Inode.FILES_QUOTA_EXCCED_INODE;
-import static com.sun.org.apache.xalan.internal.xsltc.compiler.util.Type.Node;
+import static com.macrosan.message.jsonmsg.Inode.*;
 
 @Log4j2
 public class FSQuotaUtils {
@@ -1463,4 +1462,37 @@ public class FSQuotaUtils {
         return new Tuple2<>(capacity, usedSize);
     }
 
+    public static void getQuotaKeyByMetadata(MetaData metaData, MetaData oldMetadata, String[] updateCapKeys, WriteBatch writeBatch, RocksDB db, String vnode) throws RocksDBException {
+        try {
+            if (metaData.inode > 0 || (oldMetadata != null && oldMetadata.inode > 0)) {
+
+                long inodeId = metaData.inode == 0 ? oldMetadata.inode : metaData.inode;
+                String inodeKey = getKey(vnode, metaData.getBucket(), inodeId);
+                byte[] curInodeBytes = writeBatch.getFromBatchAndDB(db, READ_OPTIONS, inodeKey.getBytes());
+                if (curInodeBytes != null) {
+                    Inode curInode = Json.decodeValue(new String(curInodeBytes), Inode.class);
+                    updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(curInode.getBucket(), metaData.key, System.currentTimeMillis(), curInode.getUid(), curInode.getGid());
+                } else {
+                    updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(metaData.getBucket(), metaData.key, System.currentTimeMillis(), -1, -1);
+                }
+            } else {
+                updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(metaData.getBucket(), metaData.key, System.currentTimeMillis(), 0, 0);
+            }
+        } catch (RocksDBException e) {
+            throw e;
+        } catch (Exception e) {
+            log.info("", e);
+        }
+
+    }
+
+    public static Mono<Inode> checkFsQuota(Inode inode) {
+        return FSQuotaUtils.addQuotaDirInfo(inode, System.currentTimeMillis(), true)
+                .flatMap(i -> {
+                    if (i.getLinkN() == CAP_QUOTA_EXCCED_INODE.getLinkN()) {
+                        throw new NFSException(NFS3ERR_DQUOT, "can not write ,because of exceed quota.bucket:" + inode.getBucket() + ",objName:" + inode.getObjName() + ",nodeId:" + inode.getNodeId());
+                    }
+                    return Mono.just(i);
+                });
+    }
 }

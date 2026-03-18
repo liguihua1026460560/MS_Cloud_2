@@ -1,5 +1,6 @@
 package com.macrosan.component;
 
+import com.macrosan.component.compression.CompressionServerManager;
 import com.macrosan.component.scanners.ComponentScanner;
 import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.httpserver.ServerConfig;
@@ -32,10 +33,12 @@ public class ComponentStarter {
     public final static Scheduler COMP_SCHEDULER;
 
     public final static Set<String> SUPPORT_IMAGE_FORMAT = new HashSet<>();
+    public final static Set<String> SUPPORT_DICOM_FORMAT = new HashSet<>();
     public final static Set<String> SUPPORT_VIDEO_FORMAT = new HashSet<>();
 
     public static final long DEFAULT_MAX_IMAGE_SIZE = 32 * 1024 * 1024;
     public static volatile long MAX_IMAGE_SIZE = DEFAULT_MAX_IMAGE_SIZE;
+    public static volatile boolean DICOM_SUPPORT_DESTINATION = false;
 
     public enum SUPPORT_IMAGE_FORMAT_ENUM {
         jpg,
@@ -74,9 +77,12 @@ public class ComponentStarter {
         for (SUPPORT_VIDEO_FORMAT_ENUM value : SUPPORT_VIDEO_FORMAT_ENUM.values()) {
             SUPPORT_VIDEO_FORMAT.add(value.name());
         }
+        SUPPORT_DICOM_FORMAT.add("dcm");
+        SUPPORT_DICOM_FORMAT.add("dcmx");
     }
 
-    public static final Set<String> AVAIL_IP_SET = new ConcurrentHashSet<>();
+    public static final Set<String> AVAIL_MEDIA_SERVER_IP_SET = new ConcurrentHashSet<>();
+    public static final Set<String> AVAIL_MOSS_SERVER_IP_SET = new ConcurrentHashSet<>();
 
     public static final Set<String> ALL_IP_SET = new HashSet<>();
 
@@ -96,7 +102,8 @@ public class ComponentStarter {
                 if (ServerConfig.getInstance().getHostUuid().equals(uuid)) {
                     heartIp = LOCAL_IP_ADDRESS;
                 }
-                AVAIL_IP_SET.add(heartIp);
+                AVAIL_MEDIA_SERVER_IP_SET.add(heartIp);
+                AVAIL_MOSS_SERVER_IP_SET.add(heartIp);
                 ALL_IP_SET.add(heartIp);
             }
             keyScanCursor.setCursor(res.getCursor());
@@ -104,7 +111,8 @@ public class ComponentStarter {
 
         COMP_TIMER.scheduleAtFixedRate(() -> {
             try {
-                AVAIL_IP_SET.addAll(ALL_IP_SET);
+                AVAIL_MEDIA_SERVER_IP_SET.addAll(ALL_IP_SET);
+                AVAIL_MOSS_SERVER_IP_SET.addAll(ALL_IP_SET);
             } catch (Exception e) {
 
             }
@@ -116,6 +124,7 @@ public class ComponentStarter {
         TaskSender.init();
         startPeriodicRefreshConfig();
         ComponentScanner.getInstance().init();
+        CompressionServerManager.getInstance().init();
     }
 
     public static void startPeriodicRefreshConfig() {
@@ -132,10 +141,17 @@ public class ComponentStarter {
                     MAX_IMAGE_SIZE = tmpMaxImageSize;
                     log.info("max image size change to {}", MAX_IMAGE_SIZE);
                 }
+
+                String dcmSupportDestination = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget("media_config", "dcm_support_destination");
+                boolean tmpDicomSupportDestination = Boolean.parseBoolean(dcmSupportDestination);
+                if (tmpDicomSupportDestination != DICOM_SUPPORT_DESTINATION) {
+                    DICOM_SUPPORT_DESTINATION = tmpDicomSupportDestination;
+                    log.info("dicom support destination change to {}", DICOM_SUPPORT_DESTINATION);
+                }
             } catch (Exception e) {
                 log.error("update max image size error", e);
             }
-        }, 0, 10, TimeUnit.SECONDS);
+        }, 0, 60, TimeUnit.SECONDS);
     }
 
 }

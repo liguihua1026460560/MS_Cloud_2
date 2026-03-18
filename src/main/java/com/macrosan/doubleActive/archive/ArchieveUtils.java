@@ -61,6 +61,7 @@ public class ArchieveUtils {
     public static final String BASE_MILLIS = "base_millis";
 
     // 基准日期，如果startTime和endTime跨日期，则需要在扫描处理的时候将endTime所在日期作为判断归档日期是否打到的基准
+    // 没用了，改用BASE_STAR_TIME
     public static Map<Integer, Calendar> BASE_CALENDAR = new ConcurrentHashMap<>();
 
     // 开始时间戳
@@ -229,12 +230,13 @@ public class ArchieveUtils {
     public static synchronized void scheduleStart(Calendar startCalendar, int clusterIndex) {
         try {
             if (startCalendar.getTimeInMillis() != tempStartCalendar.get(clusterIndex).getTimeInMillis()) {
+                // 防止存在多个startSchedule定时器时，重复运行归档扫描
                 log.info("cluster {} start time changed. {} to {}", clusterIndex, startCalendar.getTime(), tempStartCalendar.get(clusterIndex).getTime());
                 return;
             }
 
             if (archiveScanning.get(clusterIndex).get()) {
-                log.info("former archive is still scanning.");
+                log.info("former archive is still scanning. cluster {}", clusterIndex);
                 return;
             }
             if (!MainNodeSelector.checkIfSyncNode()) {
@@ -250,13 +252,20 @@ public class ArchieveUtils {
             log.info("cluster {} check start archive. status {}", clusterIndex, archiveStatus);
             if (StringUtils.isBlank(archiveStatus) || "0".equals(archiveStatus)) {
                 // 0表示上一轮结束。只有这种情况才会由startSchedule来启动扫描
+                long startMillis = startCalendar.getTimeInMillis();
+                long currentMillis = System.currentTimeMillis() + ONE_HOUR_TIMESTAMPS;
+                while (currentMillis > startMillis){
+                    startMillis += ONE_DAY_TIMESTAMPS;
+                }
+                startMillis -= ONE_DAY_TIMESTAMPS;
+
                 BASE_CALENDAR.put(clusterIndex, Calendar.getInstance());
-                BASE_STAR_TIME.put(clusterIndex, startCalendar.getTimeInMillis());
-                pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hset(ARCHIVE_MAP, BASE_MILLIS + clusterIndex, String.valueOf(startCalendar.getTimeInMillis()));
-                BASE_CALENDAR.get(clusterIndex).setTimeInMillis(startCalendar.getTimeInMillis());
+                BASE_STAR_TIME.put(clusterIndex, startMillis);
+                pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hset(ARCHIVE_MAP, BASE_MILLIS + clusterIndex, String.valueOf(startMillis));
+                BASE_CALENDAR.get(clusterIndex).setTimeInMillis(startMillis);
                 if (archiveScanning.get(clusterIndex).compareAndSet(false, true)) {
                     pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hset(ARCHIVE_MAP, ARCHIVE_STATUS + clusterIndex, "1");
-                    log.info("start archive scan, {}", startCalendar.getTimeInMillis());
+                    log.info("start archive scan, cluster {} {}", clusterIndex, startMillis);
                     ArchiveHandler.getInstance().start(clusterIndex);
                 }
             }
@@ -688,8 +697,8 @@ public class ArchieveUtils {
                     if (replication.getDays() != null) {
                         String analyzerKey = getAnalyzerKey(bucket, filterType, backupIndex, rulesMapKey, false, null, replication.getDays(), sourceIndex);
                         analyzerKeySet.add(analyzerKey);
-                        long timestamps = daysToDeadlineTimestamps(backupIndex, replication.getDays());
-                        String backupKey = getBackupRecord(bucket, filterType, backupIndex, tagMap, rulesMapKey, false, timestamps, replication.getDays());
+//                        long timestamps = daysToDeadlineTimestamps(backupIndex, replication.getDays());
+                        String backupKey = getBackupRecord(bucket, filterType, backupIndex, tagMap, rulesMapKey, false, 0, replication.getDays());
                         backupKeySet.add(backupKey);
                     } else {
                         if (dateActivated(replication.getDate())) {
@@ -718,8 +727,8 @@ public class ArchieveUtils {
                     }
                     String analyzerKey = getAnalyzerKey(bucket, filterType, backupIndex, rulesMapKey, true, null, replication.getNoncurrentDays(), sourceIndex);
                     analyzerKeySet.add(analyzerKey);
-                    long timestamps = daysToDeadlineTimestamps(backupIndex, replication.getNoncurrentDays());
-                    String backupKey = getBackupRecord(bucket, filterType, backupIndex, tagMap, rulesMapKey, false, timestamps, replication.getNoncurrentDays());
+//                    long timestamps = daysToDeadlineTimestamps(backupIndex, replication.getNoncurrentDays());
+                    String backupKey = getBackupRecord(bucket, filterType, backupIndex, tagMap, rulesMapKey, false, 0, replication.getNoncurrentDays());
                     backupKeySet.add(backupKey);
                 }
             }

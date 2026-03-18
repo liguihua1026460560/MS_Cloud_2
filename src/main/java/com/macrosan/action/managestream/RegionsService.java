@@ -15,6 +15,7 @@ import com.macrosan.message.socketmsg.MapResMsg;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.message.socketmsg.SocketSender;
 import com.macrosan.message.socketmsg.StringResMsg;
+import com.macrosan.message.xmlmsg.InstancePerformanceQuota;
 import com.macrosan.message.xmlmsg.region.GetBucketLocationOutput;
 import com.macrosan.message.xmlmsg.region.LocationResult;
 import com.macrosan.storage.metaserver.BucketShardCache;
@@ -237,6 +238,76 @@ public class RegionsService extends BaseService {
                             pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).sadd(ES_BUCKET_SET, bucket1);
                             pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "mda", "on");
                         }
+                    }
+
+                    if (jsonParam.containsKey("squash")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "squash", jsonParam.getString("squash"));
+                    }
+                    if (jsonParam.containsKey("anonuid")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anonuid", jsonParam.getString("anonuid"));
+                    } else {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anonuid");
+                    }
+                    if (jsonParam.containsKey("anonuid")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anongid", jsonParam.getString("anonuid"));
+                    } else {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anongid");
+                    }
+                    if (jsonParam.containsKey("mountPoint")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "mountPoint", jsonParam.getString("mountPoint"));
+                    }
+                    if (jsonParam.containsKey("nfsAcl")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "nfsAcl", jsonParam.getString("nfsAcl"));
+                    }
+                    if (jsonParam.containsKey("nfs")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "nfs", jsonParam.getString("nfs"));
+                    }
+                    if (jsonParam.containsKey("cifs")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "cifs", jsonParam.getString("cifs"));
+                    }
+                    if (jsonParam.containsKey("caseSensitive")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "caseSensitive", jsonParam.getString("caseSensitive"));
+                    }
+                    if (jsonParam.containsKey("guest")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "guest", jsonParam.getString("guest"));
+                    }
+                    if (jsonParam.containsKey("cifsAcl")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "cifsAcl", jsonParam.getString("cifsAcl"));
+                    }
+                    if (jsonParam.containsKey("ftp")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftp", jsonParam.getString("ftp"));
+                    }
+                    if (jsonParam.containsKey("ftpAcl")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftpAcl", jsonParam.getString("ftpAcl"));
+                    }
+                    if (jsonParam.containsKey("ftp_anonymous")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftp_anonymous", jsonParam.getString("ftp_anonymous"));
+                    }
+                    if (jsonParam.containsKey("nfsIpWhitelist")) {
+                        String nfsIpWhitelist = jsonParam.getString("nfsIpWhitelist");
+                        List<String> valueList = JSON.parseObject(nfsIpWhitelist, new TypeReference<List<String>>() {
+                        });
+                        for (Object value : valueList) {
+                            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).lpush(bucket1 + "_nfsIpWhitelist", String.valueOf(value));
+                        }
+                    }
+                    for (FSPerformanceService.Instance_Type value : FSPerformanceService.Instance_Type.values()) {
+                        String instance = value.name();
+                        if (jsonParam.containsKey(instance + "-" + THROUGHPUT_QUOTA)) {
+                            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, instance + "-" + THROUGHPUT_QUOTA, jsonParam.getString(instance + "-" + THROUGHPUT_QUOTA));
+                        }
+                        if (jsonParam.containsKey(instance + "-" + BAND_WIDTH_QUOTA)) {
+                            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, instance + "-" + BAND_WIDTH_QUOTA, jsonParam.getString(instance + "-" + BAND_WIDTH_QUOTA));
+                        }
+                    }
+                    if (jsonParam.containsKey("nfsQuotaMap")) {
+                        final String nfsQuotaStr = jsonParam.getString("nfsQuotaMap");
+                        Map<String, String> nfsQuotaMap = JSON.parseObject(nfsQuotaStr, new TypeReference<Map<String, String>>() {
+                        });
+                        nfsQuotaMap.forEach((k, v) -> {
+                            pool.getShortMasterCommand(REDIS_FS_QUOTA_INFO_INDEX).hset(bucket1 + "_quota", k, v);
+                        });
+                        cacheJson1.put("nfsQuotaMap", nfsQuotaMap);
                     }
                     pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "data-synchronization-switch", "on");
                 } else if ("suspend".equals(syncType)) {

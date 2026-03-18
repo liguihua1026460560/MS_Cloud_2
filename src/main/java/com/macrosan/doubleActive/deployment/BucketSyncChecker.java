@@ -55,14 +55,14 @@ import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.DataSynChecker.SCAN_SCHEDULER;
 import static com.macrosan.doubleActive.DataSynChecker.SCAN_TIMER;
 import static com.macrosan.doubleActive.HeartBeatChecker.isMultiAliveStarted;
-import static com.macrosan.doubleActive.archive.ArchieveUtils.archiveIsEnable;
 import static com.macrosan.doubleActive.deployment.AddClusterHandler.datasyncIsEnabled;
 import static com.macrosan.doubleActive.deployment.AddClusterHandler.putHisSyncRecord;
 import static com.macrosan.ec.Utils.getLifeCycleMetaKey;
 import static com.macrosan.ec.Utils.getLifeCycleStamp;
 import static com.macrosan.ec.part.PartClient.LIST_MULTI_PART_UPLOADS_RESPONSE_TYPE_REFERENCE;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
-import static com.macrosan.httpserver.MossHttpClient.*;
+import static com.macrosan.httpserver.MossHttpClient.INDEX_IPS_ENTIRE_MAP;
+import static com.macrosan.httpserver.MossHttpClient.LOCAL_CLUSTER_INDEX;
 import static com.macrosan.storage.metaserver.move.AbstractShardingTaskRunner.ARCHIVE_SUFFIX;
 import static com.macrosan.utils.regex.PatternConst.BUCKET_NAME_PATTERN;
 
@@ -173,7 +173,8 @@ public class BucketSyncChecker {
                                                 .defaultIfEmpty("")
                                                 .flatMap(syncIndex -> {
                                                     if (StringUtils.isNotEmpty(syncIndex)) {
-                                                        Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {});
+                                                        Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {
+                                                        });
                                                         if (syncMap.containsKey(LOCAL_CLUSTER_INDEX) && syncMap.get(LOCAL_CLUSTER_INDEX).contains(index)) {
                                                             return dealObjSync(index, syncRequest);
                                                         }
@@ -224,7 +225,8 @@ public class BucketSyncChecker {
                                                 .defaultIfEmpty("")
                                                 .flatMap(syncIndex -> {
                                                     if (StringUtils.isNotEmpty(syncIndex)) {
-                                                        Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {});
+                                                        Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {
+                                                        });
                                                         if (syncMap.containsKey(LOCAL_CLUSTER_INDEX) && syncMap.get(LOCAL_CLUSTER_INDEX).contains(index)) {
                                                             return dealPartSync(index, bucketName, syncRequest);
                                                         }
@@ -443,7 +445,8 @@ public class BucketSyncChecker {
     public static boolean needSyncScan(String bucketName) {
         final String syncIndex = pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucketName, SYNC_INDEX);
         if (StringUtils.isNotEmpty(syncIndex)) {
-            Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {});
+            Map<Integer, Set<Integer>> syncMap = Json.decodeValue(syncIndex, new TypeReference<Map<Integer, Set<Integer>>>() {
+            });
             return syncMap.containsKey(LOCAL_CLUSTER_INDEX) && !syncMap.get(LOCAL_CLUSTER_INDEX).isEmpty();
         }
         return false;
@@ -485,7 +488,7 @@ public class BucketSyncChecker {
                     .flatMap(tuple3 ->
                             pool.getReactive(REDIS_TASKINFO_INDEX).exists(bucketName + ARCHIVE_SUFFIX)
                                     .filter(b -> {
-                                        if (b > 0|| ShardingWorker.contains(bucketName)) {
+                                        if (b > 0 || ShardingWorker.contains(bucketName)) {
                                             // 如果桶正在散列，在散列完成后从头开始扫描所有vnode。SERVER-985
                                             log.debug("has bucket sharding, {}", bucketName);
                                             synchronized (bucketDeploy) {
@@ -529,7 +532,8 @@ public class BucketSyncChecker {
                                 // 列出的对象名不超过该stamp生成的rocksKey前缀
                                 .put("stamp", endStamp)
                                 .put("retryTimes", "0")
-                                .put("beginPrefix", beginPrefix);
+                                .put("beginPrefix", beginPrefix)
+                                .put("syncHis", "1");
                         metaPool.mapToNodeInfo(bucketVnode)
                                 .publishOn(SCAN_SCHEDULER)
                                 .flatMap(infoList -> {
@@ -537,7 +541,7 @@ public class BucketSyncChecker {
                                     reqMsg.put("vnode", nodeArr[0]);
                                     List<SocketReqMsg> msgs = infoList.stream().map(info -> reqMsg.copy().put("lun", info.var2)).collect(Collectors.toList());
                                     ClientTemplate.ResponseInfo<Tuple3<Boolean, String, MetaData>[]> responseInfo = ClientTemplate.oneResponse(msgs, LIST_LIFE_OBJECT,
-                                            new TypeReference<Tuple3<Boolean,String, MetaData>[]>() {
+                                            new TypeReference<Tuple3<Boolean, String, MetaData>[]>() {
                                             }, infoList);
                                     ListSyncObjectClientHandler clientHandler = new ListSyncObjectClientHandler(responseInfo, nodeArr[0], reqMsg, bucketName);
                                     responseInfo.responses.publishOn(SCAN_SCHEDULER).subscribe(clientHandler::handleResponse, e -> log.error("", e),

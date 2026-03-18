@@ -57,16 +57,23 @@ public class WriteCacheServer {
         int type = Integer.parseInt(msg.get("type"));
         boolean write = "1".equals(msg.get("write"));
 
+        long end;
+        if (msg.get("end") != null) {
+            end = Long.parseLong(msg.get("end"));
+        } else {
+            end = Long.MAX_VALUE;
+        }
+
         if (writeCacheDebug) {
-            log.info("server flushWriteCache, ino: {}, offset: {}, count: {}, write: {}", inode.getNodeId(), offset, count, write);
+            log.info("server flushWriteCache, ino: {}, offset: {}, count: {}, end: {}, write: {}", inode.getNodeId(), offset, count, end, write);
         }
         if (type <= 2) {
             // type 1(正常flush) 和 2(写满一块的flush)
             return WriteCacheNode.getCache(inode.getBucket(), inode.getNodeId(), 0, inode.getStorage())
-                    .flatMap(writeCacheNode -> writeCacheNode.commit(inode, offset, count, type == 2, write))
+                    .flatMap(writeCacheNode -> writeCacheNode.commit(inode, offset, count, end, type == 2, write))
                     .flatMap(b -> {
                         if (writeCacheDebug) {
-                            log.info("server flushWriteCache end, ino: {}, offset: {}, count: {}, write: {}, {}", inode.getNodeId(), offset, count, write, b);
+                            log.info("server flushWriteCache end, ino: {}, offset: {}, count: {}, end: {}, write: {}, {}", inode.getNodeId(), offset, count, end, write, b);
                         }
                         if (b) {
                             return Mono.just(local ? LocalPayload.SUCCESS_PAYLOAD : ErasureServer.SUCCESS_PAYLOAD);
@@ -79,7 +86,7 @@ public class WriteCacheServer {
                     .flatMap(writeCacheNode -> writeCacheNode.flushByteCache())
                     .flatMap(b -> {
                         if (writeCacheDebug) {
-                            log.info("server flushWriteCache end, ino: {}, offset: {}, count: {}, write: {}, {}", inode.getNodeId(), offset, count, write, b);
+                            log.info("server flushWriteCache end, ino: {}, offset: {}, count: {}, end: {}, write: {}, {}", inode.getNodeId(), offset, count, end, write, b);
                         }
                         if (b) {
                             return Mono.just(local ? LocalPayload.SUCCESS_PAYLOAD : ErasureServer.SUCCESS_PAYLOAD);

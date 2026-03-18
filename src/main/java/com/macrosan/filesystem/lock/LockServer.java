@@ -111,9 +111,6 @@ public abstract class LockServer<T extends Lock> {
                 NFS4Lock nfs4Lock = (NFS4Lock) value;
                 return v4Server.tryLock0(bucket, key, nfs4Lock)
                         .flatMap(resLock -> {
-                            if (DEFAULT_LOCK.equals(resLock)) {
-                                server.addKeep(bucket, key, value);
-                            }
                             String res = Json.encode(resLock);
                             return Mono.just(res);
                         })
@@ -129,9 +126,6 @@ public abstract class LockServer<T extends Lock> {
                 ShareAccessLock shareAccessLock = (ShareAccessLock) value;
                 return shareAccessServer.tryShare(bucket, key, shareAccessLock)
                         .flatMap(resLock -> {
-                            if (!ShareAccessLock.CONFLICT_SHARE.equals(resLock) && !ShareAccessLock.NOT_FOUND_SHARE.equals(resLock)) {
-                                shareAccessServer.addKeep(bucket, key, resLock);
-                            }
                             String res = Json.encode(resLock);
                             return Mono.just(res);
                         })
@@ -146,11 +140,6 @@ public abstract class LockServer<T extends Lock> {
                 DelegateServer delegateServer = (DelegateServer) server;
                 DelegateLock delegateLock = (DelegateLock) value;
                 return delegateServer.tryDelegate(bucket, key, delegateLock)
-                        .doOnNext(b -> {
-                            if (b && delegateLock.type == DelegateLock.ADD_DELEGATE_TYPE) {
-                                server.addKeep(bucket, key, value);
-                            }
-                        })
                         .map(b -> b ? SUCCESS_PAYLOAD : ERROR_PAYLOAD);
             } catch (Exception e) {
                 log.info("NFS V4 delegate type error {}", type);
@@ -179,9 +168,6 @@ public abstract class LockServer<T extends Lock> {
             NFS4Lock nfs4Lock = (NFS4Lock) value;
             return v4Server.tryUnLock0(bucket, key, nfs4Lock)
                     .flatMap(resLock -> {
-                        if (DEFAULT_LOCK.equals(resLock)) {
-                            server.removeKeep(bucket, key, value);
-                        }
                         String res = Json.encode(resLock);
                         return Mono.just(res);
                     })

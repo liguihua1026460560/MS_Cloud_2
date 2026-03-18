@@ -2,6 +2,7 @@
 package com.macrosan.filesystem.nfs.types;
 
 import com.macrosan.filesystem.nfs.NFSException;
+import com.macrosan.filesystem.nfs.lock.NFS4Lock;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -9,6 +10,7 @@ import lombok.experimental.Accessors;
 import lombok.extern.log4j.Log4j2;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.Objects;
 
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS4ERR_BAD_SEQID;
@@ -43,6 +45,42 @@ public class StateOwner implements Serializable {
     }
 
     @Override
+    public StateOwner clone() {
+        return new StateOwner().setOwner(owner).setSeq(seq);
+    }
+
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Data
+    public static class Owner {
+        public long clientId;
+        public byte[] owner = new byte[0];
+
+        @Override
+        public String toString() {
+            return "Owner{" +
+                    "clientId=" + clientId +
+                    ", owner=" + new String(owner) +
+                    '}';
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Owner owner1 = (Owner) o;
+            return clientId == owner1.clientId && Arrays.equals(owner, owner1.owner);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hash(clientId);
+            result = 31 * result + Arrays.hashCode(owner);
+            return result;
+        }
+    }
+
+    @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
@@ -56,15 +94,11 @@ public class StateOwner implements Serializable {
     }
 
     @Override
-    public StateOwner clone() {
-        return new StateOwner().setOwner(owner).setSeq(seq);
+    public String toString() {
+        return "StateOwner{" +
+                "owner=" + owner +
+                ", seq=" + seq +
+                '}';
     }
 
-    @NoArgsConstructor
-    @AllArgsConstructor
-    @Data
-    public static class Owner {
-        public long clientId;
-        public byte[] owner;
-    }
 }

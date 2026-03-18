@@ -92,8 +92,22 @@ public class NFSBucketInfo {
         });
     }
 
-
     public static Mono<Map<String, String>> getBucketInfoReactive(String bucket) {
+        return redisConnPool.getReactive(REDIS_BUCKETINFO_INDEX)
+                .hgetall(bucket)
+                .defaultIfEmpty(Collections.emptyMap())
+                .doOnNext(map -> {
+                    if (map != null && !map.isEmpty()) {
+                        bucketInfo.compute(bucket, (k, v) -> map);
+                    }
+                });
+    }
+
+    public static Mono<Map<String, String>> getFTPBucketInfoReactive(String bucket) {
+        if (StringUtils.isBlank(bucket)) {
+            throw new NFSException(FsConstants.NfsErrorNo.NFS3ERR_STALE, "The bucket does not exits,please remount nfs.");
+        }
+
         return redisConnPool.getReactive(REDIS_BUCKETINFO_INDEX)
                 .hgetall(bucket)
                 .defaultIfEmpty(Collections.emptyMap())

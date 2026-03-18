@@ -2,6 +2,7 @@ package com.macrosan.filesystem.utils;
 
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.doubleActive.HeartBeatChecker;
 import com.macrosan.filesystem.ReqInfo;
 import com.macrosan.filesystem.cifs.types.Session;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
@@ -19,13 +20,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.macrosan.constants.AccountConstants.DEFAULT_USER_ID;
-import static com.macrosan.constants.ErrorNo.*;
+import static com.macrosan.constants.ErrorNo.INVALID_ARGUMENT;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.SWITCH_ON;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.SWITCH_SUSPEND;
 import static com.macrosan.filesystem.FsConstants.BUCKET_CASE_SENSITIVE;
 import static com.macrosan.filesystem.FsConstants.SMB_MAX_FILE_NAME_LENGTH;
+import static com.macrosan.filesystem.async.AsyncUtils.MOUNT_CLUSTER;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.FSID_BUCKET;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.getBucketInfoReactive;
 import static com.macrosan.snapshot.SnapshotMarkGenerator.MIN_SNAPSHOT_MARK;
@@ -226,6 +228,20 @@ public class CheckUtils {
         }
     }
 
+    public static Mono<Boolean> nfs4DelegateOpenCheck() {
+        return redisConnPool.getReactive(REDIS_SYSINFO_INDEX)
+                .hexists("nfs4_controls", "delegate")
+                .flatMap(isExist -> {
+                    if (isExist) {
+                        return redisConnPool.getReactive(REDIS_SYSINFO_INDEX)
+                                .hget("nfs4_controls", "delegate")
+                                .map("1"::equals);
+                    } else {
+                        return Mono.just(false);
+                    }
+                });
+    }
+
     /**
      * 0 Never(默认)
      * 1 Bad User
@@ -301,7 +317,7 @@ public class CheckUtils {
         }
     }
 
-    public static void checkCreateBucketParamWithFs(UnifiedMap<String, String> paramMap) {
+    public static void checkCreateBucketParamWithFs(UnifiedMap<String, String> paramMap, String strategy) {
         // 是否开启NFS
         String bucketName = paramMap.get(BUCKET_NAME);
         String nfsSwitch = paramMap.get(NFS_SWITCH);
@@ -317,11 +333,11 @@ public class CheckUtils {
             throw new MsException(INVALID_ARGUMENT, "the nfs-switch input is invalid.");
         }
 
-        if ("on".equals(paramMap.getOrDefault(DATA_SYNC_SWITCH, "off"))) {
-            if (nfsOpen || cifsOpen || ftpOpen) {
-                throw new MsException(NFS_SYNC_CONFLICTS, "File gateway conflicts with bucket sync.");
-            }
-        }
+//        if ("on".equals(paramMap.getOrDefault(DATA_SYNC_SWITCH, "off"))) {
+//            if (nfsOpen || cifsOpen || ftpOpen) {
+//                throw new MsException(NFS_SYNC_CONFLICTS, "File gateway conflicts with bucket sync.");
+//            }
+//        }
 
         if (nfsOpen || cifsOpen || ftpOpen) {
             if (!CheckUtils.fileLicenseCheckSync()) {
@@ -336,6 +352,10 @@ public class CheckUtils {
             String objectLock = paramMap.getOrDefault(OBJECT_LOCK_ENABLED, "off");
             if ("on".equals(objectLock)) {
                 bucketMap.put(BUCKET_VERSION_STATUS, "Enabled");
+            }
+            String deduplicate = redisConnPool.getCommand(REDIS_POOL_INDEX).hget(strategy, "deduplicate");
+            if ("on".equals(deduplicate)) {
+                throw new MsException(ErrorNo.NFS_CONFLICT, "strategy: " + strategy + ", already enable deduplicate");
             }
             CheckUtils.validateNfsCanEnabled(bucketName, bucketMap);
         }
@@ -464,6 +484,11 @@ public class CheckUtils {
 
     public static boolean hasStartFS(Map<String, String> bucketInfo, boolean[] hasStartFS) {
         if (bucketInfo.containsKey("fsid")) {
+            if (HeartBeatChecker.isMultiAliveStarted && !"1".equals(bucketInfo.get(MOUNT_CLUSTER))) {
+                // 复制环境的文件如果不是挂在本地站点，跳过
+                return false;
+            }
+
             if (hasStartFS != null) {
                 hasStartFS[0] = true;
             }

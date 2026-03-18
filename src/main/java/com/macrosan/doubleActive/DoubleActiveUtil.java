@@ -13,10 +13,12 @@ import com.macrosan.doubleActive.arbitration.DAVersionUtils;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.VersionUtil;
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.filesystem.async.FSUnsyncRecordHandler;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.httpserver.RestfulVerticle;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.consturct.RequestBuilder;
+import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.UnSynchronizedRecord;
 import com.macrosan.message.jsonmsg.UnSynchronizedRecord.Type;
 import com.macrosan.message.socketmsg.BaseResMsg;
@@ -645,6 +647,10 @@ public class DoubleActiveUtil {
                 .doOnNext(b -> {
                     if (!b) {
                         logger.error("delete sync record fail {}", key);
+                    } else {
+                        if (isDebug) {
+                            logger.info("delete sync record succeeded {}", key);
+                        }
                     }
                 })
                 .doOnError(e -> logger.error("", e));
@@ -764,6 +770,11 @@ public class DoubleActiveUtil {
         if (r.headers().contains(CONTENT_TYPE)) {
             headers.put(CONTENT_TYPE, r.headers().get(CONTENT_TYPE));
         }
+        // 添加影像压缩相关信息的header
+        Optional.ofNullable(r.getHeader(DECOMPRESSED_ETAG)).ifPresent(etag -> headers.put(DECOMPRESSED_ETAG, etag));
+        Optional.ofNullable(r.getHeader(DECOMPRESSED_LENGTH)).ifPresent(length -> headers.put(DECOMPRESSED_LENGTH, length));
+        Optional.ofNullable(r.getHeader(COMPRESSION_TYPE)).ifPresent(compressionType -> headers.put(COMPRESSION_TYPE, compressionType));
+
         String pathStr = getSignPath(r.host(), r.path());
         String param = StringUtils.substringAfter(r.uri(), "?");
         pathStr = StringUtils.isNotEmpty(param) ? pathStr + "?" + param : pathStr;
@@ -1079,40 +1090,49 @@ public class DoubleActiveUtil {
             if (record == null) {
                 return;
             }
-            synchronized (recordSet) {
-                String uploadId = record.headers.get(RECORD_ORIGIN_UPLOADID);
-                String type = getRecordType(record);
-                if (StringUtils.isNotEmpty(uploadId)) {
-                    if (record.type() == UnSynchronizedRecord.Type.ERROR_INIT_PART_UPLOAD) {
-                        if (initUploadRecordSet.get(record.bucket) != null) {
-                            initUploadRecordSet.get(record.bucket).remove(uploadId);
-                        }
-                    } else if (record.type() == UnSynchronizedRecord.Type.ERROR_PART_UPLOAD) {
-                        if (uploadCountSet.get(record.bucket + uploadId) != null && uploadCountSet.get(record.bucket + uploadId).decrementAndGet() == 0) {
-                            uploadCountSet.remove(record.bucket + uploadId);
-                            if (uploadIdRecordSet.get(record.bucket) != null) {
-                                uploadIdRecordSet.get(record.bucket).remove(uploadId);
-                            }
-                        }
-                    } else if (record.type() == UnSynchronizedRecord.Type.ERROR_COMPLETE_PART) {
-                        if (mergeUploadRecordSet.get(record.bucket) != null) {
-                            mergeUploadRecordSet.get(record.bucket).remove(uploadId);
-                        }
-                    }
-
-                    if (recordSet.get(record.bucket) != null && recordSet.get(record.bucket).remove(record.rocksKey())) {
-                        removeRec = 1;
-                        checkRecordMap.get(record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId)
-                                .remove(record.rocksKey());
-                    }
-                } else {
+            if (record.isFSUnsyncRecord()) {
+                String fsRecordMapKey = FSUnsyncRecordHandler.getFSRecordMapKey(record);
+                synchronized (recordSet) {
                     if (recordSet.get(record.bucket) != null && recordSet.get(record.bucket).remove(record.rocksKey())) {
                         removeRec = 2;
-                        checkRecordMap.get(record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId)
-                                .remove(record.recordKey);
+                        checkRecordMap.get(fsRecordMapKey).remove(record.recordKey);
                     }
                 }
+            } else {
+                synchronized (recordSet) {
+                    String uploadId = record.headers.get(RECORD_ORIGIN_UPLOADID);
+                    String type = getRecordType(record);
+                    if (StringUtils.isNotEmpty(uploadId)) {
+                        if (record.type() == UnSynchronizedRecord.Type.ERROR_INIT_PART_UPLOAD) {
+                            if (initUploadRecordSet.get(record.bucket) != null) {
+                                initUploadRecordSet.get(record.bucket).remove(uploadId);
+                            }
+                        } else if (record.type() == UnSynchronizedRecord.Type.ERROR_PART_UPLOAD) {
+                            if (uploadCountSet.get(record.bucket + uploadId) != null && uploadCountSet.get(record.bucket + uploadId).decrementAndGet() == 0) {
+                                uploadCountSet.remove(record.bucket + uploadId);
+                                if (uploadIdRecordSet.get(record.bucket) != null) {
+                                    uploadIdRecordSet.get(record.bucket).remove(uploadId);
+                                }
+                            }
+                        } else if (record.type() == UnSynchronizedRecord.Type.ERROR_COMPLETE_PART) {
+                            if (mergeUploadRecordSet.get(record.bucket) != null) {
+                                mergeUploadRecordSet.get(record.bucket).remove(uploadId);
+                            }
+                        }
 
+                        if (recordSet.get(record.bucket) != null && recordSet.get(record.bucket).remove(record.rocksKey())) {
+                            removeRec = 1;
+                            checkRecordMap.get(record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId)
+                                    .remove(record.rocksKey());
+                        }
+                    } else {
+                        if (recordSet.get(record.bucket) != null && recordSet.get(record.bucket).remove(record.rocksKey())) {
+                            removeRec = 2;
+                            checkRecordMap.get(record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId)
+                                    .remove(record.recordKey);
+                        }
+                    }
+                }
             }
         } catch (Exception e) {
             logger.error("releaseSyncingPayload error", e);
@@ -1122,11 +1142,27 @@ public class DoubleActiveUtil {
                     PART_SYNCING_AMOUNT.decrementAndGet();
                 }
                 TOTAL_SYNCING_AMOUNT.decrementAndGet();
-                long dataSize = Long.parseLong(record.headers.getOrDefault(CONTENT_LENGTH, "0")) / 1024;
+                long dataSize = getDataSizeFromRecord(record);
                 TOTAL_SYNCING_SIZE.addAndGet(-dataSize);
             }
         }
 
+    }
+
+    public static long getDataSizeFromRecord(UnSynchronizedRecord record) {
+        try {
+            if (record.isFSUnsyncRecord()) {
+                if (StringUtils.isBlank(record.headers.get("inodeData"))){
+                    return 0L;
+                }
+                Inode.InodeData inodeData = Json.decodeValue(record.headers.get("inodeData"), Inode.InodeData.class);
+                return inodeData.size / 1024;
+            }
+            return Long.parseLong(record.headers.getOrDefault(CONTENT_LENGTH, "0")) / 1024;
+        } catch (Exception e) {
+            logger.error("getDataSizeFromRecord err, {}", Json.encode(record), e);
+            return 0L;
+        }
     }
 
     static void clearDataCount() {

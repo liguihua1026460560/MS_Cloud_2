@@ -34,6 +34,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.macrosan.constants.SysConstants.VNODE_LUN_NAME;
 import static com.macrosan.storage.StoragePoolFactory.MAX_VNODE_NUM;
@@ -68,6 +69,8 @@ public class StoragePool {
     public String updateECPrefix;
     public String compression;
     Map<String, List<Tuple3<String, String, String>>> cachedNodeInfo;
+
+    private volatile boolean stopHealthCheck;
 
     StoragePool(String vnodePrefix, StoragePoolType type, int k, int m, int packageSize, long divisionSize,
                 List<String> vnodeList, List<String> mapVnodeList, String updateECPrefix) {
@@ -158,7 +161,24 @@ public class StoragePool {
             prefix = vnodePrefix;
         }
 
-        String[] link =  getLink(vnode);
+        String linkStr = cache.hgetVnodeInfo(vnode, "link").block();
+        String[] link = linkStr.substring(1, linkStr.length() - 1).split(",");
+        Set<Integer> poolLinkSet = Stream.of(link).map(Integer::parseInt).collect(Collectors.toSet());
+        if (MAX_VNODE_NUM > vnodeNum) {
+            Set<Integer> next = new HashSet<>();
+
+            do {
+                next.clear();
+                for (int v0 : poolLinkSet) {
+                    if (v0 + vnodeNum < MAX_VNODE_NUM && !poolLinkSet.contains(v0 + vnodeNum)) {
+                        next.add(v0 + vnodeNum);
+                    }
+                }
+
+                poolLinkSet.addAll(next);
+            } while (!next.isEmpty());
+        }
+        link = poolLinkSet.stream().map(String::valueOf).toArray(String[]::new);
         for (String v : link) {
 //            String vv = prefix + v;//无需前缀
             cachedNodeInfo.compute(v, (k, v0) -> {

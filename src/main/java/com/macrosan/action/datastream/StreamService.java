@@ -5,6 +5,7 @@ import com.alibaba.fastjson.JSONObject;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.io.BaseEncoding;
 import com.macrosan.action.core.BaseService;
+import com.macrosan.component.compression.ImageCompressionProcessor;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.doubleActive.AssignClusterHandler;
 import com.macrosan.doubleActive.DataSynChecker;
@@ -55,10 +56,9 @@ import com.macrosan.utils.codec.UrlEncoder;
 import com.macrosan.utils.essearch.EsMetaTask;
 import com.macrosan.utils.functional.LongLongTuple;
 import com.macrosan.utils.functional.Tuple3;
-import com.macrosan.utils.msutils.MsAclUtils;
-import com.macrosan.utils.msutils.MsDateUtils;
-import com.macrosan.utils.msutils.MsException;
-import com.macrosan.utils.msutils.MsObjVersionUtils;
+import com.macrosan.utils.layerMonitor.BackStoreAccessedData;
+import com.macrosan.utils.layerMonitor.ObjectAccessCache;
+import com.macrosan.utils.msutils.*;
 import com.macrosan.utils.params.DelMarkParams;
 import com.macrosan.utils.perf.KeepAliveRequest;
 import com.macrosan.utils.policy.ReactorPolicyCheckUtils;
@@ -113,11 +113,13 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static com.macrosan.action.datastream.ActiveService.*;
+import static com.macrosan.action.datastream.ActiveService.PASSWORD;
+import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.constants.ErrorNo.*;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
@@ -150,6 +152,9 @@ import static com.macrosan.message.jsonmsg.MetaData.ERROR_META;
 import static com.macrosan.message.jsonmsg.MetaData.NOT_FOUND_META;
 import static com.macrosan.storage.StorageOperate.PoolType.DATA;
 import static com.macrosan.storage.crypto.impl.AES256Crypto.DEFAULT_AES256_SECRET_KEY;
+import static com.macrosan.storage.move.CacheFlushConfigRefresher.isStrategyEnableAccessTimeFlush;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
+import static com.macrosan.storage.strategy.StorageStrategy.BUCKET_STRATEGY_NAME_MAP;
 import static com.macrosan.storage.strategy.StorageStrategy.POOL_STRATEGY_MAP;
 import static com.macrosan.utils.authorize.AuthorizeV4.X_AMZ_DECODED_CONTENT_LENGTH;
 import static com.macrosan.utils.msutils.MsAclUtils.*;
@@ -643,7 +648,7 @@ public class StreamService extends BaseService {
                                                         }
                                                         return bucketPool.mapToNodeInfo(targetBucketMigrateVnode)
                                                                 .flatMap(nodeList -> putMetaData(Utils.getMetaDataKey(targetBucketMigrateVnode, targetBucket,
-                                                                        targetObject, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, request,
+                                                                                targetObject, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, request,
                                                                         msg.get("mda"), esMeta, updateFileMeta.get() ? snapshotLink[0] : null));
                                                     }
                                                     return Mono.just(true);
@@ -885,9 +890,21 @@ public class StreamService extends BaseService {
         metaData.setSmallFile(objectSize[0] < MAX_SMALL_SIZE);
         // 无论是否开启NFS，均对元数据生成唯一cookie，防止NFS多客户端list无cookie对象时生成不一样的cookie
 //        metaData.setCookie(VersionUtil.newInode());
+        String lastAccessStamp = "";
+        boolean needRecordAccess = false;
+        //如果上传时桶所在策略开启数据分层且将存到缓存池中
+        if (isEnableCacheAccessTimeFlush(dataPool)) {//当前缓存池开启访问记录
+            needRecordAccess = true;
+            lastAccessStamp = String.valueOf(System.currentTimeMillis());//这里直接按照上传时间更新最近访问时间吧
+            metaData.setLastAccessStamp(lastAccessStamp);
+        }
 
         final JsonObject sysMetaMap = getSysMetaMap(request);
         sysMetaMap.put("owner", user);
+        // 添加影像压缩相关信息
+        Optional.ofNullable(request.getHeader(DECOMPRESSED_ETAG)).ifPresent(etag -> sysMetaMap.put(DECOMPRESSED_ETAG, etag));
+        Optional.ofNullable(request.getHeader(DECOMPRESSED_LENGTH)).ifPresent(length -> sysMetaMap.put(DECOMPRESSED_LENGTH, length));
+        Optional.ofNullable(request.getHeader(COMPRESSION_TYPE)).ifPresent(type -> sysMetaMap.put(COMPRESSION_TYPE, type));
 
         String contentMD5 = request.getHeader(CONTENT_MD5);
         String wormStamp = request.getHeader(WORM_STAMP);
@@ -979,6 +996,10 @@ public class StreamService extends BaseService {
                     versionId = StringUtils.isNoneBlank(request.getHeader(VERSIONID)) ? request.getHeader(VERSIONID) : versionId;
                     metaData.setVersionId(versionId);
                     metaData.setReferencedVersionId(versionId);
+                    if (!"null".equals(versionId)) {
+                        String objNameWithVersionId = objName + File.separator + versionId;
+                        metaData.setFileName(Utils.getObjFileName(dataPool, bucketName, objNameWithVersionId, requestId));
+                    }
                     msg.put("status", versionStatus);
 
                     if (!PASSWORD.equals(request.getHeader(SYNC_AUTH)) && policy[0] == 0) {
@@ -1013,7 +1034,7 @@ public class StreamService extends BaseService {
                         throw new MsException(UNKNOWN_ERROR, "put file fail");
                     }
 
-                    if (contentMD5 != null) {
+                    if (contentMD5 != null && !PASSWORD.equals(request.getHeader(SYNC_AUTH))) {
                         checkMd5(contentMD5, md5);
                     }
                 })
@@ -1092,7 +1113,7 @@ public class StreamService extends BaseService {
                                     }
                                     return bucketPool.mapToNodeInfo(migrateVnode[0])
                                             .flatMap(nodeList -> putMetaData(Utils.getMetaDataKey(migrateVnode[0], bucketName,
-                                                    objName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, request, msg.get("mda"), esMeta,
+                                                            objName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, request, msg.get("mda"), esMeta,
                                                     snapshotLink[0]));
                                 }
                                 return Mono.just(true);
@@ -1110,7 +1131,7 @@ public class StreamService extends BaseService {
                                     metaData.tmpInodeStr = Json.encode(inode);
                                 }
                                 return putMetaData(Utils.getMetaDataKey(bucketVnode[0], bucketName,
-                                        objName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, bucketList, recoverDataProcessor, request, msg.get("mda"), esMeta,
+                                                objName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, bucketList, recoverDataProcessor, request, msg.get("mda"), esMeta,
                                         snapshotLink[0]);
                             })
                             .doOnNext(b -> {
@@ -2371,6 +2392,7 @@ public class StreamService extends BaseService {
                 .put("userId", request.getUserId())
                 .put("objName", objName);
         UnicastProcessor<Long> streamController = UnicastProcessor.create(Queues.<Long>unboundedMultiproducer().get());
+        AtomicReference<UnicastProcessor<Long>> controllerToUse = new AtomicReference<>(streamController);
         final String[] currentSnapshotMark = new String[]{null};
         final String[] snapshotLink = new String[]{null};
         StoragePool bucketPool = StoragePoolFactory.getMetaStoragePool(bucketName);
@@ -2473,6 +2495,7 @@ public class StreamService extends BaseService {
                                 .putHeader("Content-Range", "bytes " + startIndex + '-' + endIndex + '/' + total)
                                 .setStatusCode(206);
                     }
+                    String compressionType = sysMetaMap.get(COMPRESSION_TYPE);
                     //添加请求头
                     addPublicHeaders(request, getRequestId())
                             .putHeader(CONTENT_LENGTH, String.valueOf(endIndex - startIndex < 0 ? 0 : endIndex - startIndex + 1))
@@ -2497,8 +2520,8 @@ public class StreamService extends BaseService {
                     dealWithSixRequestParameter(request);
 
                     if (total == 0) {
-                        MonoProcessor<byte[]> res = MonoProcessor.create();
-                        res.onNext(new byte[0]);
+                        MonoProcessor<Buffer> res = MonoProcessor.create();
+                        res.onNext(Buffer.buffer(new byte[0]));
                         return res;
                     }
 
@@ -2506,12 +2529,35 @@ public class StreamService extends BaseService {
                         long offset = metaData.offset + startIndex;
                         long size = endIndex - startIndex + 1;
                         return ReadObjClient.readObj(0, metaData.storage, bucketName, metaData.fileName, offset, size, metaData.aggSize, false)
-                                .map(tuple21 -> tuple21.var2);
+                                .map(tuple21 -> tuple21.var2)
+                                .map(BytesWrapperBuffer::new);
                     }
 
-                    return ErasureClient.getObject(dataPool[0], metaData, startIndex, endIndex, tuple2.getT1(), streamController, request, null);
+                    Flux<byte[]> dataFlux = ErasureClient.getObject(dataPool[0], metaData, startIndex, endIndex, tuple2.getT1(), streamController, request, null);
+                    if (compressionType == null) {
+                        return dataFlux.map(BytesWrapperBuffer::new);
+                    }
+                    if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {
+                        // 压缩对象，替换etag和length为解压后的
+                        request.response().putHeader(ETAG, '"' + sysMetaMap.get(DECOMPRESSED_ETAG) + '"');
+                        request.response().putHeader(CONTENT_LENGTH, sysMetaMap.get(DECOMPRESSED_LENGTH));
+                    }
+                    // 切换下游控制器， 解压服务通过 streamController 控制 上游getObject速率，客户端写入 通过readController控制从解压服务器读取数据的速率
+                    UnicastProcessor<Long> readController = UnicastProcessor.create();
+                    controllerToUse.set(readController);
+                    return ImageCompressionProcessor.getInstance().decompressImage(compressionType, endIndex - startIndex + 1, dataFlux, streamController, readController);
                 })
-                .subscribe(new DownLoadSubscriber(request, request.getContext(), streamController, deleteSource, backSource));
+                .doFinally(s -> {
+                    //只有在读开启了数据分层的缓存池上的数据才异步对访问记录更新, 数据池数据的访问直接在异步迁移回缓存池时进行更新
+                    if (isEnableCacheAccessTimeFlush(dataPool[0])) {
+                        ObjectAccessCache.addAccessRecord(bucketName, objName, versionId[0]);//添加到异步处理增加访问记录
+                    }
+                    //策略开启数据分层后get数据池上的对象会触发异步回迁至缓存池
+                    if (dataPool[0].getVnodePrefix().startsWith("data") && isStrategyEnableAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucketName))) {
+                        BackStoreAccessedData.addNeedBackStoreRecord(bucketName, objName, versionId[0]);
+                    }
+                })
+                .subscribe(new DownLoadSubscriber(request, request.getContext(), controllerToUse, deleteSource, backSource));
         return ErrorNo.SUCCESS_STATUS;
     }
 
@@ -2686,6 +2732,11 @@ public class StreamService extends BaseService {
                                 .putHeader(X_AMX_STORAGE_STRATEGY, allSiteCheck[0] ? sysMetaMap.getOrDefault(X_AMX_STORAGE_STRATEGY, null) : getObjectStorageStrategy(tuple2.getT2(), metaData))
                                 .putHeader(CONTENT_LENGTH, contentLength)
                                 .setStatusCode(200);
+                        if (!allSiteCheck[0] && sysMetaMap.containsKey(COMPRESSION_TYPE)) {
+                            // 压缩对象，替换etag和length为解压后的
+                            response.putHeader(ETAG, '"' + sysMetaMap.get(DECOMPRESSED_ETAG) + '"');
+                            response.putHeader(CONTENT_LENGTH, sysMetaMap.get(DECOMPRESSED_LENGTH));
+                        }
                         CryptoUtils.addCryptoResponse(request, metaData.getCrypto());
                         if (isAppendableObject(metaData)) {
                             response.putHeader(NEXT_APPEND_POSITION, (metaData.getEndIndex() + 1) + "");
@@ -3402,21 +3453,21 @@ public class StreamService extends BaseService {
     /**
      * 下载对象的subscriber
      */
-    private static final class DownLoadSubscriber implements CoreSubscriber<byte[]> {
+    private static final class DownLoadSubscriber implements CoreSubscriber<Buffer> {
         //请求对象
         private final MsHttpRequest request;
         //上下文
         private final Context context;
         private Subscription s;
-        private final UnicastProcessor<Long> streamController;
+        private final AtomicReference<UnicastProcessor<Long>> streamControllerRef;
         private boolean dataStreamStart = false;
         private AtomicBoolean deleteSource;
         private AtomicBoolean backSource;
 
-        private DownLoadSubscriber(MsHttpRequest request, Context context, UnicastProcessor<Long> streamController, AtomicBoolean deleteSource, AtomicBoolean backSource) {
+        private DownLoadSubscriber(MsHttpRequest request, Context context, AtomicReference<UnicastProcessor<Long>> streamControllerRef, AtomicBoolean deleteSource, AtomicBoolean backSource) {
             this.request = request;
             this.context = context;
-            this.streamController = streamController;
+            this.streamControllerRef = streamControllerRef;
             this.deleteSource = deleteSource;
             this.backSource = backSource;
             request.exceptionHandler(this::onError);
@@ -3506,12 +3557,12 @@ public class StreamService extends BaseService {
         }
 
         @Override
-        public void onNext(byte[] bytes) {
+        public void onNext(Buffer buffer) {
             try {
                 context.runOnContext(v -> {
                     try {
-                        request.response().write(Buffer.buffer(bytes), unit -> {
-                            streamController.onNext(-1L);
+                        request.response().write(buffer, unit -> {
+                            streamControllerRef.get().onNext(1L);
                             dataStreamStart = true;
                         });
                     } catch (Exception e) {
@@ -3810,7 +3861,7 @@ public class StreamService extends BaseService {
                                                         }
                                                         return bucketPool.mapToNodeInfo(targetBucketMigrateVnode)
                                                                 .flatMap(nodeList -> putMetaData(Utils.getMetaDataKey(targetBucketMigrateVnode, bucketName,
-                                                                        newObjectName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, null,
+                                                                                newObjectName, metaData.versionId, metaData.stamp, metaData.snapshotMark), metaData, nodeList, recoverDataProcessor, null,
                                                                         msg.get("mda"), esMeta, snapshotLink[0]));
                                                     }
                                                     return Mono.just(true);
@@ -4533,7 +4584,7 @@ public class StreamService extends BaseService {
                                                         .setEtag(partInfo.getEtag())
                                                         .setFileName(partInfo.fileName);
                                                 return Node.getInstance().updateInodeData(bucketName, inodes[0].getNodeId(), inodes[0].getSize(), inodeData, "", "", 1,
-                                                        inodes[0].getXAttrMap().get(QUOTA_KEY))
+                                                                inodes[0].getXAttrMap().get(QUOTA_KEY))
                                                         .flatMap(i -> {
                                                             if (isError(i)) {
                                                                 return Mono.error(new MsException(UNKNOWN_ERROR, "put meta data error!"));

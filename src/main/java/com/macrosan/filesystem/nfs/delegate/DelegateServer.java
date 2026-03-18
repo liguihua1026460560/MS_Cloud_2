@@ -2,22 +2,28 @@ package com.macrosan.filesystem.nfs.delegate;
 
 import com.macrosan.filesystem.lock.Lock;
 import com.macrosan.filesystem.lock.LockServer;
+import com.macrosan.filesystem.nfs.lock.NFS4Lock;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.msutils.MsExecutor;
 import com.macrosan.utils.msutils.MsThreadFactory;
-import io.vertx.core.json.Json;
 import lombok.Data;
 import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.MonoProcessor;
 
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
+import static com.macrosan.filesystem.lock.LockKeeper.KEEP_NAN;
 import static com.macrosan.filesystem.nfs.call.v4.OpenV4Call.*;
 import static com.macrosan.filesystem.nfs.delegate.DelegateLock.*;
+import static com.macrosan.filesystem.nfs.lock.NFS4Lock.DEFAULT_LOCK;
+import static com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock.*;
 
 @Log4j2
 public class DelegateServer extends LockServer<DelegateLock> {
@@ -29,8 +35,10 @@ public class DelegateServer extends LockServer<DelegateLock> {
     }
 
     private static final DelegateServer instance = new DelegateServer(Lock.NFS4_DELEGATE_TYPE, DelegateLock.class);
-    public static Map<String, Delegate> delegateMap = new ConcurrentHashMap<>();
-
+    public static Map<String, Map<String, Delegate>> delegateMap = new ConcurrentHashMap<>();
+    public static ConcurrentHashMap<DelegateLock, Long> unLockMap = new ConcurrentHashMap<>();
+    public static Map<DelegateLock, Object> unLocker = new ConcurrentHashMap<>();
+    public static MsExecutor executor0 = new MsExecutor(1, 1, new MsThreadFactory("NFS4Delegate-timeout"));
 
     public static DelegateServer getInstance() {
         return instance;
@@ -41,40 +49,137 @@ public class DelegateServer extends LockServer<DelegateLock> {
 //        executor.submit(this::tryClearTimeOutLock);
     }
 
+    static {
+        executor0.submit(DelegateServer::checkUnlock);
+    }
+
+    private static void checkUnlock() {
+        long start = System.nanoTime();
+        try {
+            Iterator<Map.Entry<DelegateLock, Long>> iterator = unLockMap.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<DelegateLock, Long> entry = iterator.next();
+                if (System.nanoTime() - entry.getValue() > 5 * KEEP_NAN) {
+                    iterator.remove();
+                    unLocker.remove(entry.getKey());
+                }
+            }
+        } catch (Exception e) {
+            log.error(e);
+        }
+
+        long exec = KEEP_NAN - (System.nanoTime() - start);
+        if (exec < 0) {
+            exec = 0;
+        }
+        executor.schedule(DelegateServer::checkUnlock, exec, TimeUnit.NANOSECONDS);
+    }
+
 
     @Override
     protected Mono<Boolean> tryLock(String bucket, String key, DelegateLock value) {
-        return null;
+        return tryDelegate(bucket, key, value);
     }
 
     public Mono<Boolean> tryDelegate(String bucket, String key, DelegateLock value) {
-        String k = String.valueOf(value.nodeId);
-        Delegate delegate = delegateMap.computeIfAbsent(k, k1 -> new Delegate());
-        Tuple2<Boolean, Set<DelegateLock>> res = delegate.delegate(value);
-        if (res.var1 && !res.var2.isEmpty()) {
-            sendRecall(k, res.var2);
+//        String k = String.valueOf(value.nodeId);
+//        Delegate delegate = delegateMap.computeIfAbsent(k, k1 -> new Delegate());
+//        Tuple2<Boolean, Set<DelegateLock>> res = delegate.delegate(value);
+//        if (res.var1 && !res.var2.isEmpty()) {
+//            sendRecall(k, res.var2);
+//        }
+//        return Mono.just(res.var1);
+
+        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        synchronized (o) {
+            MonoProcessor<Boolean> res = MonoProcessor.create();
+            tryDelegate(bucket, key, value, res);
+            return res.doOnNext(b -> {
+                if (b && value.type == DelegateLock.ADD_DELEGATE_TYPE) {
+                    addKeep(bucket, key, value);
+                }
+            });
         }
-        return Mono.just(res.var1);
+    }
+
+    public void tryDelegate(String bucket, String key, DelegateLock value, MonoProcessor<Boolean> res) {
+        delegateMap.compute(bucket, (bucket0, map) -> {
+            if (map == null) {
+                if (value.type == ADD_DELEGATE_TYPE){
+                    map = new ConcurrentHashMap<>();
+                }else {
+                    res.onNext(false);
+                    return null;
+                }
+            }
+            map.compute(key, (key0, dealLock) -> {
+                if (dealLock == null) {
+                    if (value.type == ADD_DELEGATE_TYPE){
+                        dealLock = new DelegateServer.Delegate();
+                    }else {
+                        res.onNext(false);
+                        return null;
+                    }
+                }
+                Tuple2<Boolean, Set<DelegateLock>> tuple2 = dealLock.delegate(value);
+                if (tuple2.var1 && !tuple2.var2.isEmpty()) {
+                    sendRecall(key, tuple2.var2);
+                }
+                res.onNext(tuple2.var1);
+                return dealLock;
+            });
+            return map;
+        });
     }
 
     public Mono<DelegateLock> getDelegate(String bucket, String key, DelegateLock value) {
-        String k = String.valueOf(value.nodeId);
-        Delegate delegate = delegateMap.computeIfAbsent(k, k1 -> new Delegate());
-        DelegateLock res = delegate.getDelegate(value);
-        return Mono.just(res);
+        MonoProcessor<DelegateLock> res = MonoProcessor.create();
+        delegateMap.computeIfPresent(bucket, (bucket0, map) -> {
+                    map.computeIfPresent(key, (k0, dealLock) -> {
+                        res.onNext(dealLock.getDelegate(value));
+                        return dealLock.isEmpty() ? null : dealLock;
+                    });
+                    return map.isEmpty() ? null : map;
+                }
+        );
+
+        return res;
     }
 
 
     @Override
     protected Mono<Boolean> tryUnLock(String bucket, String key, DelegateLock value) {
-        String k = String.valueOf(value.nodeId);
-        Delegate delegate = delegateMap.computeIfAbsent(k, k1 -> new Delegate());
-        return Mono.just(delegate.releaseDelegate(value));
+        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        synchronized (o) {
+            MonoProcessor<Boolean> res = MonoProcessor.create();
+            delegateMap.computeIfPresent(bucket, (bucket0, map) -> {
+                        map.computeIfPresent(key, (k0, dealLock) -> {
+                            boolean b = dealLock.releaseDelegate(value);
+                            if (b) {
+                                unLockMap.put(value, System.nanoTime());
+                            }
+                            res.onNext(b);
+                            return dealLock.isEmpty() ? null : dealLock;
+                        });
+                        return map.isEmpty() ? null : map;
+                    }
+            );
+            removeKeep(bucket, key, value);
+            return res;
+        }
     }
 
     @Override
     protected Mono<Boolean> keep(String bucket, String key, DelegateLock value) {
-        return tryDelegate(bucket, key, value);
+        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        synchronized (o) {
+            MonoProcessor<Boolean> res = MonoProcessor.create();
+            if (unLockMap.containsKey(value)) {
+                return Mono.just(true);
+            }
+            tryDelegate(bucket, key, value, res);
+            return res;
+        }
     }
 
     @Data
@@ -100,13 +205,14 @@ public class DelegateServer extends LockServer<DelegateLock> {
                             delegateLocks.addAll(writeDelegate);
                         }
                         if (!readDelegate.isEmpty() && write) {
+                            res = true;
                             delegateLocks.addAll(readDelegate);
                         }
                         return new Tuple2<>(res && !delegateLocks.isEmpty(), delegateLocks);
                     case ADD_DELEGATE_TYPE:
                         //查询是否已经存在委托
                         if (!writeDelegate.isEmpty() || (!readDelegate.isEmpty() && write)) {
-                            return new Tuple2<>(false, delegateLocks);
+                            return new Tuple2<>(true, delegateLocks);
                         }
                         //是否已经授予该客户端delegate
                         if (read && readDelegate.stream()
@@ -129,12 +235,12 @@ public class DelegateServer extends LockServer<DelegateLock> {
 
         public boolean releaseDelegate(DelegateLock value) {
             synchronized (this) {
-                writeDelegate.removeIf(v -> v.stateId != null && value.stateId != null && v.stateId.equals(value.stateId));
-                readDelegate.removeIf(v -> v.stateId != null && value.stateId != null && v.stateId.equals(value.stateId));
+                boolean remove = writeDelegate.removeIf(v -> v.stateId != null && value.stateId != null && v.stateId.equals(value.stateId));
+                boolean remove0 = readDelegate.removeIf(v -> v.stateId != null && value.stateId != null && v.stateId.equals(value.stateId));
                 if (value.node.equals(ServerConfig.getInstance().getHostUuid())) {
                     unDelegateMap.remove(value);
                 }
-                return true;
+                return remove || remove0;
             }
         }
 
@@ -148,6 +254,12 @@ public class DelegateServer extends LockServer<DelegateLock> {
                         .filter(s -> s.stateId.equals(value.stateId))
                         .findFirst()
                         .orElse(NOT_FOUND_DELEGATE);
+            }
+        }
+
+        public boolean isEmpty() {
+            synchronized (this) {
+                return writeDelegate.isEmpty() && readDelegate.isEmpty();
             }
         }
 

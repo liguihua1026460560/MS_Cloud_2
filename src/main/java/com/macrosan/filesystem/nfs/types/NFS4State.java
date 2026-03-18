@@ -6,6 +6,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.experimental.Accessors;
 import lombok.extern.log4j.Log4j2;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.*;
 
@@ -20,13 +22,12 @@ public class NFS4State {
     private boolean confirmed = false;
     private boolean disposed = false;
     private final int type;
-
-
+    private long nodeId;
+    private String bucket;
+    private String objName;
     private final NFS4State openState;
     private int shareAccess;
     private int shareDeny;
-    private int newShareAccess;
-    private int newShareDeny;
     private int lastUpdateSeqId;
     private NFS4Client client;
     private final List<StateDisposeListener> disposeListeners;
@@ -36,17 +37,18 @@ public class NFS4State {
 //        this(null, owner, stateId, type, client);
 //    }
 
-    public NFS4State(NFS4State openState, StateOwner owner, StateId stateId, int type, int shareAccess, int shareDeny, int lastUpdateSeqId, NFS4Client client) {
+    public NFS4State(NFS4State openState, StateOwner owner, StateId stateId, int type, long nodeId, String bucket, String objName, int shareAccess, int shareDeny, int lastUpdateSeqId, NFS4Client client) {
         this.openState = openState;
         this.owner = owner;
         this.stateId = stateId;
         this.shareAccess = shareAccess;
         this.shareDeny = shareDeny;
-        this.newShareAccess = shareAccess;
-        this.newShareDeny = shareDeny;
         this.lastUpdateSeqId = lastUpdateSeqId;
         this.type = type;
         this.client = client;
+        this.nodeId = nodeId;
+        this.bucket = bucket;
+        this.objName = objName;
         disposeListeners = new ArrayList<>();
         lockDisposeMap = new HashMap<>();
     }
@@ -84,8 +86,8 @@ public class NFS4State {
 
     @Override
     public NFS4State clone() {
-        return new NFS4State(stateId.clone(), owner.clone(), confirmed, disposed, type,
-                openState == null ? null : openState.clone(), shareAccess, shareDeny, newShareAccess, newShareDeny, lastUpdateSeqId, client,
+        return new NFS4State(stateId.clone(), owner.clone(), confirmed, disposed, type, nodeId, bucket, objName,
+                openState == null ? null : openState.clone(), shareAccess, shareDeny, lastUpdateSeqId, client,
                 new ArrayList<>(disposeListeners), new HashMap<>(lockDisposeMap));
     }
 
@@ -97,39 +99,32 @@ public class NFS4State {
         return type;
     }
 
-    public void tryDispose() {
+    public Mono<Boolean> tryDispose() {
         synchronized (this) {
+            List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
             if (!disposed) {
-                Iterator<StateDisposeListener> i = disposeListeners.iterator();
-                while (i.hasNext()) {
-                    StateDisposeListener listener = i.next();
-                    listener.notifyDisposed(this);
-                    i.remove();
-                }
-                disposed = true;
+                return Flux.fromIterable(dispose0)
+                        .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
+                        .collectList().doOnNext(v -> {disposed = true;}).map(v -> true);
             }
         }
-
+        return Mono.just(true);
     }
 
 
-    public void disposeIgnoreFailures() {
+    public Mono<Boolean> disposeIgnoreFailures() {
         synchronized (this) {
+            List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
             if (!disposed) {
-                Iterator<StateDisposeListener> i = disposeListeners.iterator();
-                while (i.hasNext()) {
-                    StateDisposeListener listener = i.next();
-                    try {
-                        listener.notifyDisposed(this);
-                    } catch (Exception e) {
-//                        log.info("failed to notify: {}", e.getMessage());
-                    }
-                    i.remove();
-                }
-                lockDisposeMap.clear();
-                disposed = true;
+                return Flux.fromIterable(dispose0)
+                        .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
+                        .collectList().doOnNext(v -> {
+                            disposed = true;
+                            lockDisposeMap.clear();
+                        }).map(v -> true);
             }
         }
+        return Mono.just(true);
     }
 
     public NFS4State getOpenState() {
@@ -166,7 +161,7 @@ public class NFS4State {
 
 
     public interface StateDisposeListener {
-        void notifyDisposed(NFS4State state);
+        Mono<Boolean> notifyDisposed(NFS4State state);
     }
 
     @Override
@@ -183,6 +178,8 @@ public class NFS4State {
                 ", client=" + client +
                 ", disposeListeners=" + disposeListeners +
                 ", lockDisposeMap=" + lockDisposeMap +
+                ", lastUpdateSeqId=" + lastUpdateSeqId +
+
                 '}';
     }
 }

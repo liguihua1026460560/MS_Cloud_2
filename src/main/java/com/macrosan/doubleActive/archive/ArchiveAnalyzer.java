@@ -262,13 +262,15 @@ public class ArchiveAnalyzer {
 
     /**
      * k个删除成功即进行countY+1，可能出现y重复计数（节点掉线重启后，在rabbitmq处理删除前，将本地已经同步的记录重新再处理一遍），视作缺陷，后续自动将xy对齐。
+     * 先进行countY+1，再删除删除差异记录，预防差异删除后，countY没有记录成功，缺少统计无法结束
      */
     public static Mono<Boolean> deleteAndCount(UnSynchronizedRecord record, String analyzerKey, List<Tuple3<String, String, String>> vnodeList) {
-        return ErasureClient.deleteUnsyncRocketsValue(record.bucket, record.rocksKey(), record, vnodeList, ARCHIVE_ANALYZER_KEY, null)
+        return ArchiveAnalyzer.getInstance().incrCount(analyzerKey, countY)
                 .publishOn(SCAN_SCHEDULER)
-                .flatMap(i0 -> {
-                    if (i0 != 0) {
-                        return ArchiveAnalyzer.getInstance().incrCount(analyzerKey, countY);
+                .flatMap(res -> {
+                    if (res) {
+                        return ErasureClient.deleteUnsyncRocketsValue(record.bucket, record.rocksKey(), record, vnodeList, ARCHIVE_ANALYZER_KEY, null)
+                                .flatMap(i -> i != 0 ? Mono.just(true) : Mono.just(false));
                     }  else {
                         return Mono.just(false);
                     }

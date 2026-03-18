@@ -105,6 +105,9 @@ public class CacheSmallObjectStrategy extends SelectorStrategy {
                     return pool;
                 }
             }
+        } else if (operate.getPoolType() == StorageOperate.PoolType.CACHE) {
+            //直接获取一个缓存池
+            return selector.select(cache);
         }
 
         return strategy.getStoragePool(operate);

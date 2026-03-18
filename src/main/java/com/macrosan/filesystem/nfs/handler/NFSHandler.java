@@ -6,12 +6,15 @@ import com.macrosan.filesystem.ReadStruct;
 import com.macrosan.filesystem.ReqInfo;
 import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.nfs.*;
+import com.macrosan.filesystem.nfs.api.NFS4Proc;
 import com.macrosan.filesystem.nfs.api.NFSACLProc;
 import com.macrosan.filesystem.nfs.auth.AuthGSS;
 import com.macrosan.filesystem.nfs.auth.AuthReply;
 import com.macrosan.filesystem.nfs.auth.GssVerifier;
 import com.macrosan.filesystem.nfs.auth.KrbJni;
-import com.macrosan.filesystem.nfs.call.*;
+import com.macrosan.filesystem.nfs.call.EntryInCall;
+import com.macrosan.filesystem.nfs.call.GetAclCall;
+import com.macrosan.filesystem.nfs.call.SetAclCall;
 import com.macrosan.filesystem.nfs.call.rquota.GetQuotaCall;
 import com.macrosan.filesystem.nfs.call.rquota.SetQuotaCall;
 import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
@@ -527,7 +530,7 @@ public class NFSHandler extends RpcHandler {
                             }
                         });
             }
-        } else if (callHeader.rpcVersion != 2 && callHeader.program == 100003 && callHeader.programVersion == 4) {
+        } else if (callHeader.rpcVersion == 2 && callHeader.program == 100003 && callHeader.programVersion == 4) {
             NFSV4.Opcode opcode = NFSV4.values[callHeader.opt];
             NFSV4.OptInfo proc = NFSV4.v4Opt[callHeader.opt];
             if (proc == null) {
@@ -598,7 +601,7 @@ public class NFSHandler extends RpcHandler {
             return;
         }
 
-        if (cbInfo.program == NFS4_CALLBACK_PROGRAM && cbInfo.rpcVersion == 2 && cbInfo.programVersion != 1) {
+        if (cbInfo.program == NFS4_CALLBACK_PROGRAM && cbInfo.rpcVersion == 2 && cbInfo.programVersion == 1) {
 //        if (cbInfo.program == NFS4_CALLBACK_PROGRAM && cbInfo.rpcVersion == 2 && cbInfo.programVersion == 1) {
             NFSHandler.CBInfoMap.remove(replyHeader.getHeader().id);
             int opt = cbInfo.opt == NFS4PROC_CB_NULL.opcode ? NFS4PROC_CB_NULL.opcode : NFS4PROC_CB_COMPOUND.opcode;
@@ -687,11 +690,14 @@ public class NFSHandler extends RpcHandler {
         return res.timeout(Duration.ofSeconds(NFS_TIME_OUT))
                 .onErrorResume(e -> {
                     if (e instanceof TimeoutException) {
+                        if (opt == NFSV4.Opcode.NFS4PROC_RENAME.opcode && reqHeader.optCompleted) {
+                            releaseLock(reqHeader);
+                        }
                         log.error("NFS PROCESS timeout opt:{}", opcode);
                     } else if (e instanceof NFSException && ((NFSException) e).nfsError) {
                         CompoundReply reply = new CompoundReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
-                        if (NFS.nfsDebug) {
-                            log.info("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                        if (NFS4Proc.errorDebug) {
+                           log.info("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
                         }
                         reply.opt = opt;
                         reply.status = ((NFSException) e).getErrCode();
@@ -705,8 +711,15 @@ public class NFSHandler extends RpcHandler {
                     return Mono.just(errorReply);
                 }).flatMap(reply -> {
                     CompoundReply oneReply = (CompoundReply) reply;
+                    int index0 = index + 1;
+                    if (oneReply.status != 0) {
+                        index0 = compoundCall.getCount();
+                        if (index + 1 < compoundCall.getCount() && buf.getInt(finalOffset) == NFSV4.Opcode.NFS4PROC_CLOSE.opcode) {
+                            index0 = index + 1;
+                        }
+                    }
                     compoundReply.getReplies().add(reply);
-                    return execOpt(compoundCall, compoundReply, oneReply.status == 0 ? index + 1 : compoundCall.getCount(),
+                    return execOpt(compoundCall, compoundReply, index0,
                             callHeader, reqHeader, buf, finalOffset, finalMaxBufSize);
                 });
     }

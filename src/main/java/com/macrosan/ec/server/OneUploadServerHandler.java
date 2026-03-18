@@ -3,6 +3,8 @@ package com.macrosan.ec.server;
 import com.macrosan.database.rocksdb.batch.BatchRocksDB;
 import com.macrosan.fs.Allocator.Result;
 import com.macrosan.message.jsonmsg.FileMeta;
+import com.macrosan.storage.StoragePool;
+import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.compressor.CompressorUtils;
 import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.storage.crypto.rootKey.RootSecretKeyUtils;
@@ -11,13 +13,14 @@ import com.macrosan.utils.ratelimiter.RecoverLimiter;
 import io.rsocket.Payload;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.UnicastProcessor;
 
 import java.util.concurrent.atomic.AtomicReference;
 
-import static com.macrosan.ec.Utils.ZERO_BYTES;
-import static com.macrosan.ec.Utils.getCacheOrderKey;
+import static com.macrosan.ec.Utils.*;
 import static com.macrosan.fs.BlockDevice.*;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 
 @Log4j2
 public class OneUploadServerHandler extends AioUploadServerHandler {
@@ -127,6 +130,12 @@ public class OneUploadServerHandler extends AioUploadServerHandler {
                 writeBatch.put(fileMetaKey.getBytes(), Json.encode(fileMeta).getBytes());
                 if (fileMeta.getFlushStamp() != null) {
                     writeBatch.put(getCacheOrderKey(fileMeta.getFlushStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                }
+                if (StringUtils.isNotEmpty(fileMeta.getLastAccessStamp())) {//put时同步增加访问记录
+                    StoragePool pool = StoragePoolFactory.getStoragePoolByDisk(lun);
+                    if (pool != null && isEnableCacheAccessTimeFlush(pool)) {
+                        writeBatch.put(getAccessTimeKey(fileMeta.getLastAccessStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                    }
                 }
             };
 

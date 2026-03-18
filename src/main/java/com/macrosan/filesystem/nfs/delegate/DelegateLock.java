@@ -17,14 +17,13 @@ import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.macrosan.filesystem.nfs.api.NFS4Proc.clientControl;
 import static com.macrosan.filesystem.nfs.types.StateId.NFS4_DELEG_STID;
 import static com.macrosan.filesystem.utils.Nfs4Utils.buildCBCall;
+import static com.macrosan.filesystem.utils.Nfs4Utils.sendCB;
 
 @Log4j2
 @Accessors(chain = true)
@@ -32,14 +31,14 @@ import static com.macrosan.filesystem.utils.Nfs4Utils.buildCBCall;
 //@AllArgsConstructor
 @Data
 public class DelegateLock extends Lock {
-    public String bucket;
+    public String bucket = "";
     public String objName;
     public long nodeId;
     public FH2 fh2;
     public StateId stateId = new StateId();
     public int shareAccess;
     public int shareDeny;
-    public String node;
+    public String node = "";
     public long clientId;
     public byte[] sessionId = new byte[0];
     public byte[] owner = new byte[0];
@@ -116,41 +115,33 @@ public class DelegateLock extends Lock {
                 if (minorVersion >= 1) {
                     NFS4Session session = nfs4Client.getSession0(sessionId);
                     if (session != null) {
-                        synchronized (session.cbSeqId) {
-                            CompoundCall compoundCall = buildCBCall(session);
-                            CBSequenceCall cbSequenceCall = new CBSequenceCall();
-                            cbSequenceCall.opt = NFSV4.CBOpcode.NFS4PROC_CB_SEQUENCE.opcode;
-                            cbSequenceCall.sessionId = session.getSessionId();
-                            cbSequenceCall.seqId = session.cbSeqId.incrementAndGet();
-                            cbSequenceCall.slotId = 0;
-                            cbSequenceCall.highSlotId = 0;
-                            cbSequenceCall.isCache = false;
-                            //todo
-                            cbSequenceCall.referringCallList = 0;
-                            compoundCall.callList.add(cbSequenceCall);
-                            CBRecallCall cbRecallCall = new CBRecallCall();
-                            cbRecallCall.opt = NFSV4.CBOpcode.NFS4PROC_CB_RECALL.opcode;
-                            cbRecallCall.stateId = stateId;
-                            cbRecallCall.truncated = false;
-                            cbRecallCall.fh2 = fh2;
-                            compoundCall.callList.add(cbRecallCall);
-                            compoundCall.setCount(compoundCall.callList.size());
+
+                        CBRecallCall cbRecallCall = new CBRecallCall();
+                        cbRecallCall.opt = NFSV4.CBOpcode.NFS4PROC_CB_RECALL.opcode;
+                        cbRecallCall.stateId = stateId;
+                        cbRecallCall.truncated = false;
+                        cbRecallCall.fh2 = fh2;
+                        List<CompoundCall> cbCallList = new ArrayList<>();
+                        cbCallList.add(cbRecallCall);
+                        CompoundCall compoundCall = sendCB(session, cbCallList, NFSV4.CBOpcode.NFS4PROC_CB_RECALL.opcode);
+                        Mono.just(true).doOnNext(f ->{
                             NFSHandler.CBInfoMap.put(compoundCall.callHeader.header.id, new CBInfo(2, session.cbProgram, 1, NFSV4.CBOpcode.NFS4PROC_CB_RECALL.opcode));
                             sendDelegateMap.put(compoundCall.callHeader.header.id, new Tuple2<>(compoundCall, this));
-                            session.recallQueue.add(new Tuple2<>(compoundCall, this));
-                            if (session.canSend.compareAndSet(true, false)) {
-                                Tuple2<CompoundCall, DelegateLock> tuple2 = session.recallQueue.poll();
-                                if (tuple2 != null) {
-                                    CompoundCall sendCall = tuple2.var1;
-                                    DelegateLock sendLock = tuple2.var2;
-                                    session.nfsHandler.write(sendCall);
-                                    //5秒检查是否收到请求回调,未收到直接unlock
-                                    sendCheck(tuple2, session);
-                                } else {
-                                    session.canSend.set(true);
-                                }
-                            }
-                        }
+                        }).subscribe();
+//                            session.recallQueue.add(new Tuple2<>(compoundCall, this));
+//                            if (session.canSend.compareAndSet(true, false)) {
+//                                Tuple2<CompoundCall, DelegateLock> tuple2 = session.recallQueue.poll();
+//                                if (tuple2 != null) {
+//                                    CompoundCall sendCall = tuple2.var1;
+//                                    DelegateLock sendLock = tuple2.var2;
+//                                    session.nfsHandler.write(sendCall);
+//                                    //5秒检查是否收到请求回调,未收到直接unlock
+//                                    sendCheck(tuple2, session);
+//                                } else {
+//                                    session.canSend.set(true);
+//                                }
+//                            }
+
                         return true;
                     }
                 } else {
@@ -163,10 +154,7 @@ public class DelegateLock extends Lock {
         return true;
     }
 
-    public ShareAccessLock mapToShareAccess(int type) {
-        return new ShareAccessLock(bucket, objName, nodeId, stateId,
-                shareAccess, shareDeny, node, clientId, sessionId, owner, type, NFS4_DELEG_STID, versionNum);
-    }
+
 
     public void sendCheck(Tuple2<CompoundCall, DelegateLock> tuple, NFS4Session session) {
         CompoundCall sendCall = tuple.var1;

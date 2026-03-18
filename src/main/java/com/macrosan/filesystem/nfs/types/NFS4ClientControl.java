@@ -7,6 +7,8 @@ import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.utils.msutils.MsExecutor;
 import com.macrosan.utils.msutils.MsThreadFactory;
 import io.vertx.reactivex.core.net.SocketAddress;
+import lombok.extern.log4j.Log4j2;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
@@ -21,7 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS4ERR_BAD_STATEID;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS4ERR_STALE_CLIENTID;
 import static com.macrosan.filesystem.utils.Nfs4Utils.*;
-
+@Log4j2
 public class NFS4ClientControl {
     private final static int STATE_INITIAL_SEQUENCE = 0;
     private final AtomicInteger clientId = new AtomicInteger(0);
@@ -54,7 +56,7 @@ public class NFS4ClientControl {
             for (Long key : clientMap.keySet()) {
                 clientMap.computeIfPresent(key, (k, client) -> {
                     if (!client.leaseValid()) {
-                        client.tryDispose();
+                        client.tryDispose().subscribe();
 //                        clientOps.removeClient(client.getOwnerId());
                         return null;
                     }
@@ -69,10 +71,10 @@ public class NFS4ClientControl {
     public void removeClient(NFS4Client client) {
         synchronized (this) {
             clientMap.remove(client.getClientId());
+            //移除客户端对应的stateId以及lock
+            client.tryDispose().subscribe();
 //            clientOps.removeClient(client.getOwnerId());
         }
-        //移除客户端对应的stateId以及lock
-        client.tryDispose();
     }
 
     private void addClient(NFS4Client newClient) {
@@ -188,7 +190,7 @@ public class NFS4ClientControl {
     private synchronized void clearClients() {
         clientMap.values()
                 .forEach(c -> {
-                    c.tryDispose();
+                    c.tryDispose().subscribe();
                     clientMap.remove(c.getClientId());
                 });
     }

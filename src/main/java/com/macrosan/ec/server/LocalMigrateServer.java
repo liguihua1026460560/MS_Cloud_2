@@ -3,12 +3,12 @@ package com.macrosan.ec.server;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.ec.migrate.MigrateUtil;
 import com.macrosan.message.jsonmsg.FileMeta;
-import com.macrosan.utils.cache.Md5DigestPool;
 import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.msutils.checksum.ChecksumProvider;
 import io.netty.util.ReferenceCounted;
 import io.rsocket.Payload;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.UnicastProcessor;
@@ -84,7 +84,7 @@ public class LocalMigrateServer {
         return ErasureServer.waitRunningStop().flatMapMany(b -> MigrateUtil.iterator(queueKey));
     }
 
-    public Flux<Payload> putChannel(String lun, String fileName, String metaKey, String compression, String flushStamp, long fileOffset, Flux<Payload> requestFlux) {
+    public Flux<Payload> putChannel(String lun, String fileName, String metaKey, String compression, String flushStamp, String lastAccessStamp, long fileOffset, Flux<Payload> requestFlux) {
         int vnodeIndex = fileName.indexOf("_");
         int dirIndex = fileName.indexOf(File.separator);
         String key = lun + '$' + fileName.substring(dirIndex + 1, vnodeIndex);
@@ -109,6 +109,9 @@ public class LocalMigrateServer {
                 .setSmallFile(false)
                 .setLun(lun)
                 .setFlushStamp(flushStamp);
+        if (StringUtils.isNotEmpty(lastAccessStamp)) {
+            uploadServerHandler.fileMeta.setLastAccessStamp(lastAccessStamp);
+        }
         if (fileOffset != -1) {
             uploadServerHandler.fileMeta.setFileOffset(fileOffset);
         }

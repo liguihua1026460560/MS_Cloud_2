@@ -42,6 +42,7 @@ import reactor.util.function.Tuple2;
 import reactor.util.function.Tuples;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -64,6 +65,7 @@ import static com.macrosan.filesystem.utils.FSQuotaUtils.getQuotaBucketKey;
 import static com.macrosan.filesystem.utils.FSQuotaUtils.getQuotaTypeKey;
 import static com.macrosan.filesystem.utils.InodeUtils.isError;
 import static com.macrosan.filesystem.utils.acl.ACLUtils.NFS_ACL_START;
+import static com.macrosan.filesystem.utils.acl.ACLUtils.notAllowInvalidSID;
 import static com.macrosan.message.jsonmsg.Inode.*;
 
 /**
@@ -231,6 +233,21 @@ public class SetInfo {
                                                 List<SMB2ACE> dACEs = dACL.getAclList();
                                                 List<Inode.ACE> aceList = SMB2ACL.mapSMB2ACEToInodeACEs(dACEs);
                                                 ACEs = Json.encode(aceList);
+
+                                                //存在格式错误的sid即拒绝当前次设置
+                                                if (notAllowInvalidSID) {
+                                                    if (null != aceList && !aceList.isEmpty()) {
+                                                        Iterator<ACE> itr = aceList.iterator();
+                                                        while (itr.hasNext()) {
+                                                            Inode.ACE curAce = itr.next();
+                                                            if (!ACLUtils.checkSIDFormat(curAce.getSid())) {
+                                                                reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                                                return Mono.just(reply);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
                                                 update = true;
                                             } else {
                                                 reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
@@ -563,7 +580,12 @@ public class SetInfo {
                                 objAttr.hasSize = 1;
                                 objAttr.size = fileEndInfo.endOfFile;
                                 reply.setBody(body);
-                                return nodeInstance.setAttr(fileInfo.inodeId, fileInfo.bucket, objAttr, null)
+
+                                SMB2FileId smb2FileId = (header.getCompoundRequest() != null && header.getCompoundRequest().getFileId() != null) ? header.getCompoundRequest().getFileId() : call.getFileId();
+                                boolean isSMB3 = header.getHandler().negprotInfo.getDialect() >= NegprotCall.SMB_3_0_0;
+
+                                return (isSMB3 ? WriteCacheClient.flush(fileInfo.openInode, 0, 0, fileEndInfo.endOfFile, smb2FileId) : Mono.just(true))
+                                        .flatMap(b -> nodeInstance.setAttr(fileInfo.inodeId, fileInfo.bucket, objAttr, null))
                                         .flatMap(inode -> {
                                             if (InodeUtils.isError(inode)) {
                                                 return setInfoReturnErrorReply(reply, inode);

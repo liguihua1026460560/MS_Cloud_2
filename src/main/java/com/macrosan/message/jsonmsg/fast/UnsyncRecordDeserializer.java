@@ -90,6 +90,14 @@ public class UnsyncRecordDeserializer extends JsonDeserializer<UnSynchronizedRec
                         case "lastStamp":
                             record.setLastStamp(parser.getText0());
                             break;
+                        case "g":
+                        case "opt":
+                            record.setOpt(parser.getIntValue());
+                            break;
+                        case "h":
+                        case "nodeId":
+                            record.setNodeId(parser.getLongValue());
+                            break;
                     }
                 } while ((propName = p.nextFieldName()) != null);
             }

@@ -766,4 +766,15 @@ public class ServerConstants {
     public static final String CLASH_ADD_NODE_PREFIX = "clash_add_node_set_";
     public static final String TO_NEW_ADD_NODE_PREFIX = "to_new_add_node_set_";
     public static final String IN_SRC_ADD_NODE_PREFIX = "in_src_add_node_set_";
+
+
+    /**
+     * ----------------------------影像压缩 相关-------------------------------
+     */
+
+    public static final String DECOMPRESSED_ETAG = "Decompressed_Etag";
+    public static final String DECOMPRESSED_LENGTH = "Decompressed_Length";
+
+    public static final String COMPRESSION_TYPE = "Compression_Type";
+    public static final String DCMX = "dcmx";
 }

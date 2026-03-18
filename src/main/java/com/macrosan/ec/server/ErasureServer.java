@@ -1,9 +1,11 @@
 package com.macrosan.ec.server;
 
+import com.macrosan.component.compression.ImageCompressionProcessor;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.doubleActive.arbitration.DAVersionUtils;
 import com.macrosan.ec.ECUtils;
 import com.macrosan.ec.rebuild.DiskStatusChecker;
+import com.macrosan.filesystem.async.FSResponseServerHandler;
 import com.macrosan.filesystem.cache.InodeOperator;
 import com.macrosan.filesystem.cifs.lease.LeaseServer;
 import com.macrosan.filesystem.cifs.lock.CIFSLockServer;
@@ -62,9 +64,11 @@ import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.ec.server.FsQuotaServerHandler.*;
 import static com.macrosan.ec.server.ListServerHandler.*;
 import static com.macrosan.ec.server.RequestResponseServerHandler.*;
+import static com.macrosan.ec.server.RequestResponseServerHandler.updateFileAccessTime;
 import static com.macrosan.filesystem.quota.FSQuotaRealService.updateQuotaInfo;
 import static com.macrosan.filesystem.utils.IpWhitelistUtils.updateNFSIpWhitelists;
-import static com.macrosan.filesystem.utils.acl.ACLUtils.*;
+import static com.macrosan.filesystem.utils.acl.ACLUtils.reloadRootCache;
+import static com.macrosan.filesystem.utils.acl.ACLUtils.updateAllFsIdentity0;
 import static com.macrosan.fs.AioChannel.AIO_SCHEDULER;
 import static com.macrosan.message.jsonmsg.AggregateFileMetadata.ERROR_AGGREGATION_META;
 import static com.macrosan.message.jsonmsg.AggregateFileMetadata.NOT_FOUND_AGGREGATION_META;
@@ -171,6 +175,7 @@ public class ErasureServer extends AbstractRSocket {
         GET_OBJECT,
         COMPLETE_GET_OBJECT,
         UPDATE_FILE_META,
+        UPDATE_FILE_ACCESS_TIME,
         TIME_OUT,
         FILE_ERROR,
         MARK_ABORT_PARTS,
@@ -303,7 +308,11 @@ public class ErasureServer extends AbstractRSocket {
         CHECK_LUN_STATUS,
         DELETE_FILES_IN_RANGE,
         WRITE_CACHE,
-        FLUSH_WRITE_CACHE
+        FLUSH_WRITE_CACHE,
+        FILE_ASYNC,
+        START_FILE_ASYNC_CHANNEL,
+        PUT_FILE_ASYNC_CHANNEL,
+        SEND_DICOM_RECORD
     }
 
     @Override
@@ -387,6 +396,8 @@ public class ErasureServer extends AbstractRSocket {
                                     return updateRocketsValue(payload);
                                 case UPDATE_FILE_META:
                                     return updateFileMeta(payload);
+                                case UPDATE_FILE_ACCESS_TIME:
+                                    return updateFileAccessTime(payload);
                                 case INIT_PART_UPLOAD:
                                 case MARK_ABORT_PARTS:
                                     return initPartUpload(payload);
@@ -661,6 +672,10 @@ public class ErasureServer extends AbstractRSocket {
                                     return WriteCacheServer.writeCache(payload);
                                 case FLUSH_WRITE_CACHE:
                                     return WriteCacheServer.flushWriteCache(payload);
+                                case FILE_ASYNC:
+                                    return FSResponseServerHandler.fileAsyncReqRes(payload);
+                                case SEND_DICOM_RECORD:
+                                    return ImageCompressionProcessor.getInstance().compressImage(payload);
                                 case ERROR:
                                 default:
                                     log.info("no such payload meta type:{}", metaType);
@@ -873,6 +888,7 @@ public class ErasureServer extends AbstractRSocket {
         String metaKey = msg.get("metaKey");
         String compression = msg.get("compression");
         String flushStamp = msg.get("flushStamp");
+        String lastAccessStamp = msg.get("lastAccessStamp");
         long fileOffset = -1;
         if (msg.getDataMap().containsKey("fileOffset")) {
             fileOffset = Long.parseLong(msg.get("fileOffset"));
@@ -885,7 +901,7 @@ public class ErasureServer extends AbstractRSocket {
             if (request == null) {
                 request = newRequest(msg, bytes);
             }
-            request = LocalMigrateServer.getInstance().putChannel(lun, fileName, metaKey, compression, flushStamp, fileOffset, request);
+            request = LocalMigrateServer.getInstance().putChannel(lun, fileName, metaKey, compression, flushStamp, lastAccessStamp, fileOffset, request);
         } else if (migrateServer.start > 0 && migrateServer.getDstLunInfo(lun, vnode) != null) {
             if (request == null) {
                 request = newRequest(msg, bytes);
@@ -1021,6 +1037,9 @@ public class ErasureServer extends AbstractRSocket {
                                 responseFlux.onNext(SUCCESS_PAYLOAD);
                                 responseFlux.onComplete();
                                 break;
+                            case START_FILE_ASYNC_CHANNEL:
+                                handler[0] = FSResponseServerHandler.fileAsyncChannel(requestFlux, responseFlux);
+                                break;
                             default:
                                 handler[0] = getChannel(request, responseFlux);
                         }
@@ -1049,7 +1068,7 @@ public class ErasureServer extends AbstractRSocket {
         final String[] lun = new String[1];
         final String[] sstFileName = new String[1];
         requestFlux.doOnComplete(() -> {
-                })
+        })
                 .subscribe(p -> {
                     try {
                         if (first[0]) {

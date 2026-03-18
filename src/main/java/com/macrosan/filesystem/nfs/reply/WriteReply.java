@@ -7,6 +7,7 @@ import com.macrosan.filesystem.nfs.types.Attr;
 import io.netty.buffer.ByteBuf;
 import lombok.ToString;
 
+import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_STALE;
 import static com.macrosan.filesystem.FsConstants.ONE_SECOND_NANO;
 
@@ -36,6 +37,9 @@ public class WriteReply extends RpcReply {
             return offset + 4 - start;
         }
         offset += attr.writeStruct(buf, offset);
+        if (status == NFS3ERR_DQUOT) {
+            return offset - start;
+        }
 
         buf.setInt(offset, count);
         buf.setInt(offset + 4, sync);

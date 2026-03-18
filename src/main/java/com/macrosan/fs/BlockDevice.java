@@ -132,7 +132,7 @@ public class BlockDevice {
                     list.add(new Tuple2<>(mountName, mountDir));
                 }
             } catch (Exception e) {
-
+                log.error("", e);
             }
         }
 

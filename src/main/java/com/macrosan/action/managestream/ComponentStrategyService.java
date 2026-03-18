@@ -5,6 +5,7 @@ import com.macrosan.action.core.BaseService;
 import com.macrosan.component.pojo.ComponentRecord;
 import com.macrosan.component.utils.ParamsUtils;
 import com.macrosan.constants.ErrorNo;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.message.mqmessage.ResponseMsg;
 import com.macrosan.message.xmlmsg.ComponentStrategy;
 import com.macrosan.message.xmlmsg.ComponentTask;
@@ -24,6 +25,7 @@ import org.eclipse.collections.impl.map.mutable.UnifiedMap;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static com.macrosan.component.ComponentStarter.DICOM_SUPPORT_DESTINATION;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 
@@ -81,14 +83,23 @@ public class ComponentStrategyService extends BaseService {
         for (String processItem : processArray) {
             ParamsUtils.getParams(processType, processItem).checkParams();
         }
-        //判断destination是否为/开头或结尾
-        if (!StringUtils.isEmpty(destination) && (destination.startsWith("/") || destination.endsWith("/"))) {
-            throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "invalid component param");
+        if (ComponentRecord.Type.DICOM.name.equals(processType) && !DICOM_SUPPORT_DESTINATION) {
+            // 影像压缩策略，不支持删源和目标位置
+            if (StringUtils.isNotEmpty(destination) || deleteSource) {
+                throw new MsException(ErrorNo.NOT_SUPPORTED_COMPONENT_PARAM, "not supported component param");
+            }
+        } else {
+            // 其他策略支持删源和目标位置，需要进行参数校验
+            //判断destination是否为/开头或结尾
+            if (!StringUtils.isEmpty(destination) && (destination.startsWith("/") || destination.endsWith("/"))) {
+                throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "invalid component param");
+            }
+            // 判断和删源是覆盖否冲突
+            if (ComponentRecord.Type.IMAGE.name().equals(processType) && StringUtils.isBlank(destination) && deleteSource) {
+                throw new MsException(ErrorNo.DELETE_SOURCE_CONFLICT, "destination is empty, delete source conflict");
+            }
         }
-        // 判断和删源是覆盖否冲突
-        if (StringUtils.isBlank(destination) && deleteSource) {
-            throw new MsException(ErrorNo.DELETE_SOURCE_CONFLICT, "destination is empty, delete source conflict");
-        }
+
         ScanIterator<String> iterator = ScanIterator.scan(pool.getCommand(REDIS_POOL_INDEX), new ScanArgs().match(COMPONENT_STRATEGY_REDIS_PREFIX + "*"));
         while (iterator.hasNext()) {
             String key = iterator.next();
@@ -119,6 +130,9 @@ public class ComponentStrategyService extends BaseService {
             Long exists = pool.getCommand(REDIS_BUCKETINFO_INDEX).exists(targetBucket);
             if (exists != 1L) {
                 throw new MsException(ErrorNo.TARGET_BUCKET_NOT_EXISTS, "The target bucket does not exists,targetBucket:" + targetBucket);
+            }
+            if (CheckUtils.bucketFsCheck(targetBucket)) {
+                throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not add componentStrategy");
             }
             // 判断目标桶是否为本区域的桶
             String regionName = pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(targetBucket, REGION_NAME);

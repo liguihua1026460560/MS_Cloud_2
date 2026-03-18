@@ -7,6 +7,7 @@ import com.alibaba.fastjson.TypeReference;
 import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.doubleActive.DoubleActiveUtil;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.message.jsonmsg.BucketPolicy;
 import com.macrosan.message.jsonmsg.Statement;
 import com.macrosan.message.mqmessage.ResponseMsg;
@@ -68,6 +69,9 @@ public class BucketPolicyService extends BaseService {
 
         String method = "PutBucketPolicy";
         String userName = paramMap.getOrDefault(USERNAME, "");
+        if (CheckUtils.bucketFsCheck(bucketName)){
+            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not enable bucketPolicy");
+        }
         //防止所有接口配置了无法使用的策略后,可以进行修改桶策略
         if (!"".equals(userName)) {
             PolicyCheckUtils.getPolicyResult(paramMap, bucketName, userId, method);

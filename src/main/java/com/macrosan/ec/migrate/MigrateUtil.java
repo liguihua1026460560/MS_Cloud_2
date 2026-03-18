@@ -30,6 +30,7 @@ import io.rsocket.Payload;
 import io.rsocket.util.DefaultPayload;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -106,7 +107,7 @@ public class MigrateUtil {
         }
 
         return TaskHandler.rebuildObjFile(storagePool, fileMeta.getMetaKey(), srcDisk, String.valueOf(errorIndex), fileMeta.getFileName(), String.valueOf(endIndex),
-                String.valueOf(fileMeta.getSize()), fileMeta.getCrypto(), sk, nodeList, fileMeta.getFlushStamp());
+                String.valueOf(fileMeta.getSize()), fileMeta.getCrypto(), sk, nodeList, fileMeta.getFlushStamp(), fileMeta.getLastAccessStamp());
     }
 
     public static Mono<Boolean> migrateFile(FileMeta fileMeta, String srcDisk, String dstIP, String dstDisk, String poolType, boolean remigrate, int retryNum) {
@@ -158,6 +159,10 @@ public class MigrateUtil {
 
         if (fileMeta.getFlushStamp() != null) {
             msg.put("flushStamp", fileMeta.getFlushStamp());
+        }
+
+        if (StringUtils.isNotEmpty(fileMeta.getLastAccessStamp())) {//缓存池在盘间迁移数据时需要增加lastAccessStamp的记录
+            msg.put("lastAccessStamp", fileMeta.getLastAccessStamp());
         }
 
         if (CryptoUtils.checkCryptoEnable(fileMeta.getCrypto())) {
@@ -455,20 +460,26 @@ public class MigrateUtil {
                     retry.incrementAndGet();
                     if (retry.get() > 10) {
                         result.onNext("-1");
-                        disposables[0].dispose();
+                        if (null != disposables[0] && !disposables[0].isDisposed()) {
+                            disposables[0].dispose();
+                        }
                     }
                 })
                 .subscribe(payload -> {
                     if (SUCCESS.name().equals(payload.getMetadataUtf8())) {
                         String res = (String) payload.getDataUtf8();
                         result.onNext(res);
-                        disposables[0].dispose();
+                        if (null != disposables[0] && !disposables[0].isDisposed()) {
+                            disposables[0].dispose();
+                        }
                     } else {
                         //在这里尝试10次，然后返回最终结果
                         retry.incrementAndGet();
                         if (retry.get() > 10) {
                             result.onNext("-1");
-                            disposables[0].dispose();
+                            if (null != disposables[0] && !disposables[0].isDisposed()) {
+                                disposables[0].dispose();
+                            }
                         }
                     }
                 }), 0, 35, TimeUnit.SECONDS);

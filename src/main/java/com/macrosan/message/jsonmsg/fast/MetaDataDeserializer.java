@@ -149,6 +149,9 @@ public class MetaDataDeserializer extends JsonDeserializer<MetaData> {
                         case "aggSize":
                             metadata.setAggSize(parser.getLongValue());
                             break;
+                        case "lastAccessStamp":
+                            metadata.setLastAccessStamp(parser.getText0());
+                            break;
                     }
                 } while ((propName = p.nextFieldName()) != null);
             }

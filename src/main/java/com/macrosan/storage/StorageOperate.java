@@ -8,7 +8,7 @@ import lombok.Data;
 @Data
 public class StorageOperate {
     public enum PoolType {
-        META, DATA, DEFAULT_META, DEFAULT_DATA
+        META, DATA, DEFAULT_META, DEFAULT_DATA, CACHE
     }
 
     PoolType poolType;

@@ -269,7 +269,7 @@ public class DAVersionUtils {
                                 }
                                 if (finish) {
                                     if (e instanceof TimeoutException) {
-                                        TIMEOUT_RECHECK_IP_SET.add(ip + ":" + DA_HTTP_PORT);
+                                        TIMEOUT_RECHECK_IP_SET.add(ip);
                                     }
                                     if (alreadyEquals.get()) {
                                         log.error("redirect {} request to {} error1! {}, {}", request[0].method().name(), request[0].getHost() + request[0].uri(), e.getClass().getName(),

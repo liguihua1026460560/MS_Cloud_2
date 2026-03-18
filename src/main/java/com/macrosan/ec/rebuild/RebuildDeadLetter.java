@@ -217,7 +217,8 @@ public class RebuildDeadLetter {
                     String crypto = task.map.get("crypto");
                     String secretKey = task.map.get("secretKey");
                     String flushStamp = task.map.get("flushStamp");
-                    taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp)
+                    String lastAccessStamp = task.map.get("lastAccessStamp");
+                    taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp)
                             .doOnNext(b -> {
                                 if (b) {
                                     RebuildSpeed.add(Long.parseLong(fileSize));

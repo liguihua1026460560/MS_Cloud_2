@@ -2,6 +2,7 @@ package com.macrosan.rsocket.client;
 
 import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.httpserver.MossHttpClient;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.rsocket.VertxLoopResource;
 import com.macrosan.rsocket.server.MsPayloadDecoder;
@@ -9,7 +10,6 @@ import com.macrosan.utils.msutils.EscapeException;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoop;
-import io.netty.channel.WriteBufferWaterMark;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import io.rsocket.AbstractRSocket;
 import io.rsocket.Payload;
@@ -26,15 +26,11 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.netty.tcp.TcpClient;
 
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.time.Duration;
-import java.util.Arrays;
-
-import java.util.LinkedList;
-import java.util.List;
-
-import java.util.Map;
-
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,9 +39,12 @@ import static com.macrosan.constants.ServerConstants.PROC_NUM;
 import static com.macrosan.constants.SysConstants.HEART_ETH1;
 import static com.macrosan.constants.SysConstants.REDIS_NODEINFO_INDEX;
 import static com.macrosan.fs.BlockDevice.INIT_BLOCK_SCHEDULER;
+import static com.macrosan.httpserver.MossHttpClient.IP_INDEX_MAP;
+import static com.macrosan.httpserver.MossHttpClient.LOCAL_NODE_IP;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.rsocket.VertxLoopResource.VERTX_LOOP_RESOURCE;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
+import static com.macrosan.rsocket.server.Rsocket.DA_RSOCKET_PORT;
 
 /**
  * RSocketClient
@@ -83,15 +82,16 @@ public class RSocketClient {
                 .connect()
                 .keepAlive(Duration.ofSeconds(5), Duration.ofSeconds(10), 10)
                 .errorConsumer(e -> {
-                    if (e != null && e.toString() != null && (e instanceof NullPointerException || e.toString().contains("Connection reset by peer") || e.toString().contains("No keep-alive acks for"))) {
+                    if (e != null && e.toString() != null && (e instanceof NullPointerException || e.toString().contains("Connection reset by peer") || e.toString().contains("No keep-alive acks " +
+                            "for"))) {
                         if (!notPrintError.containsKey(e.toString())) {
-                            notPrintError.compute(e.toString(), (k ,v) -> {
-                               if (null == v) {
-                                   log.error("", e);
-                                   v = System.currentTimeMillis();
-                               }
+                            notPrintError.compute(e.toString(), (k, v) -> {
+                                if (null == v) {
+                                    log.error("", e);
+                                    v = System.currentTimeMillis();
+                                }
 
-                               return v;
+                                return v;
                             });
                         }
                     } else {
@@ -104,6 +104,7 @@ public class RSocketClient {
     }
 
     private static boolean isFirst = true;
+    private static boolean isFirstAsync = true;
 
     public static void clearErrorRSocket(int key) {
         Arrays.stream(HOLDERS).forEach(holder -> {
@@ -128,7 +129,9 @@ public class RSocketClient {
         connect(ip, port)
                 .timeout(Duration.ofSeconds(15))
                 .subscribe(rSocket -> {
-                    if (loops.length == HOLDERS.length) {
+                    // 发现ipv6如果在此强行切换重连会导致频繁的connect rest by peer报错。规避。
+                    // 并发情况下仍有概率会在初次建立连接时出现错误并返回ERROR_RSOCKET
+                    if (loops.length == HOLDERS.length && !isIPv6(ip)) {
                         //强制 channel.eventLoop() 和 loops[i] 相同
                         Channel channel = RSocketProxy.getChannel(rSocket);
                         if (channel.eventLoop() != loops[i]) {
@@ -142,7 +145,7 @@ public class RSocketClient {
                     rSocket.onClose().doFinally(s -> {
                         String errorMsg = "remove on close: " + ip;
                         if (!notPrintError.containsKey(errorMsg)) {
-                            notPrintError.compute(errorMsg, (k ,v) -> {
+                            notPrintError.compute(errorMsg, (k, v) -> {
                                 if (null == v) {
                                     log.error("{}", errorMsg);
                                     v = System.currentTimeMillis();
@@ -158,7 +161,7 @@ public class RSocketClient {
                 }, cause -> {
                     if (null != cause.getMessage()) {
                         if (!notPrintError.containsKey(cause.getMessage())) {
-                            notPrintError.compute(cause.getMessage(), (k ,v) -> {
+                            notPrintError.compute(cause.getMessage(), (k, v) -> {
                                 if (null == v) {
                                     log.info("remove {} on exception {}", ip, cause.getMessage());
                                     v = System.currentTimeMillis();
@@ -170,8 +173,9 @@ public class RSocketClient {
                     } else {
                         log.info("remove {} on exception {}", ip, cause.getMessage());
                     }
+                    boolean b = port == DA_RSOCKET_PORT ? isFirstAsync : isFirst;
 
-                    if (isFirst) {
+                    if (b) {
                         HOLDERS[i].remove(key).subscribe(Disposable::dispose, e -> {
                         });
                     } else {
@@ -250,8 +254,37 @@ public class RSocketClient {
         });
     }
 
+    public static void initAsync() {
+        ServerConfig.getInstance().getVertx().setTimer(100L, l -> {
+            Flux<RSocket> flux = Flux.empty();
+            HashSet<String> set = new HashSet<>();
+            for (int i = 0; i < HOLDERS.length; i++) {
+                for (Map.Entry<String, Integer> entry : IP_INDEX_MAP.entrySet()) {
+                    String ip = entry.getKey();
+                    Integer clusterIndex = entry.getValue();
+                    if (MossHttpClient.EXTRA_INDEX_IPS_ENTIRE_MAP.containsKey(clusterIndex)) {
+                        continue;
+                    }
+                    set.add(ip);
+                    Mono<RSocket> rSocketMono = connect(i, ip, DA_RSOCKET_PORT)
+                            .doOnError(e -> log.info("connect daRsocket {} fail", ip))
+                            .onErrorReturn(new AbstractRSocket() {
+                            });
+                    flux = flux.mergeWith(rSocketMono);
+                }
+            }
+
+            flux.subscribe(s -> {
+            }, e -> log.error("", e), () -> {
+                isFirstAsync = false;
+                log.info("init async RSocket connections successful. {}", set);
+            });
+        });
+    }
+
     static ErasureServer server = new ErasureServer();
     public static EventLoop[] loops;
+    // 保存线程id和一个数字标识i（HOLDERS[]的下标，同一个eventLoop线程将从同一个HOLDER获取RSocket）
     public static LongIntHashMap loopThreads = new LongIntHashMap();
 
     static {
@@ -267,7 +300,7 @@ public class RSocketClient {
     }
 
     public static Mono<RSocket> getRSocket(String ip, int port) {
-        if (CURRENT_IP.equalsIgnoreCase(ip)) {
+        if (CURRENT_IP.equalsIgnoreCase(ip) || LOCAL_NODE_IP.equalsIgnoreCase(ip)) {
             return Mono.just(server);
         }
 
@@ -286,5 +319,18 @@ public class RSocketClient {
         }
 
         return res;
+    }
+
+    public static boolean isIPv6(String ip) {
+        if (ip == null || ip.isEmpty()) {
+            return false;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(ip);
+            return addr instanceof Inet6Address;
+        } catch (Exception e) {
+            log.error("isIPv6 check err, ", e);
+            return false;
+        }
     }
 }

@@ -371,7 +371,7 @@ public class PutErrorHandler {
                                                       String fileName, long endIndex, SocketReqMsg msg,
                                                       List<Tuple3<String, String, String>> nodeList) throws RuntimeException {
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        List<Integer> newErrorChunkList = new LinkedList<>();
+        Set<Integer> newErrorChunkList = new HashSet<>();
 
         ResponseInfo<String> responseInfo = recoverSpecificChunks(storagePool, versionMetaKey, toUploadChunkList, fileName, endIndex, msg, nodeList);
         responseInfo.responses
@@ -408,7 +408,7 @@ public class PutErrorHandler {
 //                                    poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(strategyName, "pool");
 //                                }
                                 msg.put("poolQueueTag", poolQueueTag);
-                                msg.put("errorChunksList", Json.encode(newErrorChunkList));
+                                msg.put("errorChunksList", Json.encode(new ArrayList<>(newErrorChunkList)));
                                 ECUtils.publishEcError(responseInfo.res, nodeList, msg, errorType);
                             }
                         }
@@ -430,6 +430,7 @@ public class PutErrorHandler {
         String crypto = reqMsg.get("crypto");
         String secretKey = reqMsg.get("secretKey");
         String flushStamp = reqMsg.get("flushStamp");
+        String lastAccessStamp = reqMsg.get("lastAccessStamp");
         //获取原始数据字节流，放入ecEncodeHanlder进行encode，生成dataFluxes，dataFluxes包含k+m个数据流
         Encoder ecEncodeHandler = storagePool.getEncoder();
         UnicastProcessor<Long> streamController = UnicastProcessor.create(Queues.<Long>unboundedMultiproducer().get());
@@ -460,6 +461,9 @@ public class PutErrorHandler {
                             CryptoUtils.putCryptoInfoToMsg(crypto, secretKey, msg);
                             if (flushStamp != null) {
                                 msg.put("flushStamp", flushStamp);
+                            }
+                            if (StringUtils.isNotEmpty(lastAccessStamp)) {
+                                msg.put("lastAccessStamp", lastAccessStamp);
                             }
                             return msg;
                         }
@@ -768,6 +772,37 @@ public class PutErrorHandler {
                             });
                 });
 
+    }
+
+    @HandleErrorFunction(value = ERROR_UPDATE_FILE_ACCESS_TIME, timeout = 0L)
+    public static Mono<Boolean> recoverUpdateFileAccessTime(String fileName, String stamp, String lun, List<Integer> errorChunksList,String storage, String poolQueueTag) {
+        StoragePool storagePool = StoragePoolFactory.getStoragePool(storage, "");
+
+        return storagePool.mapToNodeInfo(storagePool.getObjectVnodeId(fileName))
+                .flatMap(nodeList -> {
+                    ArrayList<Tuple3<String, String, String>> newNodeList = new ArrayList<Tuple3<String, String, String>>();
+                    for (int i = 0; i < errorChunksList.size(); i++) {
+                        Integer index = errorChunksList.get(i);
+                        newNodeList.add(nodeList.get(index));
+                    }
+                    List<Integer> finishChunkList = new ArrayList<>();
+                    List<SocketReqMsg> msgs = newNodeList.stream()
+                            .map(tuple -> new SocketReqMsg("", 0)
+                                    .put("fileName", fileName)
+                                    .put("stamp", stamp)
+                                    .put("lun", tuple.var2))
+                            .collect(Collectors.toList());
+                    ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, UPDATE_FILE_ACCESS_TIME, String.class, newNodeList);
+                    responseInfo.responses.subscribe(s -> {
+                        if (s.var2.equals(SUCCESS)) {
+                            finishChunkList.add(errorChunksList.get(s.var1));
+                        }
+                    });
+                    if (errorChunksList.size() == finishChunkList.size()) {
+                        return Mono.just(true);
+                    }
+                    return Mono.just(false);
+                });
     }
 
     @HandleErrorFunction(ERROR_PUT_SYNC_RECORD)

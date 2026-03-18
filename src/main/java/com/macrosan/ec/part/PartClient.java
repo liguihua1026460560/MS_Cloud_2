@@ -371,7 +371,7 @@ public class PartClient {
         }
 
         ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(processors, String.class, targetNodeList);
-        List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
 //        String storageName = "storage_" + targetPool.getVnodePrefix();
 //        String poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(storageName, "pool");
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
@@ -410,7 +410,7 @@ public class PartClient {
                                         .put("partNum", partInfo.partNum)
                                         .put("fileName", partInfo.fileName)
                                         .put("endIndex", String.valueOf(partInfo.partSize - 1))
-                                        .put("errorChunksList", Json.encode(errorChunksList))
+                                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                         .put("versionId", partInfo.versionId)
                                         .put("poolQueueTag", poolQueueTag);
                                 Optional.ofNullable(partInfo.snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));

@@ -1067,7 +1067,7 @@ public class CIFSACL {
                                 permission &= nfsEffectMask;
                             }
 
-                            if (FSIdentity.getGroupSIDByGid(id).equals(groupSID)) {
+                            if (FSIdentity.getGroupSIDByGid(id).equals(groupSID) || null != groupSet && groupSet.contains(id)) {
                                 long cifsRight = ugoToCIFSAccess(permission);
                                 right |= cifsRight;
                             }

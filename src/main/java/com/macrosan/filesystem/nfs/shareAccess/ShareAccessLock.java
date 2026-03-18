@@ -19,19 +19,20 @@ import static com.macrosan.filesystem.nfs.api.NFS4Proc.clientControl;
 @AllArgsConstructor
 @Data
 public class ShareAccessLock extends Lock {
-    public String bucket;
+    public String bucket = "";
     public String objName;
     public long nodeId;
     public StateId stateId = new StateId();
     public int shareAccess;
     public int shareDeny;
-    public String node;
+    public String node= "";
     public long clientId;
     public byte[] sessionId = new byte[0];
     public byte[] owner = new byte[0];
     public int type;
     public int stateIdType;
     public String versionNum;
+    public boolean init;
 
     //    public static final ShareAccessLock EMPTY_SHARE = new ShareAccessLock().setShareAccess(0);
     public static final ShareAccessLock ERROR_SHARE = new ShareAccessLock().setShareAccess(-1).setVersionNum("")
@@ -64,6 +65,13 @@ public class ShareAccessLock extends Lock {
         return nodeId == that.nodeId && clientId == that.clientId && bucket.equals(that.bucket) && node.equals(that.node) && Arrays.equals(owner, that.owner);
     }
 
+    public ShareAccessLock clone(){
+        return new ShareAccessLock()
+                .setBucket(bucket).setObjName(objName).setNodeId(nodeId).setStateId(stateId)
+                .setShareAccess(shareAccess).setShareDeny(shareDeny).setNode(node).setClientId(clientId)
+                .setSessionId(sessionId).setOwner(owner).setType(type).setStateIdType(stateIdType).setVersionNum(versionNum).setInit(init);
+    }
+
     @Override
     public int hashCode() {
         int result = Objects.hash(bucket, nodeId, node, clientId);
@@ -71,8 +79,4 @@ public class ShareAccessLock extends Lock {
         return result;
     }
 
-    public DelegateLock mapToDelegate(int type) {
-        return new DelegateLock(bucket, objName, nodeId, null, stateId,
-                shareAccess, shareDeny, node, clientId, sessionId, owner, type, versionNum, 1);
-    }
 }

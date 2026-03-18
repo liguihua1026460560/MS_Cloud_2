@@ -452,6 +452,21 @@ public class Node {
         return res;
     }
 
+    public Mono<Inode> createInode(String bucket, Inode inode, long nodeId, long stamp, String version, String s3Account, String displayName) {
+        SocketReqMsg msg = new SocketReqMsg("", 0)
+                .put("opt", "50")
+                .put("bucket", bucket)
+                .put("inode", Json.encode(inode))
+                .put("stamp", String.valueOf(stamp))
+                .put("nodeId", String.valueOf(nodeId))
+                .put("version", version)
+                .put("s3Account", s3Account)
+                .put("displayName", displayName);
+        MonoProcessor<Inode> res = MonoProcessor.create();
+        exec(nodeId, msg, 0, res);
+        return res;
+    }
+
     /**
      *
      * @param inode
@@ -472,6 +487,37 @@ public class Node {
                 .put("inode", Json.encode(inode))
                 .put("offset", String.valueOf(offset))
                 .put("count", String.valueOf(count))
+                .put("type", String.valueOf(type));
+
+        MonoProcessor<Inode> res = MonoProcessor.create();
+        exec(inode.getNodeId(), msg, 0, res);
+        return res
+                .flatMap(inode0 -> {
+                    boolean flushRes = true;
+                    if (WriteCacheServer.writeCacheDebug) {
+                        log.info("flushWriteCache end ino: {}, offset: {}, count: {}, {}", inode.getNodeId(), offset, count, InodeUtils.isError(inode0));
+                    }
+                    if (InodeUtils.isError(inode0)) {
+                        flushRes = false;
+                    }
+                    return Mono.just(flushRes);
+                });
+    }
+
+    // END_OF_FILE使用
+    public Mono<Boolean> flushWriteCache(Inode inode, long offset, int count, long end, int type) {
+        if (WriteCacheServer.writeCacheDebug) {
+            log.info("flushWriteCache ino: {}, offset: {}, count: {}", inode.getNodeId(), offset, count);
+        }
+
+        SocketReqMsg msg = new SocketReqMsg("", 0)
+                .put("opt", "18")
+                .put("bucket", inode.getBucket())
+                .put("nodeId", String.valueOf(inode.getNodeId()))
+                .put("inode", Json.encode(inode))
+                .put("offset", String.valueOf(offset))
+                .put("count", String.valueOf(count))
+                .put("end", String.valueOf(end))
                 .put("type", String.valueOf(type));
 
         MonoProcessor<Inode> res = MonoProcessor.create();
@@ -543,7 +589,7 @@ public class Node {
         }
     }
 
-    private void exec(long nodeId, SocketReqMsg msg, int retry, MonoProcessor<Inode> res) {
+    public void exec(long nodeId, SocketReqMsg msg, int retry, MonoProcessor<Inode> res) {
         if (res.isDisposed()) {
             return;
         }

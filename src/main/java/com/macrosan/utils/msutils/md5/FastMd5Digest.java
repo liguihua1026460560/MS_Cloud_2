@@ -15,16 +15,16 @@ import java.security.NoSuchAlgorithmException;
 @Log4j2
 public class FastMd5Digest extends Digest {
     private static OpenSSL4JProvider openSSL4JProvider;
-    public static final boolean DISABLE_FAST_MD5;
+    public static boolean DISABLE_FAST_MD5;
 
     static {
-        DISABLE_FAST_MD5 = Boolean.parseBoolean(System.getProperty("macrosan.fast.md5.disable", "false"));
         try {
+            DISABLE_FAST_MD5 = Boolean.parseBoolean(System.getProperty("macrosan.fast.md5.disable", "false"));
             if (!DISABLE_FAST_MD5) {
                 openSSL4JProvider = new OpenSSL4JProvider();
                 log.info("load OpenSSL4J provider success");
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("load OpenSSL4J provider fail");
         }
     }

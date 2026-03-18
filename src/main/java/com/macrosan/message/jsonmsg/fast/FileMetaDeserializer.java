@@ -85,8 +85,12 @@ public class FileMetaDeserializer extends JsonDeserializer<FileMeta> {
                         case "8":
                         case "fileOffset":
                             filemeta.setFileOffset(parser.getLongValue());
+                            break;
                         case "flushStamp":
                             filemeta.setFlushStamp(parser.getText0());
+                            break;
+                        case "lastAccessStamp":
+                            filemeta.setLastAccessStamp(parser.getText0());
                             break;
                     }
                 } while ((propName = p.nextFieldName()) != null);

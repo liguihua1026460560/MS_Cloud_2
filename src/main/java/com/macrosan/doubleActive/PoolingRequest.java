@@ -11,16 +11,14 @@ import lombok.Data;
 import lombok.NonNull;
 import lombok.experimental.Accessors;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.UnicastProcessor;
 import reactor.util.concurrent.Queues;
 
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -28,6 +26,7 @@ import static com.macrosan.action.datastream.ActiveService.PASSWORD;
 import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.doubleActive.DataSynChecker.SCAN_SCHEDULER;
+import static com.macrosan.doubleActive.HeartBeatChecker.TIMEOUT_RECHECK_IP_SET;
 import static com.macrosan.httpserver.MossHttpClient.*;
 import static com.macrosan.utils.authorize.AuthorizeV4.*;
 
@@ -282,15 +281,10 @@ public class PoolingRequest {
 
 
     // todo f 节点很多且总超时时间超过遍历时间可能存在问题。比如15个节点，前14个都是1s超时，最后一个正常。
-    public Flux<MsClientRequest> requestHeartBeat(long timeoutMillis, int unitCount) {
+    public Flux<MsClientRequest> requestHeartBeat(String[] ips, long timeoutMillis, int unitCount) {
         retryProcessor = UnicastProcessor.create(Queues.<Integer>unboundedMultiproducer().get());
         retryHotFlux = retryProcessor.publish().autoConnect();
         this.unitCount = unitCount;
-
-        String[] ips;
-        ips = INDEX_IPS_ENTIRE_MAP.get(this.clusterIndex);
-
-        //遍历目标站点ip
         Flux<MsClientRequest> map = this.retryHotFlux.publishOn(SCAN_SCHEDULER).map(i -> {
             AtomicInteger count1 = IP_COUNT_MAP.computeIfAbsent(this.clusterIndex, k -> new AtomicInteger());
             Tuple2<String, Long> tuple2_ = DoubleActiveUtil.getRequestTimeout(ips, timeoutMillis, unitCount, count1);

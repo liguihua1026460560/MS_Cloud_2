@@ -24,7 +24,7 @@ public class ComponentRecord {
     public enum Type {
         IMAGE("image-process", "!"),
         VIDEO("video-process", ":"),
-        ;
+        DICOM("dicom-process", "!");
 
         //url中的标识
         public String name;

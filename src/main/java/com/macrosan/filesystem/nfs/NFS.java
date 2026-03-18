@@ -1,6 +1,8 @@
 package com.macrosan.filesystem.nfs;
 
 import com.macrosan.constants.ServerConstants;
+import com.macrosan.filesystem.FsConstants;
+import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.lock.redlock.RedLockServer;
 import com.macrosan.filesystem.nfs.delegate.DelegateServer;
 import com.macrosan.filesystem.nfs.handler.*;
@@ -25,6 +27,9 @@ import io.vertx.reactivex.core.net.NetServer;
 import lombok.extern.log4j.Log4j2;
 
 import java.lang.reflect.Field;
+import java.util.Map;
+
+import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 
 @Log4j2
 public class NFS {
@@ -39,13 +44,26 @@ public class NFS {
     public static final int IDLE_TIMEOUT = 15;
 
     static Vertx vertx;
+    static DeploymentOptions options;
+
+    static {
+        try {
+            nfsPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_PORT, nfsPort);
+            mountPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_MOUNT_PORT, mountPort);
+            nlmPort = FsUtils.getFsPort(FsConstants.FSConfig.NLM_PORT, nlmPort);
+            nsmPort = FsUtils.getFsPort(FsConstants.FSConfig.NSM_PORT, nsmPort);
+            nfsRQuotaPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_QUOTA_PORT, nfsRQuotaPort);
+        } catch (Exception e) {
+            log.error("Failed to obtain NFS settings, default settings applied.", e);
+        }
+    }
 
     public static void start() {
         RedLockServer.register();
         NFS4LockServer.register();
         ShareAccessServer.register();
         DelegateServer.register();
-        DeploymentOptions options = new DeploymentOptions()
+        options = new DeploymentOptions()
                 .setInstances(ServerConstants.PROC_NUM);
         vertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
@@ -67,9 +85,37 @@ public class NFS {
         NFSV3.initProc();
         NSM.initProc(vertx);
         NLM4.initProc(vertx);
-//        NFSV4.initProc();
+        NFSV4.initProc();
         bootNanoTime = System.nanoTime();
         log.info("start nfs service in {}", nfsPort);
+    }
+
+    public static void restart() {
+        vertx.close(ar -> {
+            if (ar.succeeded()) {
+                vertx = Vertx.vertx(new VertxOptions()
+                        .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
+                        .setPreferNativeTransport(true));
+                VertxImpl vertxImpl = (VertxImpl) vertx.getDelegate();
+                Transport transport = vertxImpl.transport();
+                try {
+                    Field field = vertxImpl.getClass().getDeclaredField("transport");
+                    field.setAccessible(true);
+                    NFSTransport nfsTransport = new NFSTransport(transport);
+                    field.set(vertxImpl, nfsTransport);
+                } catch (Exception e) {
+                    log.error("", e);
+                    System.exit(-1);
+                }
+
+                vertx.rxDeployVerticle(NFSVerticle.class.getName(), options).subscribe();
+                // NFSV4.initProc();
+                bootNanoTime = System.nanoTime();
+                log.info("restart nfs: {}, mount: {}, nlm: {}, nsm: {}, quota: {} service", nfsPort, mountPort, nlmPort, nsmPort, nfsRQuotaPort);
+            } else {
+                log.error("restart nfs: {}, mount: {}, nlm: {}, nsm: {}, quota: {} service failed", nfsPort, mountPort, nlmPort, nsmPort, nfsRQuotaPort);
+            }
+        });
     }
 
     public static class NFSVerticle extends AbstractVerticle {

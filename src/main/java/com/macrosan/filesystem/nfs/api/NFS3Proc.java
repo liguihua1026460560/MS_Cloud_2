@@ -395,6 +395,7 @@ public class NFS3Proc {
                                 return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_write.name() + "-" + BAND_WIDTH_QUOTA, call.bytes.length).map(waitMillis2 -> waitMillis + waitMillis2);
                             })
                             .flatMap(waitMillis -> waitMillis == 0 ? Mono.just(true) : Mono.delay(Duration.ofMillis(waitMillis)))
+                            .flatMap(l -> FSQuotaUtils.checkFsQuota(inode))
                             .flatMap(l -> WriteCache.getCache(bucket, nodeId, call.sync, inode.getStorage()))
                             .flatMap(fileCache -> fileCache.nfsWrite(call.writeOffset, call.bytes, inode, call.sync))
                             .map(b -> {
@@ -1147,29 +1148,29 @@ public class NFS3Proc {
 
                         readReply.attr = FAttr3.mapToAttr(inode, call.fh.fsid);
                         flux.flatMap(t -> BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_read.name() + "-" + BAND_WIDTH_QUOTA, call.size)
-                                .flatMap(waitMillis -> {
-                                    String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
-                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_read.name() + "-" + BAND_WIDTH_QUOTA, call.size).map(waitMillis2 -> waitMillis + waitMillis2);
+                                        .flatMap(waitMillis -> {
+                                            String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
+                                            return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_read.name() + "-" + BAND_WIDTH_QUOTA, call.size).map(waitMillis2 -> waitMillis + waitMillis2);
+                                        })
+                                        .flatMap(waitMillis -> Mono.just(t).delayElement(Duration.ofMillis(waitMillis)))
+                                ).doOnNext(t -> {
+                                    System.arraycopy(t.var2, 0, bytes, t.var1, t.var2.length);
                                 })
-                                .flatMap(waitMillis -> Mono.just(t).delayElement(Duration.ofMillis(waitMillis)))
-                        ).doOnNext(t -> {
-                            System.arraycopy(t.var2, 0, bytes, t.var1, t.var2.length);
-                        })
-                        .doOnError(e -> {
-                            log.error("", e);
-                            readReply.status = EIO;
-                            readReply.attrFollows = 0;
-                            readReply.data = new byte[0];
-                            readReply.count = 0;
-                            res.onNext(readReply);
-                        })
-                        .doOnComplete(() -> {
-                            readReply.status = 0;
-                            readReply.data = bytes;
-                            InodeUtils.updateInodeAtime(inode);
-                            readReply.count = readReply.data.length;
-                            res.onNext(readReply);
-                        }).subscribe();
+                                .doOnError(e -> {
+                                    log.error("", e);
+                                    readReply.status = EIO;
+                                    readReply.attrFollows = 0;
+                                    readReply.data = new byte[0];
+                                    readReply.count = 0;
+                                    res.onNext(readReply);
+                                })
+                                .doOnComplete(() -> {
+                                    readReply.status = 0;
+                                    readReply.data = bytes;
+                                    InodeUtils.updateInodeAtime(inode);
+                                    readReply.count = readReply.data.length;
+                                    res.onNext(readReply);
+                                }).subscribe();
 
                         return res;
                     } else {
@@ -1270,7 +1271,7 @@ public class NFS3Proc {
                                                 return Mono.just(oldInode);
                                             }
 
-                                            return NFSACL.judgeUGOAndACL(oldInode, callHeader, reqHeader.bucketInfo,null)
+                                            return NFSACL.judgeUGOAndACL(oldInode, callHeader, reqHeader.bucketInfo, null)
                                                     .flatMap(pass0 -> {
                                                         if (!pass0) {
                                                             return Mono.just(NO_PERMISSION_INODE);

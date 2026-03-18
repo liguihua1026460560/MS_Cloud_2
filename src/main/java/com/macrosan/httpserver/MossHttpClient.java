@@ -16,6 +16,8 @@ import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.jsonmsg.UnSynchronizedRecord;
 import com.macrosan.message.xmlmsg.Error;
 import com.macrosan.message.xmlmsg.Uploads;
+import com.macrosan.rsocket.client.RSocketClient;
+import com.macrosan.rsocket.server.Rsocket;
 import com.macrosan.storage.StorageOperate;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
@@ -61,9 +63,9 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 import reactor.util.concurrent.Queues;
 
-import java.io.*;
+import java.io.File;
+import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
@@ -83,7 +85,6 @@ import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.constants.ErrorNo.CONTENT_LENGTH_NOT_ALLOWED;
 import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
 import static com.macrosan.constants.ServerConstants.*;
-import static com.macrosan.constants.ServerConstants.ONLY_HOST_LIST;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.DataSynChecker.SCAN_SCHEDULER;
 import static com.macrosan.doubleActive.DataSynChecker.isDebug;
@@ -323,6 +324,9 @@ public class MossHttpClient {
 
             initClustersCollections();
             SYNC_RECORD_STORAGE_POOL = StoragePoolFactory.getStoragePool(StorageOperate.META);
+
+            Rsocket.initAsync();
+            RSocketClient.initAsync();
 
             VersionUtil.isMultiCluster = true;
         } catch (Exception e) {
@@ -1391,9 +1395,10 @@ public class MossHttpClient {
                                         dealException(r, new MsException(UNKNOWN_ERROR, "no sync req can be sent. " + r.uri()));
                                     } else {
                                         if (responseSummary.errorNum.get() == 0) {
-                                            Disposable subscribe2 = deleteUnsyncRecord(r.getBucketName(), preRecordKey[0], null, DELETE_ASYNC_RECORD, r, noRecord)
-                                                    .subscribe(res -> dealErrResponse(r, responseSummary, needBuffer), e -> log.error("", e));
-                                            r.addResponseCloseHandler(v -> subscribe2.dispose());
+//                                            Disposable subscribe2 = deleteUnsyncRecord(r.getBucketName(), preRecordKey[0], null, DELETE_ASYNC_RECORD, r, noRecord)
+//                                                    .subscribe(res -> dealErrResponse(r, responseSummary, needBuffer), e -> log.error("", e));
+//                                            r.addResponseCloseHandler(v -> subscribe2.dispose());
+                                            dealErrResponse(r, responseSummary, needBuffer);
                                         } else {
                                             dealErrResponse(r, responseSummary, needBuffer);
                                         }
@@ -2075,7 +2080,6 @@ public class MossHttpClient {
         String[] clusterIps = INDEX_IPS_MAP.get(clusterIndex);
         Disposable[] disposables = new Disposable[1];
         int currentIndex = ThreadLocalRandom.current().nextInt(0, clusterIps.length);
-        // todo del
         if (isDebug) {
             currentIndex = 0;
         }

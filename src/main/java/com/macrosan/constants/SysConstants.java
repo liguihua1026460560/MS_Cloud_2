@@ -47,6 +47,7 @@ public class SysConstants {
     public static final String ROCKS_AGGREGATION_UNDO_LOG_PREFIX = ">";
 
     public static final String ROCKS_CACHE_ORDERED_KEY = "{";
+    public static final String ROCKS_CACHE_ACCESS_KEY = "}";
 
     /*************socket通信端口***************/
     public static final int SOCKET_PORT1 = 11111;
@@ -74,7 +75,7 @@ public class SysConstants {
     public static final int REDIS_LUNINFO_INDEX = 10;
     public static final int REDIS_PERCENT_INDEX = 11;
     public static final int REDIS_MIGING_V_INDEX = 12;
-    public static final int REDIS_SAN_INDEX = 13;
+    public static final int REDIS_RATE_LIMIT_INDEX = 13;
     public static final int REDIS_SNAPSHOT_INDEX = 14;
     public static final int REDIS_POOL_INDEX = 15;
 

@@ -16,6 +16,8 @@ import com.macrosan.doubleActive.deployment.AddClusterUtils;
 import com.macrosan.doubleActive.deployment.BucketSyncUtils;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.part.PartClient;
+import com.macrosan.filesystem.async.FSUnsyncRecordHandler;
+import com.macrosan.filesystem.async.SyncRecordListCache;
 import com.macrosan.httpserver.DateChecker;
 import com.macrosan.httpserver.MossHttpClient;
 import com.macrosan.httpserver.RestfulVerticle;
@@ -87,7 +89,6 @@ import static com.macrosan.doubleActive.DataSyncHandler.isSynced;
 import static com.macrosan.doubleActive.DoubleActiveUtil.*;
 import static com.macrosan.doubleActive.HeartBeatChecker.*;
 import static com.macrosan.doubleActive.SyncRecordLimiter.*;
-import static com.macrosan.doubleActive.SyncRecordLimiter.DEFAULT_PART_MAX_COUNT;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.*;
 import static com.macrosan.doubleActive.archive.ArchiveAnalyzer.ARCHIVE_ANALYZER_KEY;
 import static com.macrosan.doubleActive.deployment.AddClusterHandler.index_his_sync;
@@ -1496,7 +1497,7 @@ public class DataSynChecker {
             for (UnSynchronizedRecord record : recordList) {
                 releaseSyncingPayload(record);
             }
-            return Mono.just(false);
+            return Mono.just(true);
         }
 
         if (!isSwitchClose(bucketMap) && !clusterIndex.equals(LOCAL_CLUSTER_INDEX)) {
@@ -1517,13 +1518,13 @@ public class DataSynChecker {
                 //如after_init记录，桶关闭开关后删除，不需要确认延迟
             } else {
                 boolean skipDeal = false;
-                if (isCheckDealingNormal.get()) {
+                if (isCheckDealingNormal.get() && !record.isFSUnsyncRecord()) {
                     if (needDelayRecordDeal(bucket, record)) {
                         skipDeal = true;
                     }
                 } else {
                     String stamp = getStampFromRecord(record);
-                    long nodeAmount = UPLOAD_MAX_INTERVAL * 1000L;
+                    long nodeAmount = record.isFSUnsyncRecord() ? 60 * 60 * 1000L : UPLOAD_MAX_INTERVAL * 1000L;
                     // 没到时间的预提交记录暂不不处理
                     if (!record.commited && ((System.currentTimeMillis() - Long.parseLong(stamp)) < nodeAmount)) {
                         skipDeal = true;
@@ -1544,6 +1545,44 @@ public class DataSynChecker {
             syncRquest.bucketSwitch = bucketMap.get(DATA_SYNC_SWITCH);
             syncRquest.deleteSource = bucketMap.getOrDefault(DELETE_SOURCE_SWITCH, SWITCH_OFF);
             syncRquest.res = MonoProcessor.create();
+            if (record.isFSUnsyncRecord()) {
+                String fsRecordMapKey = FSUnsyncRecordHandler.getFSRecordMapKey(record);
+                SyncRecordListCache syncRecordListCache = SyncRecordListCache.getCache(fsRecordMapKey);
+                syncRquest.res
+                        .publishOn(SCAN_SCHEDULER)
+                        .timeout(Duration.ofMinutes(timeoutMinute))
+                        .doFinally(s -> {
+                            releaseSyncingPayload(syncRquest.record);
+                            syncRquest.res.dispose();
+                            syncRquest.record = null;
+                        })
+                        .subscribe(b -> {
+                            int count = dealCount.incrementAndGet();
+                            if (b && !hasSuccess.get()) {
+                                hasSuccess.set(true);
+                            }
+                            if (b) {
+                                syncRecordListCache.onNext();
+                            } else {
+                                hasSuccess.compareAndSet(true, false);
+                                syncRecordListCache.onFail();
+                            }
+                            if (count == preCount.get()) {
+                                result.onNext(hasSuccess.get());
+                            }
+                        }, e -> {
+                            log.error("syncRequest fs res error: ", e);
+                            syncRecordListCache.onFail();
+                            int count = dealCount.incrementAndGet();
+                            if (count == preCount.get()) {
+                                result.onNext(hasSuccess.get());
+                            }
+
+                        });
+
+                syncRecordListCache.add(syncRquest);
+                continue;
+            }
 //            disposableSet.add(syncRquest.res);
             syncRquest.res
                     .publishOn(SCAN_SCHEDULER)
@@ -1603,6 +1642,7 @@ public class DataSynChecker {
 
             }
         } catch (Exception e) {
+            log.error("allocSyncRequest err,", e);
             syncRquest.res.onNext(false);
         }
     }
@@ -1616,6 +1656,14 @@ public class DataSynChecker {
      * @return 同步处理结果
      */
     private static Mono<Boolean> dealRecord(UnSynchronizedRecord record) {
+        if (record.isFSUnsyncRecord()) {
+            try {
+                return FSUnsyncRecordHandler.dealRecord(record);
+            } catch (Exception e) {
+                log.error("FS deal record err, ", e);
+                throw new RuntimeException("FS deal record err");
+            }
+        }
         if (record.getHeaders().containsKey(EXTRA_ASYNC_TYPE)) {
             // 异构中间态差异
             return Mono.just(true);
@@ -1869,12 +1917,14 @@ public class DataSynChecker {
 
                             if (metaData.equals(MetaData.NOT_FOUND_META) || metaData.deleteMark) {
                                 //对象被删除，需根据该记录是否是deleteMarker来判断
+                                // 请求不带versionId参数且桶开了多版本，versionId才是“”。
                                 if (StringUtils.isEmpty(record.versionId) || deleteSourceFlag) {
                                     //deleteMarker被删除或生成deleteMarker失败
                                     if (!record.commited) {
                                         return notifyOtherDealRecord(record);
                                     }
                                     //deleteMarker被删除,另一站点也无需再生成deleteMarker
+                                    // 删除deleteMarker由另外带verionId的差异记录执行
                                     return Mono.just(true);
                                 } else {
                                     //非deleteMarker且对象被删除
@@ -3091,6 +3141,52 @@ public class DataSynChecker {
                                     || TOTAL_SYNCING_AMOUNT.get() > DEFAULT_MAX_COUNT
                                     || TOTAL_SYNCING_SIZE.get() > DEFAULT_MAX_SIZE) {
                                 log.debug("delay {} list. clusterIndex: {}, old:{} ", bucket, clusterIndex, metaRocksScan);
+                                if (hasSyncLimitation(tpLimiter) && tpLimiter.reachLimit()) {
+                                    log.debug("tpLimiter reachLimit. bucket {}, clusterIndex: {}, limit:{}, token {} ", bucket, clusterIndex, tpLimiter.getlimit(), tpLimiter.getTokensAmount());
+                                }
+                                if (hasSyncLimitation(bwLimiter) && bwLimiter.reachLimit()) {
+                                    log.debug("bwLimiter reachLimit. bucket {}, clusterIndex: {}, limit:{}, token {} ", bucket, clusterIndex, bwLimiter.getlimit(), bwLimiter.getTokensAmount());
+                                }
+
+                                if (hasSyncLimitation(bwLimiter) && bwLimiter.reachLimit()) {
+                                    int finalListNow = listNow;
+                                    pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(bucket)
+                                            .publishOn(SCAN_SCHEDULER)
+                                            .defaultIfEmpty(new HashMap<>())
+                                            .zipWith(pool.getReactive(REDIS_SYSINFO_INDEX).hgetall(SYNC_QOS_RULE).defaultIfEmpty(new HashMap<>()))
+                                            .subscribe(tuple2 -> {
+                                                Map<String, String> syncQuosRuleMap = tuple2.getT2();
+
+                                                // 将异步复制总配额纳入考量
+                                                Flux<Long> syncBwFlux;
+                                                // 因为listController.onComplete和onNext是异步的，可能出现final中代码块执行listingCount.derement但是subscribe有流程未结束的情况
+                                                int indexListNow = INDEX_LISTCOUNT_MAP.get(clusterIndex).get();
+                                                if (indexListNow <= 0) {
+                                                    indexListNow = 1;
+                                                }
+                                                int finalIndexListNow = indexListNow;
+                                                if (isCurrentTimeWithinRange(syncQuosRuleMap.get(START_TIME), syncQuosRuleMap.get(END_TIME))) {
+                                                    syncBwFlux = DataSyncPerfLimiter.getInstance().getQuota(DATA_SYNC_QUOTA, BAND_WIDTH_QUOTA).map(l -> l / finalListNow)
+                                                            .concatWith(DataSyncPerfLimiter.getInstance().getQuota(DATA_SYNC_QUOTA, BAND_WIDTH_QUOTA + "_" + clusterIndex).map(l -> l / finalIndexListNow))
+                                                            .concatWith(BucketPerfLimiter.getInstance().getQuota(bucket, DATASYNC_BAND_WIDTH_QUOTA))
+                                                            .concatWith(BucketPerfLimiter.getInstance().getQuota(bucket, DATASYNC_BAND_WIDTH_QUOTA + "_" + clusterIndex));
+                                                } else {
+                                                    syncBwFlux = Flux.just(0L);
+                                                }
+
+                                                syncBwFlux
+                                                        .reduce((a, b) -> {
+                                                            if (a == 0) {
+                                                                return b;
+                                                            }
+                                                            if (b == 0) {
+                                                                return a;
+                                                            }
+                                                            return Math.min(a, b);
+                                                        })
+                                                        .subscribe(bwQuota -> updateBucketSyncLimiter(clusterIndex, bucket, DATASYNC_BAND_WIDTH_QUOTA, bwQuota / 1024));
+                                            });
+                                }
                                 Mono.delay(Duration.ofMillis(500)).publishOn(SCAN_SCHEDULER).subscribe(s -> listController.onNext(curMarker[0]));
                             } else {
                                 Set<Disposable> disposableSet = new ConcurrentHashSet<>();
@@ -3162,7 +3258,12 @@ public class DataSynChecker {
                                         });
                             }
                         },
-                        res::onError,
+                        cause -> {
+                            if (!"sync data error!".equals(cause.getMessage())) {
+                                log.error("list record err, {} {}", bucket, clusterIndex, cause);
+                            }
+                            res.onError(cause);
+                        },
                         () -> {
                             res.onNext(true);
                         });
@@ -3192,13 +3293,16 @@ public class DataSynChecker {
                                  Integer clusterIndex, Map<String, String> bucketMap) {
 
         boolean bucketExists = bucketMap.containsKey(DATA_SYNC_SWITCH) && !SWITCH_CLOSED.equals(bucketMap.get(DATA_SYNC_SWITCH));
+        boolean isFSbucket = bucketMap.containsKey("fsid");
         Iterator<SocketReqMsg> iterator = msgs.iterator();
         int i = 0;
         String bucketName = msgs.get(0).get("bucket");
         SyncRecordLimiter bucketLimiter = getBucketLimiter(clusterIndex, bucketName, DATASYNC_THROUGHPUT_QUOTA);
         long maxKey = MAX_COUNT;
         if (hasSyncLimitation(bucketLimiter)) {
-            maxKey = bucketLimiter.getlimit();
+            if (bucketLimiter.getlimit() > 0) {
+                maxKey = Math.min(bucketLimiter.getlimit(), maxKey);
+            }
         }
         while (iterator.hasNext()) {
             iterator.next().put("marker", marker[i++])
@@ -3220,8 +3324,8 @@ public class DataSynChecker {
                 .publishOn(SCAN_SCHEDULER)
                 .doOnNext(recordList -> disposableSet.add(disposables[0]))
                 .flatMap(recordList -> {
-                    log.debug("need deal recordList: {}, {}", recordList.size(), bucketName);
-                    if (clientHandler.isNextList()) {
+                    log.debug("cluster {} need deal recordList: {}, {}", clusterIndex, recordList.size(), bucketName);
+                    if (clientHandler.isNextList() && !isFSbucket) {
                         listController.onNext(clientHandler.getNextMarker());
                     }
                     return recordHandler(recordList, bucketName, listController, disposableSet, clusterIndex, bucketMap);
@@ -3230,15 +3334,21 @@ public class DataSynChecker {
                     disposableSet.remove(disposables[0]);
                     disposableSet.remove(subscribe);
                     try {
+                        boolean stop = false;
                         if (!b) {
                             log.info("This round all down. bucket:{}, cluster:{}, path: {}", bucketName, msgs.get(0).get("clusterIndex"), msgs.get(0).get("lun"));
+                            stop = true;
                             listController.onError(new RejectedExecutionException("sync data error!"));
                             clearDisposables(disposableSet);
                         } else {
                             // 桶的同步数据开关暂停，扫描结果少于MAX_COUNT表示已扫描完毕，结束本轮扫描。
                             if (isSwitchSuspend(bucketMap) || clientHandler.getCount() < finalMaxKey || syncSuspendMap.get(clusterIndex).get()) {
+                                stop = true;
                                 listController.onComplete();
                             }
+                        }
+                        if (clientHandler.isNextList() && isFSbucket && !stop) {
+                            listController.onNext("");
                         }
                         disposables[0].dispose();
                         subscribe.dispose();

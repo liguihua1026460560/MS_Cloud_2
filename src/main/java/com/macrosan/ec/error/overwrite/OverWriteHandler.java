@@ -52,12 +52,6 @@ public class OverWriteHandler {
             Map<String, String> config = RedisConnPool.getInstance().getShortMasterCommand(SysConstants.REDIS_SYSINFO_INDEX).hgetall("overwrite_config");
             if (!config.isEmpty()) {
 
-//                if (config.containsKey("async_over_write")) {
-//                    if ("0".equals(config.get("async_over_write"))) {
-//                        async_over_write = false;
-//                    }
-//                }
-
                 if ("0".equals(config.getOrDefault("async_over_write", "0"))) {
                     async_over_write = false;
                 }
@@ -388,7 +382,7 @@ public class OverWriteHandler {
                             }
                             capacity = tempCap;
                         } else {
-                            capacity = oldMeta.deleteMarker ? 0 : oldMeta.getEndIndex() - oldMeta.getStartIndex() + 1;
+                            capacity = oldMeta.deleteMarker ? 0 : Utils.getObjectSize(oldMeta);
                         }
                         long objNum = -1;
 

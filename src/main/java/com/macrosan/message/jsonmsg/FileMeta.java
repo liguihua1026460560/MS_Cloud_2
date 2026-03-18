@@ -72,6 +72,9 @@ public class FileMeta {
     long fileOffset;
     String flushStamp;
 
+    //增加最后访问时间
+    String lastAccessStamp;
+
     public void setKey(String partKey) {
 
     }

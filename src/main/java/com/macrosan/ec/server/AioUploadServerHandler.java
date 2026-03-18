@@ -10,6 +10,8 @@ import com.macrosan.message.jsonmsg.BlockInfo;
 import com.macrosan.message.jsonmsg.FileMeta;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.rsocket.LocalPayload;
+import com.macrosan.storage.StoragePool;
+import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.compressor.CompressorUtils;
 import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.storage.crypto.rootKey.RootSecretKeyUtils;
@@ -45,10 +47,10 @@ import static com.macrosan.database.rocksdb.MSRocksDB.READ_OPTIONS;
 import static com.macrosan.database.rocksdb.MossMergeOperator.SPACE_LEN;
 import static com.macrosan.database.rocksdb.MossMergeOperator.SPACE_SIZE;
 import static com.macrosan.database.rocksdb.batch.BatchRocksDB.*;
-import static com.macrosan.ec.Utils.ZERO_BYTES;
-import static com.macrosan.ec.Utils.getCacheOrderKey;
+import static com.macrosan.ec.Utils.*;
 import static com.macrosan.ec.server.ErasureServer.*;
 import static com.macrosan.fs.BlockDevice.*;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 
 @Log4j2
 public class AioUploadServerHandler implements RequestChannalHandler {
@@ -178,6 +180,11 @@ public class AioUploadServerHandler implements RequestChannalHandler {
                 .setSmallFile(false)
                 .setLun(lun)
                 .setFlushStamp(msg.get("flushStamp"));
+
+        log.debug("lastAccessStamp:{}", msg.get("lastAccessStamp"));
+        if (StringUtils.isNotEmpty(msg.get("lastAccessStamp"))) {
+            fileMeta.setLastAccessStamp(msg.get("lastAccessStamp"));//这里同时要在设置fileMeta时在缓存盘设置一个访问记录
+        }
 
         if (msg.getDataMap().containsKey("fileOffset")) {
             fileMeta.setFileOffset(Long.parseLong(msg.get("fileOffset")));
@@ -504,6 +511,12 @@ public class AioUploadServerHandler implements RequestChannalHandler {
                                     writeBatch.put(data.var1, data.var2);
                                     if (fileMeta.getFlushStamp() != null) {
                                         writeBatch.put(getCacheOrderKey(fileMeta.getFlushStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                                    }
+                                    if (StringUtils.isNotEmpty(fileMeta.getLastAccessStamp())) {//put时同步增加访问记录
+                                        StoragePool pool = StoragePoolFactory.getStoragePoolByDisk(lun);
+                                        if (pool != null && isEnableCacheAccessTimeFlush(pool)) {
+                                            writeBatch.put(getAccessTimeKey(fileMeta.getLastAccessStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                                        }
                                     }
                                 } catch (RocksDBException e) {
                                     log.info("rocksdb put error:{}", e.getMessage());

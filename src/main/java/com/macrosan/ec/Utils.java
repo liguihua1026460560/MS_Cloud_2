@@ -1,5 +1,6 @@
 package com.macrosan.ec;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.redis.ReadWriteLock;
 import com.macrosan.database.rocksdb.MSRocksDB;
@@ -28,7 +29,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
+import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.constants.SysConstants.ROCKS_CACHE_ACCESS_KEY;
 import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
 
@@ -53,7 +56,7 @@ public class Utils {
 
     public static String getObjFileName(StoragePool pool, String bucket, String object, String requestId) {
         if (false) {
-            return getObjFileName0(pool, bucket, object,requestId);
+            return getObjFileName0(pool, bucket, object, requestId);
         }
         ImmutableTuple<String, String> tuple = pool.getObjectVnodeId(bucket, object);
 
@@ -180,7 +183,7 @@ public class Utils {
     }
 
     public static String getLifeCycleMetaKey(String vnode, String bucket, String object, String versionId, String stamp, long nodeId) {
-        if(nodeId > 0) {
+        if (nodeId > 0) {
             long truncatedTimestamp = Long.parseLong(stamp) / DateUtils.MILLIS_PER_HOUR * DateUtils.MILLIS_PER_HOUR;
             return getLifeCycleMetaKey(vnode, bucket, object, versionId, String.valueOf(truncatedTimestamp));
         } else {
@@ -251,6 +254,17 @@ public class Utils {
 
     public static String getFileMetaKeyByCacheOrderKey(String cacheOrderKey) {
         return ROCKS_FILE_META_PREFIX + cacheOrderKey.split(File.separator)[1];
+    }
+
+    public static String getAccessTimeKey(String timestamp, String fileName) {
+        return ROCKS_CACHE_ACCESS_KEY + timestamp + fileName;
+    }
+
+    public static String getEndTimeStampMarker(String endTimeStamp) {
+        return ROCKS_CACHE_ACCESS_KEY + endTimeStamp;
+    }
+    public static String getFileMetaKeyByAccessTimeKey(String accessTimeKey) {
+        return ROCKS_FILE_META_PREFIX + accessTimeKey.split(File.separator)[1];
     }
 
     public static final byte[] ZERO_BYTES = new byte[]{};
@@ -567,6 +581,7 @@ public class Utils {
 
     /**
      * 获取不带节点信息的磁盘名称
+     *
      * @param disk 带节点名称或者不带节点名称的磁盘名称
      * @return 不带节点信息的磁盘名称
      */
@@ -576,5 +591,43 @@ public class Utils {
             return split.length > 1 ? split[1] : disk;
         }
         return disk;
+    }
+
+    public static int longToIntSaturated(long value) {
+        if (value > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        if (value < Integer.MIN_VALUE) {
+            return Integer.MIN_VALUE;
+        }
+        return (int) value;
+    }
+
+    public static String getEtag(Map<String, String> sysMetaMap) {
+        if (sysMetaMap == null) return null;
+        if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {
+            return '"' + sysMetaMap.get(DECOMPRESSED_ETAG) + '"';
+        } else {
+            return '"' + sysMetaMap.get(ETAG) + '"';
+        }
+    }
+
+
+    public static String getObjectSize(Map<String, String> sysMetaMap, MetaData metaData) {
+        if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {
+            return sysMetaMap.get(DECOMPRESSED_LENGTH);
+        } else {
+            return String.valueOf(metaData.endIndex - metaData.startIndex + 1);
+        }
+    }
+
+    public static long getObjectSize(MetaData metaData) {
+        Map<String, String> sysMetaMap = Json.decodeValue(metaData.getSysMetaData(), new TypeReference<Map<String, String>>() {
+        });
+        if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {
+            return Long.parseLong(sysMetaMap.get(DECOMPRESSED_LENGTH));
+        } else {
+            return metaData.endIndex - metaData.startIndex + 1;
+        }
     }
 }

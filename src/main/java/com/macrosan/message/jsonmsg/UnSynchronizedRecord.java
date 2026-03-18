@@ -6,6 +6,7 @@ import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.macrosan.doubleActive.DoubleActiveUtil;
+import com.macrosan.ec.VersionUtil;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import io.vertx.core.http.HttpMethod;
@@ -20,6 +21,7 @@ import java.util.stream.Collectors;
 import static com.macrosan.constants.ServerConstants.INCLUDE_PARAM_LIST;
 import static com.macrosan.constants.SysConstants.ROCKS_UNSYNCHRONIZED_KEY;
 import static com.macrosan.database.rocksdb.MSRocksDB.UnsyncRecordDir;
+import static com.macrosan.doubleActive.DoubleActiveUtil.getOtherSiteIndex;
 import static com.macrosan.doubleActive.arbitration.DAVersionUtils.*;
 import static com.macrosan.httpserver.MossHttpClient.*;
 import static com.macrosan.message.jsonmsg.UnSynchronizedRecord.Type.*;
@@ -98,7 +100,8 @@ public class UnSynchronizedRecord implements Cloneable {
         AFTER_INIT_PART(false),
         NONE(false),
         ERROR_APPEND_OBJECT(false),
-        ERROR_PUT_BUCKET(false);
+        ERROR_PUT_BUCKET(false),
+        FS_RECORD(false);
 
         /**
          * 是否需要获取当前对象stamp
@@ -197,6 +200,40 @@ public class UnSynchronizedRecord implements Cloneable {
     @JsonProperty("f")
     @JsonAlias({"lastStamp"})
     public String lastStamp;
+    @JsonAttribute
+    @JsonProperty("g")
+    @JsonAlias({"opt"})
+    public Integer opt;
+    @JsonAttribute
+    @JsonProperty("h")
+    @JsonAlias({"nodeId"})
+    public Long nodeId;
+
+    public UnSynchronizedRecord() {
+    }
+
+    /**
+     * 文件专用
+     */
+    public UnSynchronizedRecord(String bucket, int opt, String syncStamp, long nodeId) {
+        this.bucket = bucket;
+        this.opt = opt;
+        this.syncStamp = syncStamp;
+        this.nodeId = nodeId;
+        this.versionNum = VersionUtil.getVersionNum(false);
+        this.headers = new HashMap<>();
+        this.index = getOtherSiteIndex();
+        this.successIndex = LOCAL_CLUSTER_INDEX;
+        this.commited = false;
+        // rocksKey生成使用
+        this.uri = File.separator + nodeId;
+        // 兼容差异记录扫描流程中的一些标识，record.object不能为空
+        this.object = String.valueOf(nodeId);
+    }
+
+    public boolean isFSUnsyncRecord() {
+        return opt != null;
+    }
 
     @Override
     public Object clone() {
@@ -419,6 +456,9 @@ public class UnSynchronizedRecord implements Cloneable {
     }
 
     public Type type() {
+        if (isFSUnsyncRecord()) {
+            return FS_RECORD;
+        }
         StringBuilder stringBuilder = new StringBuilder(10);
         stringBuilder.append(method);
         String pagrams = Arrays.stream(StringUtils.substringAfter(uri, "?").split("&"))

@@ -5,6 +5,7 @@ import com.alibaba.fastjson.JSONObject;
 import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.redis.IamRedisConnPool;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.message.mqmessage.ResponseMsg;
 import com.macrosan.message.xmlmsg.ComponentTask;
 import com.macrosan.message.xmlmsg.ListComponentTaskResponse;
@@ -61,6 +62,9 @@ public class ComponentTaskService extends BaseService {
         if (StringUtils.isEmpty(taskName) || StringUtils.isEmpty(bucket)
                 || StringUtils.isEmpty(startTime) || StringUtils.isEmpty(strategyName)) {
             throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "invalid component param");
+        }
+        if (CheckUtils.bucketFsCheck(bucket)){
+            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not add componentTask");
         }
         //判断startTime格式
         checkStartTime(startTime);

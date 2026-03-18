@@ -279,7 +279,8 @@ public class RestoreObjectTask {
         //获取数据块的存放位置,只修改ec的话获取到的vnode会发生改变
         List<Tuple3<String, String, String>> sourceNodeList = oldPool.mapToNodeInfo(oldPool.getObjectVnodeId(oldFileName)).block();
 
-        String newFileName = RESTORE_TYPE.RESTORE_OBJECT.equals(restoreType) ? Utils.getObjFileName(newPool, bucket, object, requestId)
+        String objectWithVersionId = "null".equals(versionId) ? object : object + File.separator + versionId;
+        String newFileName = RESTORE_TYPE.RESTORE_OBJECT.equals(restoreType) ? Utils.getObjFileName(newPool, bucket, objectWithVersionId, requestId)
                 : Utils.getPartFileName(newPool, bucket, object, uploadId, partNum, requestId);//使用新的requestId生成新的filename，避免后续删除旧对象数据时filename不变的话可能删除掉新对象的数据块
 
         List<Tuple3<String, String, String>> targetNodeList = newPool.mapToNodeInfo(newPool.getObjectVnodeId(newFileName)).block();
@@ -372,7 +373,7 @@ public class RestoreObjectTask {
             );
         }
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, targetNodeList);
-        List<Integer> errorChunkList = new ArrayList<>(newPool.getM());
+        Set<Integer> errorChunkList = new HashSet<>(newPool.getM());
         AtomicInteger putNum = new AtomicInteger();
 
         responseInfo.responses.subscribe(s -> {
@@ -400,7 +401,7 @@ public class RestoreObjectTask {
                                 .put("fileName", newFileName)
                                 .put("updateEC", oldPool.getVnodePrefix())
                                 .put("endIndex", String.valueOf(endIndex))
-                                .put("errorChunksList", Json.encode(errorChunkList))
+                                .put("errorChunksList", Json.encode(new ArrayList<>(errorChunkList)))
                                 .put("fileSize", String.valueOf(ecEncodeHandler.size()))
                                 .put("versionId", versionId)
                                 .put("poolQueueTag", poolQueueTag);

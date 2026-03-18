@@ -100,7 +100,9 @@ public class NFSACL {
                     }
 
                     int[] uidAndGid = ACLUtils.getUidAndGid(callHeader);
-                    FSIdentity identity = getIdentityByUidAndInode(inode, callHeader);
+                    Tuple2<FSIdentity, Boolean> tuple2 = getIdtAndJudgeByUidAndInode(inode, callHeader);
+                    FSIdentity identity = tuple2.var1;
+                    boolean isIdtPromote = tuple2.var2;
 
                     //判断桶ACL；当前账户是否包含该桶的权限
                     return checkBucketACL(bucketInfo, identity.getS3Id(), bucket)
@@ -118,7 +120,7 @@ public class NFSACL {
                                 //判断对象ACL与UGO、NFS ACL; cifs acl粒度比nfs acl小，因此不在access接口中判断
                                 return Flux.just(
                                         parseObjACLToNFSRight(inode, identity.getS3Id(), callHeader.opt, bucketInfo, null),
-                                        parseUGOAndNFSACLToRight(inode, createCallHeader(callHeader.opt, identity), null),
+                                        parseUGOAndNFSACLToRight(inode, createNfsHeader(callHeader.opt, identity, isIdtPromote, callHeader), null),
                                         CIFSACL.judgeSMBACLToNFSRight(inode, identity, callHeader.opt, NFSBucketInfo.isCIFSShare(bucketInfo)))
                                         .collectList()
                                         .map(list -> {
@@ -165,7 +167,9 @@ public class NFSACL {
                     }
 
                     int[] uidAndGid = ACLUtils.getUidAndGid(callHeader);
-                    FSIdentity identity = getIdentityByUidAndInode(inode, callHeader);
+                    Tuple2<FSIdentity, Boolean> tuple2 = getIdtAndJudgeByUidAndInode(inode, callHeader);
+                    FSIdentity identity = tuple2.var1;
+                    boolean isIdtPromote = tuple2.var2;
 
                     return findSecretAccessKeyByIamFS(bucket, inode.getObjName(), callHeader.opt, accessKey)
                             .flatMap(b -> {
@@ -200,7 +204,7 @@ public class NFSACL {
                                             //判断对象ACL与UGO、NFS ACL与CIFS ACL
                                             return Flux.just(
                                                         parseObjACLToNFSRight(inode, identity.getS3Id(), callHeader.opt, bucketInfo, extraParam).var1(),
-                                                        parseUGOAndNFSACLToRight(inode, createCallHeader(callHeader.opt, identity), extraParam).var1(),
+                                                        parseUGOAndNFSACLToRight(inode, createNfsHeader(callHeader.opt, identity, isIdtPromote, callHeader), extraParam).var1(),
                                                         notNeedJudgeCifs(callHeader.opt, false) ? true : CIFSACL.judgeSMBACLToBoolean(inode, identity, callHeader.opt, NFSBucketInfo.isCIFSShare(bucketInfo), extraParam, cifsJudgeFlag))
                                                     .collectList()
                                                     .map(list -> list.get(0) && list.get(1) & list.get(2));
@@ -289,7 +293,7 @@ public class NFSACL {
         }
 
         FSIdentity identity = ACLUtils.getIdentityByUidAndInode(inode, callHeader);
-        boolean pass =  CIFSACL.judgeSMBACLToBoolean(inode, identity, callHeader.opt, true, null, 0);
+        boolean pass = CIFSACL.judgeSMBACLToBoolean(inode, identity, callHeader.opt, true, null, 0);
         return pass;
     }
 
@@ -1102,7 +1106,9 @@ public class NFSACL {
                     return res;
                 } else {
                     if (gid == checkGid || gidList.contains(checkGid)) {
-                        right |= judgeUGO(UGOMode, 1, isDir);
+
+                        int mask = judgeGroupWithMask(map, isDir);
+                        right |= (judgeUGO(UGOMode, 1, isDir) & mask);
                         if (ACLUtils.aclDebug) {
                             log.info("【access】group: {}", right);
                         }

@@ -18,6 +18,7 @@ import com.macrosan.filesystem.cifs.reply.smb1.WriteXReply;
 import com.macrosan.filesystem.cifs.types.Session;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.utils.CheckUtils;
+import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.utils.functional.Tuple2;
@@ -127,17 +128,20 @@ public class NT {
                                     replyHeader.status = NTStatus.STATUS_ACCESS_DENIED;
                                     return Mono.just(reply);
                                 }
-                                return WriteCache.getCache(inode.getBucket(), inode.getNodeId(), call.writeMode, inode.getStorage(), true)
-                                        .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.fileData, inode, call.writeMode))
-                                        .flatMap(b -> {
-                                            body.dataLenLow = call.dateLenLow;
-                                            body.dataLenHigh = call.dateLenHigh;
-                                            body.xOpcode = call.xOpcode;
-                                            if (!b) {
-                                                replyHeader.status = NTStatus.STATUS_DATA_ERROR;
-                                            }
-                                            reply.setBody(body);
-                                            return Mono.just(reply);
+                                return FSQuotaUtils.checkFsQuota(inode)
+                                        .flatMap(i->{
+                                            return WriteCache.getCache(inode.getBucket(), inode.getNodeId(), call.writeMode, inode.getStorage(), true)
+                                                    .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.fileData, inode, call.writeMode))
+                                                    .flatMap(b -> {
+                                                        body.dataLenLow = call.dateLenLow;
+                                                        body.dataLenHigh = call.dateLenHigh;
+                                                        body.xOpcode = call.xOpcode;
+                                                        if (!b) {
+                                                            replyHeader.status = NTStatus.STATUS_DATA_ERROR;
+                                                        }
+                                                        reply.setBody(body);
+                                                        return Mono.just(reply);
+                                                    });
                                         });
                             });
                 });

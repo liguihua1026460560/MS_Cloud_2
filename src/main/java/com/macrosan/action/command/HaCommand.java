@@ -17,6 +17,7 @@ import com.macrosan.storage.metaserver.ShardingScheduler;
 import com.macrosan.storage.metaserver.ShardingWorker;
 import com.macrosan.storage.strategy.StorageStrategy;
 import com.macrosan.utils.msutils.ChangeLogLevel;
+import com.macrosan.utils.ModuleDebug;
 import com.sun.management.HotSpotDiagnosticMXBean;
 import io.netty.util.internal.PlatformDependent;
 import io.vertx.core.DeploymentOptions;
@@ -339,6 +340,29 @@ public class HaCommand extends Reusable {
                     break;
                 case "crash":
                     AioChannel.free0(1);
+                    break;
+                case "moduleDebug":
+                    log.info("moduleDebug: {}", Arrays.toString(args));
+                    if (args.length < 3) {
+                        log.info("Usage: action moduleDebug <module> <on|off>");
+                        log.info("Available modules: {}", ModuleDebug.getAll().keySet());
+                        break;
+                    }
+                    String module = args[1];
+                    String value = args[2];
+                    if (!ModuleDebug.getAll().containsKey(module)) {
+                        log.info("Invalid module: {}", module);
+                        log.info("Available modules: {}", ModuleDebug.getAll().keySet());
+                        break;
+                    }
+                    if (!"on".equalsIgnoreCase(value) && !"off".equalsIgnoreCase(value)) {
+                        log.info("Invalid value: {}", value);
+                        log.info("Usage: moduleDebug <module> <on|off>");
+                        break;
+                    }
+                    boolean enabled = "on".equalsIgnoreCase(value);
+                    ModuleDebug.setEnabled(module, enabled);
+                    log.info("Set module {} debug to {}", module, enabled);
                     break;
                 default:
                     log.info("no such action {}", action);

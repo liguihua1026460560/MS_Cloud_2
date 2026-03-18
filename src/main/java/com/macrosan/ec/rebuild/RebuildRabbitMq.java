@@ -483,8 +483,9 @@ public class RebuildRabbitMq {
 
                 String crypto = task.map.get("crypto");
                 String secretKey = task.map.get("secretKey");
+                String lastAccessStamp = task.map.get("lastAccessStamp");
 
-                taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, task.map.get("timestamp"))
+                taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, task.map.get("timestamp"), lastAccessStamp)
                         .doOnNext(b -> {
                             if (b) {
                                 RebuildSpeed.add(Long.parseLong(fileSize));

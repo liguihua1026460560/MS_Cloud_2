@@ -26,9 +26,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -288,7 +286,7 @@ public class FileSystemRunner {
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, putNodeList);
 
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        List<Integer> errorChunksList = new ArrayList<>();
+        Set<Integer> errorChunksList = new HashSet<>();
         Limiter limiter = new Limiter(new TaskRunner.MoveMsRequest(), putNodeList.size(), targetPool.getK());
 
         responseInfo.responses.doOnNext(s -> {
@@ -309,7 +307,7 @@ public class FileSystemRunner {
                 String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
                 //订阅数据修复消息的发出。b表示k+m个元数据是否至少写上了一个。
                 SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                        .put("errorChunksList", Json.encode(errorChunksList))
+                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                         .put("storage", targetPool.getVnodePrefix())
                         .put("bucket", inode.getBucket())
                         .put("object", metaKey)

@@ -93,6 +93,20 @@ public class UnsyncRecordSerializer extends JsonSerializer<UnSynchronizedRecord>
             gen.writeFieldName("f");
             MsStringJson.serialize0(lastStamp, gen, serializers);
         }
+        Integer opt = value.opt;
+        if (opt != null) {
+            gen.writeFieldName("g");
+            gen.writeNumber(opt);
+        }
+        Long nodeId = value.nodeId;
+        if (nodeId != null) {
+            gen.writeFieldName("h");
+            gen.writeNumber(nodeId);
+        }
+//        @JsonAttribute
+//        public Integer opt;
+//        @JsonAttribute
+//        public Long nodeId;
 
         gen.writeEndObject();
     }

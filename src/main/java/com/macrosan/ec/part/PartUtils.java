@@ -21,7 +21,6 @@ import com.macrosan.storage.client.ListPartsClientHandler;
 import com.macrosan.storage.coder.LimitEncoder;
 import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.utils.cache.Md5DigestPool;
-import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.functional.Tuple3;
 import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.msutils.MsObjVersionUtils;
@@ -43,9 +42,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import static com.macrosan.action.datastream.ActiveService.PASSWORD;
+import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.constants.ServerConstants.IS_SYNCING;
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.constants.SysConstants.PART_CONFIG_SIGN;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.ERROR_PAYLOAD;
@@ -136,7 +136,7 @@ public class PartUtils {
 
         ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(processors, String.class, nodeList);
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        List<Integer> errorChunksList = new ArrayList<>(storagePool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(storagePool.getM());
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(storagePool.getVnodePrefix());
         Disposable disposable = responseInfo.responses.subscribe(s -> {
                     if (s.var2.equals(ERROR)) {
@@ -163,7 +163,7 @@ public class PartUtils {
                                             .put("partNum", partInfo.partNum)
                                             .put("fileName", partInfo.fileName)
                                             .put("endIndex", String.valueOf(partInfo.partSize - 1))
-                                            .put("errorChunksList", Json.encode(errorChunksList))
+                                            .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                             .put("versionId", partInfo.versionId)
                                             .put("poolQueueTag", poolQueueTag);
                                     Optional.ofNullable(partInfo.snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));
@@ -282,12 +282,18 @@ public class PartUtils {
         return deleteMultiPartUploadMeta(bucket, object, uploadId, bucketNodeList, isAbortPart, partInfoNums, null, initPartSnapshotMark, currentSnapshotMark);
     }
 
+    public static Mono<Boolean> deleteMultiPartUploadMeta(String bucket, String object, String uploadId,
+                                                          List<Tuple3<String, String, String>> bucketNodeList,
+                                                          boolean isAbortPart, List<String> partInfoNums, InitPartInfo initPartInfo, String initPartSnapshotMark, String currentSnapshotMark) {
+        return deleteMultiPartUploadMeta(bucket, object, uploadId, bucketNodeList, isAbortPart, partInfoNums, initPartInfo, initPartSnapshotMark, currentSnapshotMark, false);
+    }
+
     /**
      * 删除InitPartInfo和partInfo
      */
     public static Mono<Boolean> deleteMultiPartUploadMeta(String bucket, String object, String uploadId,
                                                           List<Tuple3<String, String, String>> bucketNodeList,
-                                                          boolean isAbortPart, List<String> partInfoNums, InitPartInfo initPartInfo, String initPartSnapshotMark, String currentSnapshotMark) {
+                                                          boolean isAbortPart, List<String> partInfoNums, InitPartInfo initPartInfo, String initPartSnapshotMark, String currentSnapshotMark, boolean discard) {
         String vnode = bucketNodeList.get(0).var3;
         String initPartKey = InitPartInfo.getPartKey(vnode, bucket, object, uploadId, currentSnapshotMark);
         String partKey = PartInfo.getPartKey(vnode, bucket, object, uploadId, "", currentSnapshotMark);
@@ -330,7 +336,9 @@ public class PartUtils {
                     ECUtils.publishEcError(responseInfo.res, bucketNodeList, msg, ERROR_MARK_DELETE_PART_META);
                 } else {
                     Optional.ofNullable(initPartSnapshotMark).ifPresent(v -> msg.put("initPartSnapshotMark", v));
-                    ECUtils.publishEcError(responseInfo.res, bucketNodeList, msg, ERROR_DELETE_PART_META);
+                    if (!discard) {
+                        ECUtils.publishEcError(responseInfo.res, bucketNodeList, msg, ERROR_DELETE_PART_META);
+                    }
                 }
                 res.onNext(false);
             }
@@ -398,7 +406,8 @@ public class PartUtils {
                             PartInfo partInfo = partInfoMap.get(checkPart.getPartNumber());
                             String requestEtag = checkPart.getEtag().startsWith("\"") ? '"' + partInfo.getEtag() + '"' : partInfo.getEtag();
 
-                            if (!requestEtag.equals(checkPart.getEtag()) || partInfo.delete) {
+                            if ((!requestEtag.equals(checkPart.getEtag()) || partInfo.delete) &&
+                                    !PASSWORD.equals(request.getHeader(SYNC_AUTH))) {
                                 res.onError(new MsException(ErrorNo.PART_INVALID, "Complete multi part fail, invalid part."));
                                 return;
                             }

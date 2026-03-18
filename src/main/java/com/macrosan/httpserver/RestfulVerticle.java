@@ -70,7 +70,6 @@ import static com.macrosan.action.controller.DataStreamController.dataStreamRout
 import static com.macrosan.action.datastream.ActiveService.PASSWORD;
 import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.constants.AccountConstants.DEFAULT_ACCESS_KEY;
-import static com.macrosan.constants.ErrorNo.INVALID_TAGGING_ARGUMENT;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.AssignClusterHandler.ClUSTER_NAME_HEADER;
@@ -480,7 +479,7 @@ public class RestfulVerticle extends AbstractVerticle {
                 invalidRequest(req);
             }
         } else {
-            if (!req.method().equals(HttpMethod.OTHER)){
+            if (!req.method().equals(HttpMethod.OTHER)) {
                 logger.error("no such route. \nversion : {}\nmethod : {}\npath : {}\nparam : {}\nheaders : {}",
                         req.version(), req.method(), req.path(), req.params(), req.headers());
             }
@@ -714,39 +713,39 @@ public class RestfulVerticle extends AbstractVerticle {
 
         UnicastProcessor<MsHttpRequest> allRequest = UnicastProcessor.create(Queues.<MsHttpRequest>unboundedMultiproducer().get());
         allRequest.flatMap(r -> Mono.just(r)
-                        .filter(preRequestFilter())
-                        //如果客户端未处理Expect头，req.pause()无法完全停住客户端请求里body的数据，os的缓存耗尽才会真的停下(ss -a查看)
+                .filter(preRequestFilter())
+                //如果客户端未处理Expect头，req.pause()无法完全停住客户端请求里body的数据，os的缓存耗尽才会真的停下(ss -a查看)
 //                        .map(req -> new MsHttpRequest(req.pause().getDelegate()))
-                        .doOnNext(getCodec())
-                        .filter(DateChecker.checkDateHandler())
-                        .filter(tmpUrlHandler())
-                        .doOnNext(req -> {
-                            if (isSsl) {
-                                req.headers().set("http-ssl", "1");
+                .doOnNext(getCodec())
+                .filter(DateChecker.checkDateHandler())
+                .filter(tmpUrlHandler())
+                .doOnNext(req -> {
+                    if (isSsl) {
+                        req.headers().set("http-ssl", "1");
+                    } else {
+                        req.headers().set("http-ssl", "0");
+                    }
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("\nversion : {}\nmethod : {}\npath : {}\nparam : {}\nheaders : {}", req.version(), req.method(), req.path(), req.params(), req.headers());
+                    }
+                    try {
+                        if (req.method() == HttpMethod.PUT && req.uri().equals("/?putSyncDumpFile")) {
+                            // 直接调用 putSyncDumpFile
+                            MossHttpClient.putSyncDumpFile(req);
+                        } else {
+                            if (!isMultiAliveStarted) {
+                                normalRequest.onNext(req);
                             } else {
-                                req.headers().set("http-ssl", "0");
+                                check(req, normalRequest, multiRequest);
                             }
-                            if (logger.isDebugEnabled()) {
-                                logger.debug("\nversion : {}\nmethod : {}\npath : {}\nparam : {}\nheaders : {}", req.version(), req.method(), req.path(), req.params(), req.headers());
-                            }
-                            try {
-                                if (req.method() == HttpMethod.PUT && req.uri().equals("/?putSyncDumpFile")) {
-                                    // 直接调用 putSyncDumpFile
-                                    MossHttpClient.putSyncDumpFile(req);
-                                } else {
-                                    if (!isMultiAliveStarted) {
-                                        normalRequest.onNext(req);
-                                    } else {
-                                        check(req, normalRequest, multiRequest);
-                                    }
-                                }
-                            } catch (Exception e) {
-                                throw new MsException(ErrorNo.UNKNOWN_ERROR, "http request error", e);
-                            }
-                        })
-                        .map(req -> new Tuple2<>(false, r))
-                        .doOnError(e -> logger.error("request error:{}", e.getMessage()))
-                        .onErrorReturn(new Tuple2<>(true, r)))
+                        }
+                    } catch (Exception e) {
+                        throw new MsException(ErrorNo.UNKNOWN_ERROR, "http request error", e);
+                    }
+                })
+                .map(req -> new Tuple2<>(false, r))
+                .doOnError(e -> logger.error("request error:{}", e.getMessage()))
+                .onErrorReturn(new Tuple2<>(true, r)))
                 .defaultIfEmpty(new Tuple2<>(false, null))
                 .subscribe(tuple -> {
                     if (tuple.var1) {
@@ -1099,6 +1098,17 @@ public class RestfulVerticle extends AbstractVerticle {
                                                 preRecord[0].headers.put(SYNC_STAMP, metaData.syncStamp);
                                                 request.headers().remove(SYNC_STAMP);
                                                 request.headers().add(SYNC_STAMP, metaData.syncStamp);
+                                            }
+                                        }
+                                        return preRecord[0];
+                                    }).zipWith(Mono.just(nodeList));
+                        } else if (BucketSyncSwitchCache.isBucketNeedFsAsync(request.getBucketName())) {
+                            return storagePool.mapToNodeInfo(storagePool.getBucketVnodeId(request.getBucketName(), request.getObjectName()))
+                                    .flatMap(infoList -> ErasureClient.getObjectMetaVersion(request.getBucketName(), request.getObjectName(), preRecord[0].versionId, infoList))
+                                    .map(metaData -> {
+                                        if (metaData.isAvailable()) {
+                                            if (metaData.inode > 0) {
+                                                preRecord[0].setNodeId(metaData.inode);
                                             }
                                         }
                                         return preRecord[0];

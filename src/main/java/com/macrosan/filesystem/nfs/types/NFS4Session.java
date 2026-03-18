@@ -1,5 +1,6 @@
 package com.macrosan.filesystem.nfs.types;
 
+import com.macrosan.filesystem.lock.Lock;
 import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
 import com.macrosan.filesystem.nfs.delegate.DelegateLock;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
@@ -30,7 +31,7 @@ public class NFS4Session {
     public int cbProgram;
     public final AtomicInteger cbSeqId = new AtomicInteger(0);
     private final Set<SessionConnection> boundConnections;
-    public final ConcurrentLinkedQueue<Tuple2<CompoundCall, DelegateLock>> recallQueue = new ConcurrentLinkedQueue<>();
+    public final ConcurrentLinkedQueue<Tuple2<CompoundCall, Lock>> recallQueue = new ConcurrentLinkedQueue<>();
     public final AtomicBoolean canSend  = new AtomicBoolean(true);
 
 

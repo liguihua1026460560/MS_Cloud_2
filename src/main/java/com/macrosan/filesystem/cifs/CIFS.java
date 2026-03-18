@@ -1,6 +1,8 @@
 package com.macrosan.filesystem.cifs;
 
 import com.macrosan.constants.ServerConstants;
+import com.macrosan.filesystem.FsConstants;
+import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cifs.handler.SMBHandler;
 import com.macrosan.filesystem.cifs.lease.LeaseServer;
 import com.macrosan.filesystem.cifs.lock.CIFSLockServer;
@@ -16,12 +18,24 @@ import lombok.extern.log4j.Log4j2;
 
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
+
 @Log4j2
 public class CIFS {
     public static boolean cifsDebug = false;
-    static int cifsPort = 445;
+    public static int cifsPort = 445;
 
     static Vertx vertx;
+    static DeploymentOptions options;
+
+    static {
+        /* 从redis中读取cifs端口设置 */
+        try {
+            cifsPort = FsUtils.getFsPort(FsConstants.FSConfig.CIFS_PORT, cifsPort);
+        } catch (Exception e) {
+            log.error("Failed to obtain CIFS settings, default settings applied.", e);
+        }
+    }
 
     public static void start() {
         NotifyServer.register();
@@ -31,7 +45,7 @@ public class CIFS {
         SMB1.initProc();
         SMB2.initProc();
 
-        DeploymentOptions options = new DeploymentOptions()
+        options = new DeploymentOptions()
                 .setInstances(ServerConstants.PROC_NUM);
         vertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
@@ -39,6 +53,20 @@ public class CIFS {
 
         vertx.rxDeployVerticle(CIFSVerticle.class.getName(), options).subscribe();
         log.info("start cifs service in {}", cifsPort);
+    }
+
+    public static void restart() {
+        vertx.close(ar -> {
+            if (ar.succeeded()) {
+                vertx = Vertx.vertx(new VertxOptions()
+                        .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
+                        .setPreferNativeTransport(true));
+                vertx.rxDeployVerticle(CIFSVerticle.class.getName(), options).subscribe();
+                log.info("start cifs service in {}", cifsPort);
+            } else {
+                log.error("start cifs service in {} failed", cifsPort);
+            }
+        });
     }
 
     public static AtomicLong printTimeout = new AtomicLong();

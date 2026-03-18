@@ -7,15 +7,15 @@ import com.macrosan.filesystem.nfs.auth.Auth;
 import com.macrosan.filesystem.nfs.auth.AuthUnix;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
+import com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock;
+import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.utils.functional.Tuple2;
 import io.vertx.reactivex.core.net.SocketAddress;
 import lombok.extern.log4j.Log4j2;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,6 +25,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
 import static com.macrosan.filesystem.FsConstants.RpcAuthType.*;
 import static com.macrosan.filesystem.nfs.types.StateId.NFS4_LOCK_STID;
+import static com.macrosan.filesystem.nfs.types.StateId.NFS4_OPEN_STID;
+import static com.macrosan.filesystem.nfs.types.StateIdOps.openStateIds;
 
 @Log4j2
 public class NFS4Client {
@@ -48,7 +50,6 @@ public class NFS4Client {
     private final NFS4ClientControl clientControl;
     //4.0 delegate回调使用
     public NFSHandler nfsHandler;
-
 
     public NFS4Client(NFS4ClientControl clientControl, long clientId, int minorVersion, SocketAddress clientAddress,
                       byte[] ownerId, byte[] verifier, Auth auth, long leaseTime, NFSHandler nfsHandler) {
@@ -158,10 +159,10 @@ public class NFS4Client {
         return sessionSequence;
     }
 
-    public NFS4State createAndPutState(StateOwner stateOwner, NFS4State openState, int type, NFS4State createState, int shareAccess, int shareDeny) {
+    public NFS4State createAndPutState(StateOwner stateOwner, NFS4State openState, int type, NFS4State createState, int shareAccess, int shareDeny, long nodeId, String bucket, String objName) {
         if (createState == null) {
             StateId stateId = clientControl.createStateId(clientId, stateIdCounter.incrementAndGet());
-            createState = new NFS4State(openState, stateOwner, stateId, type, shareAccess, shareDeny, 0, this);
+            createState = new NFS4State(openState, stateOwner, stateId, type, nodeId, bucket, objName, shareAccess, shareDeny, 0, this);
         }
 
         //关联stateId,通过openState释放时同时释放lockStateId
@@ -170,11 +171,12 @@ public class NFS4Client {
             openState.addDisposeListener(s -> {
                 NFS4State nfsState = clientStates.remove(finalCreateState.stateId());
                 if (nfsState != null) {
-                    nfsState.tryDispose();
                     if (type == NFS4_LOCK_STID) {
                         lockOwners.remove(stateOwner.getOwner());
                     }
+                    return nfsState.tryDispose();
                 }
+                return Mono.just(true);
             });
         }
         clientStates.put(createState.stateId(), createState);
@@ -186,10 +188,10 @@ public class NFS4Client {
     }
 
     public NFS4State createAndPutState(StateOwner stateOwner, int type, NFS4State createState, int shareAccess, int shareDeny) {
-        return createAndPutState(stateOwner, null, type, createState, shareAccess, shareDeny);
+        return createAndPutState(stateOwner, null, type, createState, shareAccess, shareDeny, createState.getNodeId(), createState.getBucket(), createState.getObjName());
     }
 
-    public void releaseState(StateId stateId, int type) {
+    public Mono<Boolean> releaseState(StateId stateId, int type) {
 
         NFS4State state = clientStates.get(stateId);
         if (state == null) {
@@ -202,29 +204,46 @@ public class NFS4Client {
         if (state.type() == type && type == NFS4_LOCK_STID && !state.getLockDisposeMap().isEmpty()) {
             throw new NFSException(NFS4ERR_LOCKS_HELD, "releaseState : this stateId exist lock");
         }
-        state.disposeIgnoreFailures();
         clientStates.remove(stateId);
+        return state.disposeIgnoreFailures();
     }
 
-    public void releaseState0(StateId stateId, int type) {
+    public Mono<Boolean> releaseState0(StateId stateId, int type) {
         NFS4State state = clientStates.get(stateId);
         if (state != null && state.type() == type) {
-            state.disposeIgnoreFailures();
             clientStates.remove(stateId);
+            return state.disposeIgnoreFailures();
         }
+        return Mono.just(true);
     }
 
-    public void tryReleaseState(StateId stateId, int type) {
-        clientStates.compute(stateId, (k, v) -> {
-            if (v == null) {
-                throw new NFSException(NFS4ERR_BAD_STATEID, " tryReleaseState : not exist stateId, bad stateId");
-            }
-            if (v.type() != type) {
-                throw new NFSException(NFS4ERR_BAD_STATEID, " tryReleaseState : type not equals,call stateId type is " + type + ", server stateId type is " + v.type() + " ,bad stateId");
-            }
-            v.tryDispose();
-            return null;
+    public Mono<Boolean> tryReleaseState(CompoundContext context, StateId stateId, int type, int seqId) {
+        AtomicReference<NFS4State> res = new AtomicReference<>();
+        openStateIds.compute(context.currFh.ino, (k, v) -> {
+            clientStates.compute(stateId, (k0, v0) -> {
+                if (v0 == null) {
+                    throw new NFSException(NFS4ERR_BAD_STATEID, " tryReleaseState : not exist stateId, bad stateId");
+                }
+                if (v0.type() != type) {
+                    throw new NFSException(NFS4ERR_BAD_STATEID, " tryReleaseState : type not equals,call stateId type is " + type + ", server stateId type is " + v0.type() + " ,bad stateId");
+                }
+                NFS4State openState = state(stateId);
+                res.set(v0);
+                if (type == NFS4_OPEN_STID) {
+                    if (context.getMinorVersion() == 0) {
+                        openState.getStateOwner().incrSequence(seqId);
+                        updateLeaseTime();
+                    }
+                    if (v != null) {
+                        v.removeIf(os -> os.stateId().equals(stateId));
+                    }
+                }
+                return null;
+            });
+            return v != null && v.isEmpty() ? null : v;
         });
+        return res.get() != null ? res.get().tryDispose() : Mono.just(true);
+
     }
 
 
@@ -249,38 +268,43 @@ public class NFS4Client {
     }
 
     public Mono<StateId> openDownGrade(CompoundContext context, NFS4Client client, StateId stateId, int shareAccess, int shareDeny, int seqId, CompoundReply reply) {
-        AtomicReference<Tuple2<NFS4State, Boolean>> res = new AtomicReference<>();
-        clientStates.compute(stateId, (state, openState) -> {
-            if (openState == null) {
-                throw new NFSException(NFS4ERR_BAD_STATEID, "state : not exist stateId,bad stateId");
-            }
-            StateId.checkStateId(openState.stateId(), stateId);
-            if (context.getMinorVersion() == 0) {
-                openState.getStateOwner().incrSequence(seqId);
-            }
-            openState.stateId().seqId++;
-            int oldShareAccess = openState.getShareAccess();
-            int oldShareDeny = openState.getShareDeny();
-            res.set(new Tuple2<>(openState.clone().setShareAccess(oldShareAccess).setShareDeny(oldShareDeny), true));
-            return openState;
+        AtomicReference<NFS4State> res = new AtomicReference<>();
+        openStateIds.compute(context.currFh.ino, (k, v) -> {
+            clientStates.compute(stateId, (state, openState) -> {
+                if (openState == null) {
+                    throw new NFSException(NFS4ERR_BAD_STATEID, "state : not exist stateId,bad stateId");
+                }
+                StateId.checkStateId(openState.stateId(), stateId);
+                if (context.getMinorVersion() == 0) {
+                    openState.getStateOwner().incrSequence(seqId);
+                }
+                openState.stateId().seqId++;
+                int oldShareAccess = openState.getShareAccess();
+                int oldShareDeny = openState.getShareDeny();
+                res.set(openState.clone().setShareAccess(oldShareAccess).setShareDeny(oldShareDeny));
+                return openState;
+            });
+            return v;
         });
-        NFS4State nfs4State = res.get().var1;
-        return clientControl.getStateIdOps().downgradeOpen(client, nfs4State, context.getCurrentInode(), shareAccess, shareDeny, context, reply);
+        NFS4State nfs4State = res.get();
+        return clientControl.getStateIdOps().downgradeOpen(client, nfs4State, shareAccess, shareDeny, context, reply);
 
     }
 
 
-
-    public NFS4State openConfirm(StateId stateId, int seqId) {
-        return clientStates.compute(stateId, (state, openState) -> {
+    public NFS4State openConfirm(CompoundContext context, StateId stateId, int seqId) {
+        AtomicReference<NFS4State> res = new AtomicReference<>();
+        clientStates.compute(stateId, (state, openState) -> {
             if (openState == null) {
                 throw new NFSException(NFS4ERR_BAD_STATEID, "state : not exist stateId,bad stateId");
             }
             openState.getStateOwner().incrSequence(seqId);
             openState.incrSeqId();
             openState.confirm();
+            res.set(openState.clone());
             return openState;
         });
+        return res.get();
     }
 
 
@@ -295,7 +319,8 @@ public class NFS4Client {
             StateId.checkStateId(openState.stateId(), stateId);
             if (newOwner) {
                 lockOwner = client.getOrCreateOwner(owner, lockSeqId, true);
-                lockState = client.createAndPutState(lockOwner, openState, NFS4_LOCK_STID, null, 0, 0);
+                Inode inode = context.getCurrentInode();
+                lockState = client.createAndPutState(lockOwner, openState, NFS4_LOCK_STID, null, openState.getShareAccess(), openState.getShareDeny(), inode.getNodeId(), inode.getBucket(), inode.getObjName());
                 lockState.confirm();
                 if (context.getMinorVersion() == 0) {
                     openState.getStateOwner().incrSequence(seqId);
@@ -312,6 +337,7 @@ public class NFS4Client {
                     client.updateLeaseTime();
                 }
             }
+            lockState.incrSeqId();
             res.set(lockState.clone());
             return openState;
         });
@@ -381,20 +407,17 @@ public class NFS4Client {
         return !clientStates.isEmpty();
     }
 
-    private synchronized void clearStates() {
-        Iterator<NFS4State> i = clientStates.values().iterator();
-        while (i.hasNext()) {
-            NFS4State state = i.next();
-            state.disposeIgnoreFailures();
-            i.remove();
-        }
+    private synchronized Mono<Boolean> clearStates() {
+        List<NFS4State> nfs4States = new ArrayList<>(clientStates.values());
+        return Flux.fromIterable(nfs4States).flatMap(i -> i.disposeIgnoreFailures().doOnNext(v -> clientStates.remove(i.stateId()))).collectList().map(v -> true);
     }
 
     //释放客户端所有资源
-    public final void tryDispose() {
-        clearStates();
-        lockOwners.clear();
-        owners.clear();
+    public final Mono<Boolean> tryDispose() {
+        return clearStates().doOnNext(v -> {
+            lockOwners.clear();
+            owners.clear();
+        });
     }
 
 
@@ -447,17 +470,17 @@ public class NFS4Client {
     }
 
 
-    public synchronized void releaseOwner(byte[] owner) {
+    public synchronized Mono<Boolean> releaseOwner(byte[] owner) {
         NFS4State lockState = lockOwners.remove(StateOwner.newOwner(clientId, owner));
         if (lockState == null) {
             throw new NFSException(NFS4ERR_STALE_CLIENTID, "releaseOwner : not exist stateOwner");
         }
-        releaseState(lockState.stateId(), NFS4_LOCK_STID);
+        return releaseState(lockState.stateId(), NFS4_LOCK_STID);
     }
 
 
-    public NFS4State newState(StateOwner owner, int type, int shareAccess, int shareDeny) {
-        return new NFS4State(null, owner, clientControl.createStateId(clientId, stateIdCounter.incrementAndGet()), type, shareAccess, shareDeny, 0, this);
+    public NFS4State newState(StateOwner owner, int type, int shareAccess, int shareDeny, Inode inode) {
+        return new NFS4State(null, owner, clientControl.createStateId(clientId, stateIdCounter.incrementAndGet()), type, inode.getNodeId(), inode.getBucket(), inode.getObjName(), shareAccess, shareDeny, 0, this);
     }
 
     public void removeState(StateId stateId) {
@@ -482,20 +505,36 @@ public class NFS4Client {
         });
     }
 
-    public NFS4State shareUpdate(NFS4State state, int shareAccess, int shareDeny) {
-        return clientStates.compute(state.getStateId(), (k, openState) -> {
-            if (openState == null) {
-                //close了
-            } else {
-                if (openState.getLastUpdateSeqId() < state.stateId().seqId) {
-                    openState.setShareAccess(shareAccess);
-                    openState.setShareDeny(shareDeny);
-                    openState.setLastUpdateSeqId(state.stateId().seqId);
-                }
-                return openState;
+    public NFS4State shareUpdate(NFS4State openState, ShareAccessLock lock, NFS4Client client, boolean downOpen) {
+        AtomicReference<NFS4State> res = new AtomicReference<>();
+        openStateIds.compute(lock.getNodeId(), (k, v) -> {
+            if (v == null) {
+                res.set(null);
+                return null;
             }
-            return null;
+            for (NFS4State state : v) {
+                if (state.getClient().getClientId() == client.getClientId() && state.getStateOwner().equals(openState.getStateOwner())) {
+                    if (downOpen) {
+                        if (state.getLastUpdateSeqId() < openState.stateId().seqId) {
+                            state.setShareAccess(lock.shareAccess);
+                            state.setShareDeny(lock.shareDeny);
+                            state.setLastUpdateSeqId(openState.stateId().seqId);
+                        }
+                    } else {
+                        state.setShareAccess(state.getShareAccess() | lock.shareAccess);
+                        state.setShareDeny(state.getShareDeny() | lock.shareDeny);
+                        state.setLastUpdateSeqId(Math.max(openState.stateId().seqId, state.getLastUpdateSeqId()));
+                    }
+                    NFS4State clone = state.clone();
+                    clone.setStateId(openState.stateId());
+                    res.set(clone);
+                    return v;
+                }
+            }
+            res.set(null);
+            return v;
         });
+        return res.get();
     }
 
 }

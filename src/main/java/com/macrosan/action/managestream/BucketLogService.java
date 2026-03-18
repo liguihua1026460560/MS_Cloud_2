@@ -4,6 +4,7 @@ import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.constants.SysConstants;
 import com.macrosan.doubleActive.DoubleActiveUtil;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.mqmessage.ResponseMsg;
 import com.macrosan.message.xmlmsg.BucketLoggingStatus;
@@ -127,6 +128,9 @@ public class BucketLogService extends BaseService {
         } else {
             //进行初始检验
             checkBeforeChange(bucketName, targetBucket, userId);
+            if (CheckUtils.bucketFsCheck(bucketName)){
+                throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not enable bucketLogging");
+            }
             pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "address", targetBucket);
             pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "log_acl", PERMISSION_PRIVATE);
             if (null != targetPrefix) {

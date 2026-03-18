@@ -7,7 +7,6 @@ import com.macrosan.doubleActive.arbitration.DAVersionUtils;
 import com.macrosan.filesystem.cache.Node;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.httpserver.ServerConfig;
-import com.macrosan.lifecycle.LifecycleCommandConsumer;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.rsocket.client.RSocketClient;
 import com.macrosan.storage.NodeCache;
@@ -146,6 +145,15 @@ public class VersionUtil {
     }
 
     public static boolean isMultiCluster = false;
+
+    public static void init0() {
+        RedisConnPool pool = RedisConnPool.getInstance();
+        if (pool.getCommand(REDIS_SYSINFO_INDEX).exists(MASTER_CLUSTER) != 0) {
+            BucketSyncSwitchCache.getInstance().init();
+            isMultiCluster = true;
+            DAVersionUtils.initMasterInfo();
+        }
+    }
 
     private static final ScheduledThreadPoolExecutor executor =
             new ScheduledThreadPoolExecutor(1, new MsThreadFactory("update-version"));
@@ -508,7 +516,7 @@ public class VersionUtil {
      * 用于新版本数据标识，在字节偏移量 5 开始处写入。
      */
     private static final byte[] JSON_MAGIC_PREFIX = {
-            0x21, (byte)0xE8, (byte)0x80, (byte)0x80, (byte)0xC2, (byte)0x89
+            0x21, (byte) 0xE8, (byte) 0x80, (byte) 0x80, (byte) 0xC2, (byte) 0x89
     };
 
     public static boolean hasVersionMagicPrefix(byte[] data, int magicOffset) {
@@ -526,10 +534,10 @@ public class VersionUtil {
 
     /**
      * 自 Revision 86045 起引入。
-     *
+     * <p>
      * 通过检查 Metadata 元数据在字节偏移量 5 开始的 6 个字节是否匹配魔数 0x21 E8 80 80 C2 89 来判断版本：
      * - 新版本：在偏移量 5 处写入该魔数，后接标准 JSON。
-     *   该魔数在 UTF-8 字符串中显示为 "!耀³"，在 : 与 { 符号之间。
+     * 该魔数在 UTF-8 字符串中显示为 "!耀³"，在 : 与 { 符号之间。
      * - 旧版本：标准 JSON 内容
      */
     public static boolean hasVersionMagicPrefix(byte[] data) {

@@ -72,6 +72,17 @@ public class NLMLockServer {
         executor.schedule(NLMLockServer::checkTimeout, exec, TimeUnit.NANOSECONDS);
     }
 
+    public static void clear() {
+        Set<String> keySet = new HashSet<>(lockMap.keySet());
+        for (String key : keySet) {
+            String bucket = key.split("/")[0];
+            lockMap.computeIfPresent(key, (k, oldV) -> {
+               oldV.clear(bucket);
+               return null;
+            });
+        }
+    }
+
     static {
         executor.submit(NLMLockServer::checkTimeout);
         executor.submit(NLMLockServer::checkUnlockTimeout);
@@ -108,6 +119,30 @@ public class NLMLockServer {
                 }
 
                 return map.isEmpty();
+            }
+        }
+
+        void clear(String bucket) {
+            synchronized (this) {
+                List<Owner> list = map.entrySet().stream()
+                        .map(Map.Entry::getKey)
+                        .collect(Collectors.toList());
+
+                if (list.isEmpty()) {
+                    return;
+                }
+
+                try {
+                    for (Owner value : list) {
+                        Sm sm = new Sm(bucket, value);
+                        NLMLockKeeper.remove(sm.bucket, String.valueOf(sm.ino), value);
+                        NSMServer.unMonLock(sm).block();
+                        log.info("NLM clear: {}", sm);
+                        unlock(value);
+                    }
+                } catch (Exception e) {
+                    log.error("NLM clear", e);
+                }
             }
         }
 
@@ -328,6 +363,7 @@ public class NLMLockServer {
                         NLMLockKeeper.remove(bucket, key, owner); // 取消保活
                         if (!unlock && Boolean.parseBoolean(msg.get("block"))) {
                             owner.node = msg.get("node");
+                            owner.exclusive = "1".equals(msg.get("lock")) || "WRITE".equals(msg.get("lock"));
                             NLMLockWait.addWait(bucket, key, owner);
                         }
                         return SUCCESS_PAYLOAD;

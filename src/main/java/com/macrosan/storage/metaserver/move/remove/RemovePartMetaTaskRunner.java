@@ -66,9 +66,9 @@ public class RemovePartMetaTaskRunner extends AbstractRemoveTaskRunner<Tuple2<by
                         }
                         return Mono.just(true);
                     }
-
                     return storagePool.mapToNodeInfo(vnode)
-                            .flatMap(nodeList -> PartUtils.deleteMultiPartUploadMeta(partInfo.bucket, partInfo.object, partInfo.uploadId, nodeList, true, partInfo.snapshotMark, partInfo.snapshotMark));
+                            .flatMap(nodeList -> PartUtils.deleteMultiPartUploadMeta(partInfo.bucket, partInfo.object, partInfo.uploadId, nodeList, true,
+                                    null,null, null, null, true));
                 }
             }
             return Mono.just(true);

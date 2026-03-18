@@ -210,6 +210,27 @@ public class SyncRecordLimiter {
         map.put(key, limiter);
     }
 
+
+    public static void updateBucketSyncLimiter(Integer clusterIndex, String bucket, String type, long quota) {
+        String key = getBucketLimiterKey(clusterIndex, bucket, type);
+        if (quota == 0L) {
+            if (map.get(key) == null || map.get(key) != null && map.get(key).getlimit() != -1) {
+                log.debug("add new bucket limiter for sync, {}, {}, {}", bucket, type, quota);
+                map.put(key, new SyncRecordLimiter(key, -1L));
+            }
+            return;
+        }
+
+        if (map.get(key) == null || map.get(key).getlimit() == quota) {
+            return;
+        }
+
+        SyncRecordLimiter limiter = new SyncRecordLimiter(key, quota);
+        limiter.tokensAmount.set(map.get( key).getTokensAmount());
+        map.put(key, limiter);
+        log.debug(" update bucket limiter ------- {} {} {}", key, limiter.limit, limiter.tokensAmount);
+    }
+
     public static SyncRecordLimiter getBucketLimiter(Integer clusterIndex, String bucket, String type) {
         return map.get(getBucketLimiterKey(clusterIndex, bucket, type));
     }

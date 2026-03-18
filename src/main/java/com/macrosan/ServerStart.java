@@ -57,6 +57,7 @@ import com.macrosan.utils.cache.LambdaCache;
 import com.macrosan.utils.essearch.EsMetaTask;
 import com.macrosan.utils.iam.IamUtils;
 import com.macrosan.utils.iam.STSTokenMove;
+import com.macrosan.utils.layerMonitor.ObjectAccessCache;
 import com.macrosan.utils.msutils.Scheduler;
 import com.macrosan.utils.notification.BucketNotification;
 import com.macrosan.utils.perf.*;
@@ -203,6 +204,7 @@ public class ServerStart {
             BucketFSPerfLimiter.getInstance().init();
             AddressFSPerfLimiter.getInstance().init();
         }
+        VersionUtil.init0();
 
         /* 初始化缓存 */
         LambdaCache.initCache();
@@ -279,6 +281,7 @@ public class ServerStart {
         ObjectConsumer.getInstance().init();
         RebuildDeadLetter.getInstance().init();
         ClearMqQueue.startClear();
+        ObjectAccessCache.init();
 
         vertx.rxDeployVerticle(DateChecker.class.getName(), oneInstance)
                 .flatMap(s -> vertx.rxDeployVerticle(ManageStreamController.class.getName(), oneInstance))

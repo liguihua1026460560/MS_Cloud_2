@@ -16,6 +16,7 @@ import com.macrosan.utils.functional.Tuple3;
 import com.macrosan.utils.msutils.md5.Digest;
 import com.macrosan.utils.msutils.md5.Md5Digest;
 import io.vertx.core.json.Json;
+import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.lang3.RandomStringUtils;
@@ -39,6 +40,7 @@ import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.storage.StorageOperate.PoolType.DATA;
 
 @Slf4j
+@ToString(exclude = "dataPool")
 public class WriteCacheNode {
     public static final int MAX_CACHE_SIZE = (128 << 20);
     public static final int MAX_TRUNK_CACHE_SIZE = (16 << 20);
@@ -54,6 +56,10 @@ public class WriteCacheNode {
     private Map<Long, ByteCacheNode> cacheData = new ConcurrentHashMap<>();
     // 引用计数：当get该NFSCache时增加1，当该次NFSCache完成数据的write时减1
     private AtomicInteger writeNum = new AtomicInteger(0);
+
+    public static void printWriteCache() {
+        log.info("writeCacheNode\n{}", map.toString());
+    }
 
     public WriteCacheNode(String bucket, long nodeId, boolean sync, String storage) {
         this.sync = sync;
@@ -201,17 +207,17 @@ public class WriteCacheNode {
         }
     }
 
-    public Mono<Boolean> commit(Inode inode, long offset, int count, boolean writeFlush, boolean write) {
+    public Mono<Boolean> commit(Inode inode, long offset, int count, long end, boolean writeFlush, boolean write) {
         if (write) {
             return FSQuotaUtils.existQuotaInfo(inode.getBucket(), inode.getObjName(), System.currentTimeMillis(), inode.getUid(), inode.getGid())
                     .flatMap(t2 -> {
                         if (t2.var1) {
                             inode.getXAttrMap().put(QUOTA_KEY, Json.encode(t2.var2));
                         }
-                        return commit0(inode, offset, count, writeFlush, true);
+                        return commit0(inode, offset, count, end, writeFlush, true);
                     });
         } else {
-            return commit0(inode, offset, count, writeFlush, false);
+            return commit0(inode, offset, count, end, writeFlush, false);
         }
     }
 
@@ -231,7 +237,7 @@ public class WriteCacheNode {
 
     private final LinkedList<WriteCacheNode.CommitRes> commitQueue = new LinkedList<>();
 
-    private Mono<Boolean> commit0(Inode inode, long offset, int count, boolean writeFlush, boolean write) {
+    private Mono<Boolean> commit0(Inode inode, long offset, int count, long end, boolean writeFlush, boolean write) {
         WriteCacheNode.CommitRes res = new WriteCacheNode.CommitRes();
         List<ByteCacheNode> needPut;
 
@@ -254,7 +260,7 @@ public class WriteCacheNode {
         } else {
             FsUtils.fsExecutor.submit(() -> {
                 try {
-                    flushCaches(inode, needPut, write).subscribe(b -> {
+                    flushCaches(inode, needPut, end, write).subscribe(b -> {
                         res.complete(b, null);
                         commitEnd();
                     });
@@ -268,12 +274,8 @@ public class WriteCacheNode {
 
         return res.res.doFinally(s -> {
             map.computeIfPresent(inode.getNodeId(), (k, v) -> {
-                if (!writeFlush) {
-                    if (writeNum.get() == 0 && cacheSize.get() == 0) {
-                        return null;
-                    } else {
-                        return v;
-                    }
+                if (writeNum.decrementAndGet() == 0 && cacheSize.get() == 0) {
+                    return null;
                 } else {
                     return v;
                 }
@@ -367,9 +369,9 @@ public class WriteCacheNode {
         return needPut;
     }
 
-    private Mono<Boolean> flushCaches(Inode inode, List<ByteCacheNode> needPut, boolean isMaster) {
+    private Mono<Boolean> flushCaches(Inode inode, List<ByteCacheNode> needPut, long end, boolean isMaster) {
         return Flux.fromStream(needPut.stream())
-                .flatMap(byteCacheNode -> flush(inode, byteCacheNode, isMaster))
+                .flatMap(byteCacheNode -> flush(inode, byteCacheNode, end, isMaster))
                 .doOnError(e -> log.error("", e))
                 .collectList()
                 .map(resList -> {
@@ -378,12 +380,20 @@ public class WriteCacheNode {
                 });
     }
 
-    private Mono<Boolean> flush(Inode inode, ByteCacheNode byteCacheNode, boolean write) {
+    private Mono<Boolean> flush(Inode inode, ByteCacheNode byteCacheNode, long end, boolean write) {
         return Flux.fromArray(byteCacheNode.pages.toArray(new Tuple2[0]))
                 .flatMap(t -> {
                     if (write) {
-                        int offset = (int) ((long) t.var1 % MAX_TRUNK_CACHE_SIZE);
+                        int tmpOffset = (int) ((long) t.var1 % MAX_TRUNK_CACHE_SIZE);
+
+                        long offset = (long) t.var1;
                         int size = (int) t.var2;
+                        if (offset >= end) {
+                            return Mono.just(true);
+                        }
+                        if (offset + size > end) {
+                            size = (int) (end - offset);
+                        }
                         // 根据文件大小决定写入数据池还是缓存池
                         StorageOperate dataOperate = new StorageOperate(DATA, inode.getObjName(), size);
                         StoragePool dataPool = StoragePoolFactory.getStoragePool(dataOperate, inode.getBucket());
@@ -395,7 +405,7 @@ public class WriteCacheNode {
 //                        byteCacheNode.data = null;
                         } else {
                             byte[] tmp = new byte[size];
-                            System.arraycopy(byteCacheNode.data, offset, tmp, 0, size);
+                            System.arraycopy(byteCacheNode.data, tmpOffset, tmp, 0, size);
                             encoder.put(tmp);
                             digest.update(tmp);
                             tmp = null;
@@ -446,50 +456,6 @@ public class WriteCacheNode {
                                 });
                     }
                 });
-    }
-
-
-    public Mono<Boolean> flushByteCache2() {
-        if (SMBHandler.runningDebug) {
-            log.info("start flushByteCache");
-        }
-        if (FLUSHING.compareAndSet(false, true)) {
-            return Flux.fromStream(map.keySet().stream())
-                    .flatMap(inodeId -> {
-                        WriteCacheNode writeCacheNode = map.get(inodeId);
-                        if (writeCacheNode != null) {
-                            long cacheSize = writeCacheNode.cacheSize.get();
-                            if (SMBHandler.runningDebug) {
-                                log.info("flushByteCache inode {} writeNum:{}", inodeId, writeCacheNode.writeNum.get());
-                            }
-                            if (writeCacheNode.writeNum.get() <= 0
-                                    && writeCacheNode.commitQueue.isEmpty()
-                                    && writeCacheNode.cacheSize.get() > 0) {
-                                return Node.getInstance().getInode(writeCacheNode.bucket, inodeId)
-                                        .flatMap(inode -> WriteCacheNode.getCache(inode.getBucket(), inodeId, 0, inode.getStorage())
-                                                .flatMap(wc -> {
-                                                    if (wc.cacheSize.get() == cacheSize) {
-                                                        return Node.getInstance().flushWriteCache(inode, 0, 0, 1);
-                                                    }
-                                                    return Mono.just(true);
-                                                }));
-                            }
-                        }
-                        return Mono.just(false);
-                    })
-                    .collectList()
-                    .map(ignore -> true)
-                    .timeout(Duration.ofSeconds(360))
-                    .onErrorResume(e -> {
-                        log.error("", e);
-                        return Mono.just(false);
-                    })
-                    .doFinally(l -> {
-                        FLUSHING.compareAndSet(true, false);
-                    });
-        } else {
-            return Mono.just(true);
-        }
     }
 
     public Mono<Boolean> flushByteCache() {

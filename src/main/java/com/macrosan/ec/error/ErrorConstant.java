@@ -26,6 +26,7 @@ public class ErrorConstant {
         RESTORE_INIT_PART_DATA,
         OVER_WRITE,
         ERROR_PUT_FILE_META,
+        ERROR_UPDATE_FILE_ACCESS_TIME,
         ERROR_PUT_OBJECT_META,
         ERROR_PUT_DEDUPLICATE_META,
         ERROR_PUT_BUCKET_INFO,

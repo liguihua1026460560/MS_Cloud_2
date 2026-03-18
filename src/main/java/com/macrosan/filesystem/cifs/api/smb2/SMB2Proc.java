@@ -26,10 +26,7 @@ import com.macrosan.filesystem.cifs.types.smb2.SMB2FileId;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
-import com.macrosan.filesystem.utils.CheckUtils;
-import com.macrosan.filesystem.utils.CifsUtils;
-import com.macrosan.filesystem.utils.InodeUtils;
-import com.macrosan.filesystem.utils.ReadDirCache;
+import com.macrosan.filesystem.utils.*;
 import com.macrosan.filesystem.utils.acl.CIFSACL;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.Inode;
@@ -436,293 +433,297 @@ public class SMB2Proc {
                                                     break;
                                                 }
                                             }
-                                            switch (call.getCreateDisposition()) {
-                                                // File exists open. File not exist fail | mount
-                                                case FILE_OPEN:
-                                                    // File exists open. File not exist create | dd 指令
-                                                case FILE_OPEN_IF:
-                                                    if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
-                                                        if ((call.getCreateOptions() & FILE_DIRECTORY_FILE) != 0 && (inode.getCifsMode() & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-                                                            reply.getHeader().setStatus(STATUS_NOT_A_DIRECTORY);
-                                                            return Mono.just(reply);
-                                                        }
 
-                                                        return CIFSACL.judgeCIFSAccess(call.getAccess(), inode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), true, header, session)
-                                                                .flatMap(pass -> {
-                                                                    if (!pass) {
-                                                                        reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                            return (isReconnect[0] ? WriteCacheClient.flush(inode, 0, 0) : Mono.just(true))
+                                                    .flatMap(b -> {
+                                                        switch (call.getCreateDisposition()) {
+                                                            // File exists open. File not exist fail | mount
+                                                            case FILE_OPEN:
+                                                                // File exists open. File not exist create | dd 指令
+                                                            case FILE_OPEN_IF:
+                                                                if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
+                                                                    if ((call.getCreateOptions() & FILE_DIRECTORY_FILE) != 0 && (inode.getCifsMode() & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                                                                        reply.getHeader().setStatus(STATUS_NOT_A_DIRECTORY);
                                                                         return Mono.just(reply);
                                                                     }
 
-                                                                    // FILE_OPEN 不需要加锁，避免文件删除、重命名时也进行加锁；设置删除needDelSet需要在权限判断之后，避免误删文件
-                                                                    long id0 = SMB2FileId.getId();
-                                                                    SMB2FileId smb2FileId = new SMB2FileId()
-                                                                            .setPersistent(id0)
-                                                                            .setVolatile_(0);
-                                                                    return (isReconnect[0] && oldFileID[0] != null ? shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0]) : shareAccessExec(call, inode, header, session, smb2FileId))
-                                                                            .flatMap(ShareAccessCheck -> {
-                                                                                if (ShareAccessCheck) {
-                                                                                    CreateReply.mapToCreateReply(body, inode, FILE_OPEND, dirInode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
-                                                                                    reply.setBody(body);
-                                                                                    reply.getHeader().setStatus(STATUS_SUCCESS);
-                                                                                    return execContext(call, body, inode, header, reply, session);
-                                                                                } else {
-                                                                                    return shareAccessConflict(inode, header, session, smb2FileId);
+                                                                    return CIFSACL.judgeCIFSAccess(call.getAccess(), inode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), true, header, session)
+                                                                            .flatMap(pass -> {
+                                                                                if (!pass) {
+                                                                                    reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                                                                    return Mono.just(reply);
                                                                                 }
-                                                                            });
-                                                                });
 
-                                                    } else {
-                                                        // inode获取出错
-                                                        if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
-                                                            log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
-                                                            reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
-                                                            return Mono.just(reply);
-                                                        }
-
-                                                        // 不存在
-                                                        if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
-                                                            if (realObj.endsWith(SMB_CAP_QUOTA_FILE_NAME)) {
-                                                                Inode tmpInode = inode.clone();
-                                                                body.setCreateAction(FILE_OPEND);
-                                                                body.setMode(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_ARCHIVE);
-                                                                tmpInode.setNodeId(0);
-                                                                tmpInode.setObjName(realObj);
-                                                                tmpInode.setLinkN(0);
-                                                                tmpInode.setBucket(bucket);
-                                                                body.setFileId(SMB2FileId.randomFileId(header.getCompoundRequest(), bucket, realObj, inode.getNodeId(), dirInode.getNodeId(), call.getCreateOptions(), tmpInode, dirInode.getACEs()));
-                                                                reply.setBody(body);
-                                                                reply.getHeader().setStatus(STATUS_SUCCESS);
-                                                                return Mono.just(reply);
-                                                            }
-                                                            // 返错
-                                                            if (call.getCreateDisposition() == FILE_OPEN) {
-                                                                reply.getHeader().setStatus(STATUS_OBJECT_NAME_NOT_FOUND);
-                                                                return Mono.just(reply);
-                                                            } else {
-                                                                // 创建；vi文件后wq会走这里；vdbench的write操作会首先创建文件
-                                                                body.setCreateAction(FILE_OPEN);
-                                                                return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
-                                                                        .flatMap(pass -> {
-                                                                            if (!pass) {
-                                                                                reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
-                                                                                return Mono.just(reply);
-                                                                            }
-
-                                                                            return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L)
-                                                                                    .flatMap(waitMillis -> {
-                                                                                        log.debug("craete 1, {}", waitMillis);
-                                                                                        String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
-                                                                                        return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
-                                                                                    })
-                                                                                    .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
-                                                                                            .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply,
-                                                                                                    header.getCompoundRequest(), call.getCreateOptions(), s3Id)))
-                                                                                    .flatMap(i -> {
-                                                                                        if (InodeUtils.isError(i)) {
-                                                                                            return Mono.just(reply);
-                                                                                        }
-                                                                                        return shareAccessExec(call, i, header, session, body.getFileId())
-                                                                                                .flatMap(ShareAccessCheck -> {
-                                                                                                    if (ShareAccessCheck) {
-                                                                                                        return execContext(call, body, i, header, reply, session);
-                                                                                                    } else {
-                                                                                                        return shareAccessConflict(i, header, session, body.getFileId());
-                                                                                                    }
-                                                                                                });
-                                                                                    });
-                                                                        });
-                                                            }
-                                                        }
-
-                                                        return Mono.just(reply);
-                                                    }
-                                                    // File exists fail. File not exist create
-                                                case FILE_CREATE:
-                                                    // inode 存在则返错，返错时需要将已存在的inode信息返回
-                                                    if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
-                                                        if (isReconnect[0] && oldFileID[0] != null) {
-                                                            long id0 = SMB2FileId.getId();
-                                                            SMB2FileId smb2FileId = new SMB2FileId()
-                                                                    .setPersistent(id0)
-                                                                    .setVolatile_(0);
-                                                            return shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0])
-                                                                    .flatMap(ShareAccessCheck -> {
-                                                                        if (ShareAccessCheck) {
-                                                                            CreateReply.mapToCreateReply(body, inode, FILE_CREATED, inode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
-                                                                            reply.setBody(body);
-                                                                            return execContext(call, body, inode, header, reply, session);
-                                                                        } else {
-                                                                            return shareAccessConflict(inode, header, session, smb2FileId);
-                                                                        }
-                                                                    });
-                                                        } else {
-                                                            reply.getHeader().setStatus(STATUS_OBJECT_NAME_COLLISION);
-                                                            return Mono.just(reply);
-                                                        }
-                                                    } else {
-                                                        // 不存在则创建
-                                                        if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
-                                                            body.setCreateAction(FILE_CREATE);
-
-                                                            return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
-                                                                    .flatMap(pass -> {
-                                                                        if (!pass) {
-                                                                            reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
-                                                                            return Mono.just(reply);
-                                                                        }
-
-                                                                        return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_mkdir.name() + "-" + THROUGHPUT_QUOTA, 1L)
-                                                                                .flatMap(waitMillis -> {
-                                                                                    log.debug("craete 2, {}", waitMillis);
-                                                                                    String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
-                                                                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_mkdir.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
-                                                                                })
-                                                                                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
-                                                                                        .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply, header.getCompoundRequest()
-                                                                                                , call.getCreateOptions(), s3Id)))
-                                                                                .flatMap(i -> {
-                                                                                    if (InodeUtils.isError(i)) {
-                                                                                        return Mono.just(reply);
-                                                                                    }
-                                                                                    return shareAccessExec(call, i, header, session, body.getFileId())
-                                                                                            .flatMap(ShareAccessCheck -> {
-                                                                                                if (ShareAccessCheck) {
-                                                                                                    return execContext(call, body, i, header, reply, session);
-                                                                                                } else {
-                                                                                                    return shareAccessConflict(i, header, session, body.getFileId());
-                                                                                                }
-                                                                                            });
-                                                                                });
-                                                                    });
-                                                        }
-
-                                                        // 如果是inode获取出错
-                                                        if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
-                                                            log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
-                                                            reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
-                                                        }
-
-                                                        return Mono.just(reply);
-                                                    }
-
-                                                    // File exists overwrite. File not exist fail
-                                                case FILE_OVERWRITE:
-                                                    // File exists overwrite. File not exist create
-                                                case FILE_OVERWRITE_IF:
-                                                    // 存在则覆盖；此option会将原本文件的数据块删除，返回的size为0
-                                                    if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
-                                                        if (isReconnect[0] && oldFileID[0] != null) {
-                                                            long id0 = SMB2FileId.getId();
-                                                            SMB2FileId smb2FileId = new SMB2FileId()
-                                                                    .setPersistent(id0)
-                                                                    .setVolatile_(0);
-                                                            return shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0])
-                                                                    .flatMap(ShareAccessCheck -> {
-                                                                        if (ShareAccessCheck) {
-                                                                            CreateReply.mapToCreateReply(body, inode, call.getCreateDisposition(), inode.getNodeId(), header.getCompoundRequest(),
-                                                                                    call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
-                                                                            reply.setBody(body);
-                                                                            return execContext(call, body, inode, header, reply, session);
-                                                                        } else {
-                                                                            return shareAccessConflict(inode, header, session, smb2FileId);
-                                                                        }
-                                                                    });
-                                                        }
-                                                        ObjAttr attr = new ObjAttr();
-                                                        attr.hasSize = 1;
-                                                        attr.size = 0;
-                                                        if (cifsMode != 0) {
-                                                            attr.hasCifsMode = 1;
-                                                            attr.cifsMode = cifsMode;
-                                                        }
-
-                                                        return CIFSACL.judgeCIFSAccess(call.getAccess(), inode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), true, header, session)
-                                                                .flatMap(pass -> {
-                                                                    if (!pass) {
-                                                                        reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
-                                                                        return Mono.just(reply);
-                                                                    }
-
-                                                                    long id0 = SMB2FileId.getId();
-                                                                    SMB2FileId smb2FileId = new SMB2FileId()
-                                                                            .setPersistent(id0)
-                                                                            .setVolatile_(0);
-                                                                    return shareAccessExec(call, inode, header, session, smb2FileId)
-                                                                            .flatMap(ShareAccessCheck -> {
-                                                                                if (ShareAccessCheck) {
-                                                                                    return nodeInstance.setAttr(inode.getNodeId(), bucket, attr, reqHeader.bucketInfo.get(BUCKET_USER_ID))
-                                                                                            .flatMap(i -> {
-                                                                                                CreateReply.mapToCreateReply(body, i, FILE_OVERWRITTEN, dirInode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
+                                                                                // FILE_OPEN 不需要加锁，避免文件删除、重命名时也进行加锁；设置删除needDelSet需要在权限判断之后，避免误删文件
+                                                                                long id0 = SMB2FileId.getId();
+                                                                                SMB2FileId smb2FileId = new SMB2FileId()
+                                                                                        .setPersistent(id0)
+                                                                                        .setVolatile_(0);
+                                                                                return (isReconnect[0] && oldFileID[0] != null ? shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0]) : shareAccessExec(call, inode, header, session, smb2FileId))
+                                                                                        .flatMap(ShareAccessCheck -> {
+                                                                                            if (ShareAccessCheck) {
+                                                                                                CreateReply.mapToCreateReply(body, inode, FILE_OPEND, dirInode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
                                                                                                 reply.setBody(body);
                                                                                                 reply.getHeader().setStatus(STATUS_SUCCESS);
-                                                                                                return execContext(call, body, i, header, reply, session);
-                                                                                            });
-                                                                                } else {
-                                                                                    return shareAccessConflict(inode, header, session, smb2FileId);
-                                                                                }
+                                                                                                return execContext(call, body, inode, header, reply, session);
+                                                                                            } else {
+                                                                                                return shareAccessConflict(inode, header, session, smb2FileId);
+                                                                                            }
+                                                                                        });
                                                                             });
-                                                                });
-                                                    } else {
-                                                        // inode获取出错
-                                                        if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
-                                                            log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
-                                                            reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
-                                                            return Mono.just(reply);
-                                                        }
 
-                                                        // 不存在
-                                                        if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
-                                                            // 返错
-                                                            if (call.getCreateDisposition() == FILE_OVERWRITE) {
-                                                                reply.getHeader().setStatus(STATUS_NO_SUCH_FILE);
-                                                            } else {
-                                                                // 创建
-                                                                // 直接将整个文件上传，走这里
-                                                                body.setCreateAction(FILE_OPEND);
+                                                                } else {
+                                                                    // inode获取出错
+                                                                    if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
+                                                                        log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
+                                                                        reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
+                                                                        return Mono.just(reply);
+                                                                    }
 
-                                                                return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
-                                                                        .flatMap(pass -> {
-                                                                            if (!pass) {
-                                                                                reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
-                                                                                return Mono.just(reply);
-                                                                            }
-
-                                                                            return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L)
-                                                                                    .flatMap(waitMillis -> {
-                                                                                        log.debug("craete 3, {}", waitMillis);
-                                                                                        String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
-                                                                                        return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
-                                                                                    })
-                                                                                    .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
-                                                                                            .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply,
-                                                                                                    header.getCompoundRequest(), call.getCreateOptions(), s3Id)))
-                                                                                    // share
-                                                                                    .flatMap(i -> {
-                                                                                        if (InodeUtils.isError(i)) {
+                                                                    // 不存在
+                                                                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                                        if (realObj.endsWith(SMB_CAP_QUOTA_FILE_NAME)) {
+                                                                            Inode tmpInode = inode.clone();
+                                                                            body.setCreateAction(FILE_OPEND);
+                                                                            body.setMode(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_ARCHIVE);
+                                                                            tmpInode.setNodeId(0);
+                                                                            tmpInode.setObjName(realObj);
+                                                                            tmpInode.setLinkN(0);
+                                                                            tmpInode.setBucket(bucket);
+                                                                            body.setFileId(SMB2FileId.randomFileId(header.getCompoundRequest(), bucket, realObj, inode.getNodeId(), dirInode.getNodeId(), call.getCreateOptions(), tmpInode, dirInode.getACEs()));
+                                                                            reply.setBody(body);
+                                                                            reply.getHeader().setStatus(STATUS_SUCCESS);
+                                                                            return Mono.just(reply);
+                                                                        }
+                                                                        // 返错
+                                                                        if (call.getCreateDisposition() == FILE_OPEN) {
+                                                                            reply.getHeader().setStatus(STATUS_OBJECT_NAME_NOT_FOUND);
+                                                                            return Mono.just(reply);
+                                                                        } else {
+                                                                            // 创建；vi文件后wq会走这里；vdbench的write操作会首先创建文件
+                                                                            body.setCreateAction(FILE_OPEN);
+                                                                            return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
+                                                                                    .flatMap(pass -> {
+                                                                                        if (!pass) {
+                                                                                            reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
                                                                                             return Mono.just(reply);
                                                                                         }
-                                                                                        return shareAccessExec(call, i, header, session, body.getFileId())
-                                                                                                .flatMap(ShareAccessCheck -> {
-                                                                                                    if (ShareAccessCheck) {
-                                                                                                        return execContext(call, body, i, header, reply, session);
-                                                                                                    } else {
-                                                                                                        return shareAccessConflict(i, header, session, body.getFileId());
+
+                                                                                        return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                                                                                                .flatMap(waitMillis -> {
+                                                                                                    log.debug("craete 1, {}", waitMillis);
+                                                                                                    String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
+                                                                                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                                                                                                })
+                                                                                                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
+                                                                                                        .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply,
+                                                                                                                header.getCompoundRequest(), call.getCreateOptions(), s3Id)))
+                                                                                                .flatMap(i -> {
+                                                                                                    if (InodeUtils.isError(i)) {
+                                                                                                        return Mono.just(reply);
                                                                                                     }
+                                                                                                    return shareAccessExec(call, i, header, session, body.getFileId())
+                                                                                                            .flatMap(ShareAccessCheck -> {
+                                                                                                                if (ShareAccessCheck) {
+                                                                                                                    return execContext(call, body, i, header, reply, session);
+                                                                                                                } else {
+                                                                                                                    return shareAccessConflict(i, header, session, body.getFileId());
+                                                                                                                }
+                                                                                                            });
                                                                                                 });
                                                                                     });
-                                                                        });
-                                                            }
-                                                        }
+                                                                        }
+                                                                    }
 
-                                                        return Mono.just(reply);
-                                                    }
-                                                    // File exists overwrite/supersede. File not exist create
-                                                case FILE_SUPERSEDE:
-                                                default:
-                                                    reply.getHeader().setStatus(STATUS_NOT_IMPLEMENTED);
-                                                    return Mono.just(reply);
-                                            }
+                                                                    return Mono.just(reply);
+                                                                }
+                                                                // File exists fail. File not exist create
+                                                            case FILE_CREATE:
+                                                                // inode 存在则返错，返错时需要将已存在的inode信息返回
+                                                                if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
+                                                                    if (isReconnect[0] && oldFileID[0] != null) {
+                                                                        long id0 = SMB2FileId.getId();
+                                                                        SMB2FileId smb2FileId = new SMB2FileId()
+                                                                                .setPersistent(id0)
+                                                                                .setVolatile_(0);
+                                                                        return shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0])
+                                                                                .flatMap(ShareAccessCheck -> {
+                                                                                    if (ShareAccessCheck) {
+                                                                                        CreateReply.mapToCreateReply(body, inode, FILE_CREATED, inode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
+                                                                                        reply.setBody(body);
+                                                                                        return execContext(call, body, inode, header, reply, session);
+                                                                                    } else {
+                                                                                        return shareAccessConflict(inode, header, session, smb2FileId);
+                                                                                    }
+                                                                                });
+                                                                    } else {
+                                                                        reply.getHeader().setStatus(STATUS_OBJECT_NAME_COLLISION);
+                                                                        return Mono.just(reply);
+                                                                    }
+                                                                } else {
+                                                                    // 不存在则创建
+                                                                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                                        body.setCreateAction(FILE_CREATE);
+
+                                                                        return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
+                                                                                .flatMap(pass -> {
+                                                                                    if (!pass) {
+                                                                                        reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                                                                        return Mono.just(reply);
+                                                                                    }
+
+                                                                                    return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_mkdir.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                                                                                            .flatMap(waitMillis -> {
+                                                                                                log.debug("craete 2, {}", waitMillis);
+                                                                                                String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
+                                                                                                return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_mkdir.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                                                                                            })
+                                                                                            .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
+                                                                                                    .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply, header.getCompoundRequest()
+                                                                                                            , call.getCreateOptions(), s3Id)))
+                                                                                            .flatMap(i -> {
+                                                                                                if (InodeUtils.isError(i)) {
+                                                                                                    return Mono.just(reply);
+                                                                                                }
+                                                                                                return shareAccessExec(call, i, header, session, body.getFileId())
+                                                                                                        .flatMap(ShareAccessCheck -> {
+                                                                                                            if (ShareAccessCheck) {
+                                                                                                                return execContext(call, body, i, header, reply, session);
+                                                                                                            } else {
+                                                                                                                return shareAccessConflict(i, header, session, body.getFileId());
+                                                                                                            }
+                                                                                                        });
+                                                                                            });
+                                                                                });
+                                                                    }
+
+                                                                    // 如果是inode获取出错
+                                                                    if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
+                                                                        log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
+                                                                        reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
+                                                                    }
+
+                                                                    return Mono.just(reply);
+                                                                }
+
+                                                                // File exists overwrite. File not exist fail
+                                                            case FILE_OVERWRITE:
+                                                                // File exists overwrite. File not exist create
+                                                            case FILE_OVERWRITE_IF:
+                                                                // 存在则覆盖；此option会将原本文件的数据块删除，返回的size为0
+                                                                if (!InodeUtils.isError(inode) && inode.getNodeId() > 0) {
+                                                                    if (isReconnect[0] && oldFileID[0] != null) {
+                                                                        long id0 = SMB2FileId.getId();
+                                                                        SMB2FileId smb2FileId = new SMB2FileId()
+                                                                                .setPersistent(id0)
+                                                                                .setVolatile_(0);
+                                                                        return shareAccessReconnectExec(call, inode, header, session, smb2FileId, oldFileID[0])
+                                                                                .flatMap(ShareAccessCheck -> {
+                                                                                    if (ShareAccessCheck) {
+                                                                                        CreateReply.mapToCreateReply(body, inode, call.getCreateDisposition(), inode.getNodeId(), header.getCompoundRequest(),
+                                                                                                call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
+                                                                                        reply.setBody(body);
+                                                                                        return execContext(call, body, inode, header, reply, session);
+                                                                                    } else {
+                                                                                        return shareAccessConflict(inode, header, session, smb2FileId);
+                                                                                    }
+                                                                                });
+                                                                    }
+                                                                    ObjAttr attr = new ObjAttr();
+                                                                    attr.hasSize = 1;
+                                                                    attr.size = 0;
+                                                                    if (cifsMode != 0) {
+                                                                        attr.hasCifsMode = 1;
+                                                                        attr.cifsMode = cifsMode;
+                                                                    }
+
+                                                                    return CIFSACL.judgeCIFSAccess(call.getAccess(), inode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), true, header, session)
+                                                                            .flatMap(pass -> {
+                                                                                if (!pass) {
+                                                                                    reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                                                                    return Mono.just(reply);
+                                                                                }
+
+                                                                                long id0 = SMB2FileId.getId();
+                                                                                SMB2FileId smb2FileId = new SMB2FileId()
+                                                                                        .setPersistent(id0)
+                                                                                        .setVolatile_(0);
+                                                                                return shareAccessExec(call, inode, header, session, smb2FileId)
+                                                                                        .flatMap(ShareAccessCheck -> {
+                                                                                            if (ShareAccessCheck) {
+                                                                                                return nodeInstance.setAttr(inode.getNodeId(), bucket, attr, reqHeader.bucketInfo.get(BUCKET_USER_ID))
+                                                                                                        .flatMap(i -> {
+                                                                                                            CreateReply.mapToCreateReply(body, i, FILE_OVERWRITTEN, dirInode.getNodeId(), header.getCompoundRequest(), call.getCreateOptions(), dirInode.getACEs(), id0, isLink[0], linkInode[0]);
+                                                                                                            reply.setBody(body);
+                                                                                                            reply.getHeader().setStatus(STATUS_SUCCESS);
+                                                                                                            return execContext(call, body, i, header, reply, session);
+                                                                                                        });
+                                                                                            } else {
+                                                                                                return shareAccessConflict(inode, header, session, smb2FileId);
+                                                                                            }
+                                                                                        });
+                                                                            });
+                                                                } else {
+                                                                    // inode获取出错
+                                                                    if (inode.getLinkN() == Inode.ERROR_INODE.getLinkN()) {
+                                                                        log.info("get inode fail.bucket:{}, obj:{}: {}", reqHeader.bucket, obj, dirInode.getLinkN());
+                                                                        reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
+                                                                        return Mono.just(reply);
+                                                                    }
+
+                                                                    // 不存在
+                                                                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                                        // 返错
+                                                                        if (call.getCreateDisposition() == FILE_OVERWRITE) {
+                                                                            reply.getHeader().setStatus(STATUS_NO_SUCH_FILE);
+                                                                        } else {
+                                                                            // 创建
+                                                                            // 直接将整个文件上传，走这里
+                                                                            body.setCreateAction(FILE_OPEND);
+
+                                                                            return CIFSACL.judgeCIFSAccess(call.getAccess(), dirInode, dirInode, s3Id, bucket, call.getCreateDisposition(), call.getCreateOptions(), false, header, session)
+                                                                                    .flatMap(pass -> {
+                                                                                        if (!pass) {
+                                                                                            reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);
+                                                                                            return Mono.just(reply);
+                                                                                        }
+
+                                                                                        return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                                                                                                .flatMap(waitMillis -> {
+                                                                                                    log.debug("craete 3, {}", waitMillis);
+                                                                                                    String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), reqHeader.bucket);
+                                                                                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                                                                                                })
+                                                                                                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
+                                                                                                        .flatMap(l -> InodeUtils.smbCreate(reqHeader, dirInode, mode, cifsMode, realObj, body, reply,
+                                                                                                                header.getCompoundRequest(), call.getCreateOptions(), s3Id)))
+                                                                                                // share
+                                                                                                .flatMap(i -> {
+                                                                                                    if (InodeUtils.isError(i)) {
+                                                                                                        return Mono.just(reply);
+                                                                                                    }
+                                                                                                    return shareAccessExec(call, i, header, session, body.getFileId())
+                                                                                                            .flatMap(ShareAccessCheck -> {
+                                                                                                                if (ShareAccessCheck) {
+                                                                                                                    return execContext(call, body, i, header, reply, session);
+                                                                                                                } else {
+                                                                                                                    return shareAccessConflict(i, header, session, body.getFileId());
+                                                                                                                }
+                                                                                                            });
+                                                                                                });
+                                                                                    });
+                                                                        }
+                                                                    }
+
+                                                                    return Mono.just(reply);
+                                                                }
+                                                                // File exists overwrite/supersede. File not exist create
+                                                            case FILE_SUPERSEDE:
+                                                            default:
+                                                                reply.getHeader().setStatus(STATUS_NOT_IMPLEMENTED);
+                                                                return Mono.just(reply);
+                                                        }
+                                                    });
                                         });
                             });
                 });
@@ -802,7 +803,9 @@ public class SMB2Proc {
                                     .map(success -> success ? 0 : 1);
                         } else {
                             fileInfo.updateTimeOnClose = true;
-                            writeRes = qosMono.flatMap(l -> WriteCache.getCache(bucket, inode.getNodeId(), call.writeFlags, inode.getStorage(), true))
+                            writeRes = qosMono
+                                    .flatMap(q-> FSQuotaUtils.checkFsQuota(inode))
+                                    .flatMap(l -> WriteCache.getCache(bucket, inode.getNodeId(), call.writeFlags, inode.getStorage(), true))
                                     .flatMap(writeCache -> {
                                         writeCacheReference.set(writeCache);
                                         return writeCache.nfsWrite(call.writeOffset, call.data, inode, call.writeFlags)

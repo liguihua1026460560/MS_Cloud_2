@@ -70,7 +70,7 @@ public class SMB2FileId {
                         info.queryDirCache.clear();
                         info.queryDirCache = null;
                     }
-                    WriteCacheClient.clear(persistent);
+                    WriteCacheClient.clear(persistent, info);
                     return null;
                 } else {
                     return info;

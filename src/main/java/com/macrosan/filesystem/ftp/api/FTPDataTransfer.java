@@ -102,18 +102,23 @@ public class FTPDataTransfer {
         }
 
         ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
 
-        return FsUtils.lookup(bucket, objName, reqHeader, false, -1, null).flatMap(inode -> {
-            if (inode.equals(NOT_FOUND_INODE)) {
-                // 文件不存在
-                return createObj(ftpRequest, session, socket, 0);
-            }
-            // 文件存在，直接追加
-            return FSQuotaUtils.existQuotaInfo(inode.getBucket(), inode.getObjName(), System.currentTimeMillis(), inode.getUid(), inode.getGid())
-                    .flatMap(t2 -> ftpWriteQuotaCheck(session, socket, suc, inode, inode.getSize(), t2));
-        });
+
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
+                    reqHeader.bucketInfo = bktInfo;
+                    reqHeader.bucket = bucket;
+                    return FsUtils.lookup(bucket, objName, reqHeader, false, -1, null);
+                })
+                .flatMap(inode -> {
+                    if (inode.equals(NOT_FOUND_INODE)) {
+                        // 文件不存在
+                        return createObj(ftpRequest, session, socket, 0);
+                    }
+                    // 文件存在，直接追加
+                    return FSQuotaUtils.existQuotaInfo(inode.getBucket(), inode.getObjName(), System.currentTimeMillis(), inode.getUid(), inode.getGid())
+                            .flatMap(t2 -> ftpWriteQuotaCheck(session, socket, suc, inode, inode.getSize(), t2));
+                });
     }
 
     @FTPRequest.FTPOpt(FTPRequest.Command.RETR)
@@ -129,7 +134,6 @@ public class FTPDataTransfer {
         Tuple2<String, String> tuple2 = session.getBucketAndObject(ftpRequest.args.get(0));
         String bucket = tuple2.var1;
         String objName = tuple2.var2;
-        Map<String, String> bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
 
         StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);
         String bucketVnode = pool.getBucketVnodeId(bucket);
@@ -162,23 +166,27 @@ public class FTPDataTransfer {
                     .doOnNext(bytes -> readBytes.addAndGet(bytes.length))
                     .subscribe(new DownLoadSubscriber(socket, session.getContext(), streamController, suc));
 
-            return suc.doOnNext(success -> {
-                        if (bucketInfo != null) {
-                            String accountId = bucketInfo.get("user_id");
-                            if (!StringUtils.isEmpty(bucket) && !StringUtils.isEmpty(accountId)) {
-                                long executionTime = DateChecker.getCurrentTime() - startTime.get();
-                                StatisticsRecorder.RequestType requestType = getRequestType(HttpMethod.GET);
-                                addFileStatisticRecord(accountId, bucket, HttpMethod.GET, -1, requestType, success, executionTime, readBytes.get());
-                            }
-                        }
-                    })
-                    .map(b -> {
-                        if (b) {
-                            return TRANSFER_COMPLETE.reply();
-                        } else {
-                            return ERROR_ON_INPUT_FILE.reply();
-                        }
+            return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                    .flatMap(bktInfo -> {
+                        return suc.doOnNext(success -> {
+                                    if (bktInfo != null) {
+                                        String accountId = bktInfo.get("user_id");
+                                        if (!StringUtils.isEmpty(bucket) && !StringUtils.isEmpty(accountId)) {
+                                            long executionTime = DateChecker.getCurrentTime() - startTime.get();
+                                            StatisticsRecorder.RequestType requestType = getRequestType(HttpMethod.GET);
+                                            addFileStatisticRecord(accountId, bucket, HttpMethod.GET, -1, requestType, success, executionTime, readBytes.get());
+                                        }
+                                    }
+                                })
+                                .map(b -> {
+                                    if (b) {
+                                        return TRANSFER_COMPLETE.reply();
+                                    } else {
+                                        return ERROR_ON_INPUT_FILE.reply();
+                                    }
+                                });
                     });
+
         });
     }
 
@@ -283,17 +291,19 @@ public class FTPDataTransfer {
                 .flatMap(b -> {
                     session.releaseLock();
                     if (b) {
-                        return Mono.just(ES_ON.equals(NFSBucketInfo.getBucketInfo(inode.getBucket()).get(ES_SWITCH))).flatMap(f -> {
-                            if (f) {
-                                return nodeInstance.getInode(inode.getBucket(), inode.getNodeId()).flatMap(i -> {
-                                    if (!InodeUtils.isError(i)) {
-                                        return EsMetaTask.putEsMeta(i);
+                        return NFSBucketInfo.getFTPBucketInfoReactive(inode.getBucket())
+                                .map(bktInfo -> ES_ON.equals(bktInfo.get(ES_SWITCH)))
+                                .flatMap(f -> {
+                                    if (f) {
+                                        return nodeInstance.getInode(inode.getBucket(), inode.getNodeId()).flatMap(i -> {
+                                            if (!InodeUtils.isError(i)) {
+                                                return EsMetaTask.putEsMeta(i);
+                                            }
+                                            return Mono.just(f);
+                                        }).map(res -> true);
                                     }
-                                    return Mono.just(f);
-                                }).map(res -> true);
-                            }
-                            return Mono.just(true);
-                        }).map(c -> TRANSFER_COMPLETE.reply());
+                                    return Mono.just(true);
+                                }).map(c -> TRANSFER_COMPLETE.reply());
                     } else {
                         return Mono.just(ERROR_ON_OUTPUT_FILE.reply());
                     }
@@ -329,17 +339,20 @@ public class FTPDataTransfer {
                 return Mono.just(ERROR_ON_OUTPUT_FILE.reply());
             }
 
-            ReqInfo reqHeader = new ReqInfo();
-            reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-            reqHeader.bucket = bucket;
+            return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                    .flatMap(bktInfo -> {
+                        ReqInfo reqHeader = new ReqInfo();
+                        reqHeader.bucketInfo = bktInfo;
+                        reqHeader.bucket = bucket;
+                        return InodeUtils.ftpCreate(reqHeader, dirInode, DEFAULT_FILE_MODE | S_IFREG, FILE_CIFS_MODE, objName);
+                    })
+                    .flatMap(inode -> {
+                        if (InodeUtils.isError(inode)) {
+                            return Mono.just(ERROR_ON_OUTPUT_FILE.reply());
+                        }
 
-            return InodeUtils.ftpCreate(reqHeader, dirInode, DEFAULT_FILE_MODE | S_IFREG, FILE_CIFS_MODE, objName).flatMap(inode -> {
-                if (InodeUtils.isError(inode)) {
-                    return Mono.just(ERROR_ON_OUTPUT_FILE.reply());
-                }
-
-                return ftpWriteQuotaCheck(session, socket, suc, inode, offset, null);
-            });
+                        return ftpWriteQuotaCheck(session, socket, suc, inode, offset, null);
+                    });
         });
 
     }

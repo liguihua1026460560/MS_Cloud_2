@@ -676,4 +676,32 @@ public class FsConstants {
         public static final int IS_CIFS_REQUEST   = 0b01000;
         public static final int IS_S3_REQUEST     = 0b10000;
     }
+
+    public static class FSConfig {
+        public static String FS_CONFIG = "fs_config";
+
+        //445  cifs端口
+        public static String CIFS_PORT = "cifs_port";
+
+        //2049  nfs端口
+        public static String NFS_PORT = "nfs_port";
+
+        //20048  nfs挂载端口
+        public static String NFS_MOUNT_PORT = "nfs_mount_port";
+
+        //4045  nlm端口
+        public static String NLM_PORT = "nlm_port";
+
+        //32767  nsm端口
+        public static String NSM_PORT = "nsm_port";
+
+        //875  配额端口
+        public static String NFS_QUOTA_PORT = "nfs_quota_port";
+
+        //21 ftp端口
+        public static String FTP_CONTROL_PORT = "ftp_control_port";
+
+        //990 ftps端口
+        public static String FTPS_CONTROL_PORT = "ftps_control_port";
+    }
 }

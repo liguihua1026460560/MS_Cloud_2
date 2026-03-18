@@ -35,10 +35,7 @@ import reactor.util.concurrent.Queues;
 
 import java.security.MessageDigest;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -198,7 +195,7 @@ public class InventoryTransmitter {
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, nodeList);
 
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        List<Integer> errorChunksList = new ArrayList<>();
+        Set<Integer> errorChunksList = new HashSet<>();
         AtomicInteger errorNum = new AtomicInteger(0);
 
         responseInfo.responses.publishOn(InventoryService.INVENTORY_SCHEDULER).doOnNext(s -> {
@@ -239,7 +236,7 @@ public class InventoryTransmitter {
 //                }
                 //订阅数据修复消息的发出。b表示k+m个元数据是否至少写上了一个。
                 SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                        .put("errorChunksList", Json.encode(errorChunksList))
+                        .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                         .put("storage", pool.getVnodePrefix())
                         .put("bucket", destination.getBucket())
                         .put("object", destination.getObject())

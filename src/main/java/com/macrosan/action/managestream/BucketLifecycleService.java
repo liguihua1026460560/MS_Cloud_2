@@ -31,7 +31,6 @@ import static com.macrosan.constants.ErrorNo.SUCCESS_STATUS;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.DoubleActiveUtil.notifySlaveSite;
-import static com.macrosan.filesystem.utils.CheckUtils.bucketFsCheck;
 
 public class BucketLifecycleService extends BaseService {
     private static final Logger logger = LogManager.getLogger(BucketLifecycleService.class.getName());
@@ -185,9 +184,9 @@ public class BucketLifecycleService extends BaseService {
         DoubleActiveUtil.siteConstraintCheck(bucketName, siteFlag);
 
         //只有桶的所有者可以操作
-        if (bucketFsCheck(bucketName)) {
-            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not create backup");
-        }
+//        if (bucketFsCheck(bucketName)) {
+//            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not create backup");
+//        }
         //xml解析验证合法性
         String body = paramMap.get(BODY);
         logger.info(body);

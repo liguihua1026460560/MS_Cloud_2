@@ -197,10 +197,13 @@ public class FTPControl {
                             session.setWorkDir(finalNewWorkDir);
                             return Mono.just(COMMAND_OKAY.reply());
                         } else {
-                            ReqInfo reqHeader = new ReqInfo();
-                            reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(tuple2.var1);
-                            reqHeader.bucket = tuple2.var1;
-                            return FsUtils.lookup(tuple2.var1, tuple2.var2, reqHeader, false, -1, null)
+                            return NFSBucketInfo.getFTPBucketInfoReactive(tuple2.var1)
+                                    .flatMap(bktInfo -> {
+                                        ReqInfo reqHeader = new ReqInfo();
+                                        reqHeader.bucket = tuple2.var1;
+                                        reqHeader.bucketInfo = bktInfo;
+                                        return FsUtils.lookup(tuple2.var1, tuple2.var2, reqHeader, false, -1, null);
+                                    })
                                     .map(inode -> {
                                         if (InodeUtils.isError(inode)) {
                                             return FAIL_CWD.reply();
@@ -343,13 +346,16 @@ public class FTPControl {
                                                     if (!pass) {
                                                         return Mono.just(NO_PERMISSION.reply());
                                                     }
-                                                    ReqInfo reqHeader = new ReqInfo();
-                                                    reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-                                                    reqHeader.bucket = bucket;
+
 
                                                     int mode = DEFAULT_DIR_MODE | S_IFDIR;
-
-                                                    return InodeUtils.ftpCreate(reqHeader, dirInode, mode, FILE_ATTRIBUTE_DIRECTORY, objName)
+                                                    return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                                                            .flatMap(bktInfo -> {
+                                                                ReqInfo reqHeader = new ReqInfo();
+                                                                reqHeader.bucketInfo = bktInfo;
+                                                                reqHeader.bucket = bucket;
+                                                                return InodeUtils.ftpCreate(reqHeader, dirInode, mode, FILE_ATTRIBUTE_DIRECTORY, objName);
+                                                            })
                                                             .map(inode -> {
                                                                 if (InodeUtils.isError(inode)) {
                                                                     return CANNOT_CREATE_DIRECTORY.reply();
@@ -382,10 +388,12 @@ public class FTPControl {
         }
 
         ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
-
-        return ftpOpenCheck(bucket, session.getUser())
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
+                    reqHeader.bucketInfo = bktInfo;
+                    reqHeader.bucket = bucket;
+                    return ftpOpenCheck(bucket, session.getUser());
+                })
                 .flatMap(open -> {
                     if (open) {
                         return FsUtils.lookup(bucket, objName, reqHeader, false, -1, null)
@@ -464,9 +472,12 @@ public class FTPControl {
                 }
             } else {
                 ReqInfo reqHeader = new ReqInfo();
-                reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-                reqHeader.bucket = bucket;
-                return FsUtils.lookup(bucket, object, reqHeader, false, -1, null)
+                return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                        .flatMap(bktInfo -> {
+                            reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
+                            reqHeader.bucket = bucket;
+                            return FsUtils.lookup(bucket, object, reqHeader, false, -1, null);
+                        })
                         .flatMap(inode -> {
                             if (NOT_FOUND_INODE.equals(inode)) {
                                 return Mono.just(NOT_A_VALID_PATHNAME.reply());
@@ -506,11 +517,13 @@ public class FTPControl {
         }
 
         ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
-        session.reqHeader = reqHeader;
-
-        return ftpOpenCheck(bucket, session.getUser())
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
+                    reqHeader.bucketInfo = bktInfo;
+                    reqHeader.bucket = bucket;
+                    session.reqHeader = reqHeader;
+                    return ftpOpenCheck(bucket, session.getUser());
+                })
                 .flatMap(open -> {
                     if (open) {
                         return CheckUtils.ftpWritePermissionCheck(bucket, session.getUser())
@@ -609,10 +622,12 @@ public class FTPControl {
         }
 
         ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
-
-        return ftpOpenCheck(bucket, session.getUser())
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
+                    reqHeader.bucketInfo = bktInfo;
+                    reqHeader.bucket = bucket;
+                    return ftpOpenCheck(bucket, session.getUser());
+                })
                 .flatMap(open -> {
                     if (open) {
                         return searchFile(ftpRequest, session)
@@ -725,14 +740,14 @@ public class FTPControl {
                             return Mono.just(INVALID_ARGUMENT_INODE);
                         }
                     }
-                    ReqInfo reqHeader = new ReqInfo();
-                    reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-                    reqHeader.bucket = bucket;
 
-                    ReqInfo reqInfo = new ReqInfo();
-                    reqInfo.bucket = bucket;
-                    reqInfo.bucketInfo = reqHeader.bucketInfo;
-                    return FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs());
+                    return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                            .flatMap(bktInfo -> {
+                                ReqInfo reqHeader = new ReqInfo();
+                                reqHeader.bucketInfo = bktInfo;
+                                reqHeader.bucket = bucket;
+                                return FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs());
+                            });
                 });
     }
 
@@ -743,16 +758,13 @@ public class FTPControl {
         String objName = tuple2.var2;
 
         // 判断文件是否存在
-        return InodeUtils.findDirInode(objName, bucket)
-                .flatMap(dirInode -> {
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
                     ReqInfo reqHeader = new ReqInfo();
-                    reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
+                    reqHeader.bucketInfo = bktInfo;
                     reqHeader.bucket = bucket;
-
-                    ReqInfo reqInfo = new ReqInfo();
-                    reqInfo.bucket = bucket;
-                    reqInfo.bucketInfo = reqHeader.bucketInfo;
-                    return FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs());
+                    return InodeUtils.findDirInode(objName, bucket)
+                            .flatMap(dirInode -> FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs()));
                 });
     }
 
@@ -904,13 +916,13 @@ public class FTPControl {
         String objName = tuple2.var2;
 
         // TODO 更新对象上传时间
-        return InodeUtils.findDirInode(objName, bucket)
-                .flatMap(dirInode -> {
+        return NFSBucketInfo.getFTPBucketInfoReactive(bucket)
+                .flatMap(bktInfo -> {
                     ReqInfo reqHeader = new ReqInfo();
                     reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
                     reqHeader.bucket = bucket;
-
-                    return FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs());
+                    return InodeUtils.findDirInode(objName, bucket)
+                            .flatMap(dirInode -> FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs()));
                 })
                 .flatMap(inode -> {
                     if (InodeUtils.isError(inode)) {

@@ -8,6 +8,7 @@ import com.macrosan.ec.Utils;
 import com.macrosan.ec.VersionUtil;
 import com.macrosan.ec.server.WriteCacheServer;
 import com.macrosan.filesystem.FsUtils;
+import com.macrosan.filesystem.async.AsyncUtils;
 import com.macrosan.filesystem.cache.model.BTreeModel;
 import com.macrosan.filesystem.cache.model.DataModel;
 import com.macrosan.filesystem.cifs.notify.NotifyServer;
@@ -36,7 +37,9 @@ import com.macrosan.utils.functional.Tuple3;
 import io.rsocket.Payload;
 import io.rsocket.util.DefaultPayload;
 import io.vertx.core.json.Json;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
+import lombok.Setter;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
@@ -53,7 +56,8 @@ import java.util.stream.Collectors;
 
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.Utils.DEFAULT_META_HASH;
-import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
+import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.FLUSH_WRITE_CACHE;
+import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SUCCESS;
 import static com.macrosan.filesystem.FsConstants.NFSACLType.*;
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEFlag.INHERIT_ONLY_ACE;
@@ -85,6 +89,12 @@ public class InodeOperator {
     final UpdateOpt updateOpt;
     final PutOpt putOpt;
     final int opt;
+    @Setter
+    @Getter
+    /**
+     * 复制功能使用，用于在实际exec时生成差异记录
+     */
+            SocketReqMsg msg;
 
     public interface GetOpt {
         Mono<Inode> get();
@@ -358,6 +368,17 @@ public class InodeOperator {
                         (args, inode0) -> updateLinkN(inode0, args, false, ""),
                         (args, old, inode1) -> markDeleteInode(vnode, inode1, args), opt);
                 break;
+            case 50:
+                Inode createInode = Json.decodeValue(msg.get("inode"), Inode.class);
+                long stamp = Long.parseLong(msg.get("stamp"));
+                String createVersion = msg.get("version");
+                String s3Account = msg.get("s3Account");
+                String displayName = msg.get("displayName");
+                operator = new InodeOperator(nodeId, 10, false, () -> Mono.just(createInode),
+                        (args, inode) -> Mono.just(createInode),
+                        (args, oldInode, inode) -> InodeUtils.create0(bucket, inode, nodeId, stamp, createVersion, s3Account, displayName), opt);
+
+                break;
             default:
         }
 
@@ -365,6 +386,11 @@ public class InodeOperator {
             log.info("no such inode opt {}:{}", opt, msg);
             return Mono.just(local ? RETRY_INODE_PAYLOAD : DefaultPayload.create(Json.encode(RETRY_INODE), SUCCESS.name()));
         } else {
+            if (AsyncUtils.checkOptForAsync(opt, msg)) {
+                operator.setMsg(msg);
+            } else {
+                operator.setMsg(null);
+            }
             return FastMonoTimeOut.fastTimeout(vnode.exec(operator), Duration.ofSeconds(300))
                     .map(i -> local ? new LocalPayload<>(SUCCESS, i) : DefaultPayload.create(Json.encode(i), SUCCESS.name()))
                     .onErrorResume(e -> {
@@ -965,13 +991,9 @@ public class InodeOperator {
         if (inode.isDeleteMark()) {
             return Mono.just(NOT_FOUND_INODE);
         }
-
-        return BucketSyncSwitchCache.isSyncSwitchOffMono(bucket)
-                .doOnNext(isSyncSwitchOff -> {
-                    inode.setVersionNum(VersionUtil.getVersionNumMaybeUpdate(isSyncSwitchOff, inode.getNodeId()));
-                })
-                .flatMap(i -> pool.mapToNodeInfo(bucketVnode))
-                .flatMap(nodeList -> setFsDelMark(inode, nodeList, inode.getVersionNum(), args.needDelete, isFsDelMark))
+        String[] newVersionNum = new String[1];
+        return pool.mapToNodeInfo(bucketVnode)
+                .flatMap(nodeList -> setFsDelMark(inode, nodeList, newVersionNum, args.needDelete, isFsDelMark))
                 .doOnNext(delRes -> {
                     if ((inode.getMode() & S_IFMT) == S_IFDIR) {
                         //删除配额信息
@@ -1006,20 +1028,30 @@ public class InodeOperator {
                         } else {
                             // 存在硬链接，更新inode
                             inode.setObjName(lastObjName);
-                            return InodeUtils.updateInode(inode.getBucket(), inode, args.isRecover, false)
-                                    .map(b0 -> {
-                                        if (b0) {
-                                            return inode;
-                                        } else {
-                                            return RETRY_INODE;
+                            return BucketSyncSwitchCache.isSyncSwitchOffMono(inode.getBucket())
+                                    .flatMap(isSync -> {
+                                        if (StringUtils.isNotBlank(newVersionNum[0])) {
+                                            return Mono.just(newVersionNum[0]);
                                         }
+                                        return Mono.just(VersionUtil.getVersionNumMaybeUpdate(isSync, inode.getNodeId()));
                                     })
-                                    .doOnNext(i -> {
-                                        if (i.getNodeId() > 0) {
-                                            Inode newInode = i.clone();
-                                            newInode.getXAttrMap().remove(QUOTA_KEY);
-                                            vnode.inodeCache.cache.put(i.getNodeId(), newInode);
-                                        }
+                                    .flatMap(lastVersionNum -> {
+                                        inode.setVersionNum(lastVersionNum);
+                                        return InodeUtils.updateInode(inode.getBucket(), inode, args.isRecover, false)
+                                                .map(b0 -> {
+                                                    if (b0) {
+                                                        return inode;
+                                                    } else {
+                                                        return RETRY_INODE;
+                                                    }
+                                                })
+                                                .doOnNext(i -> {
+                                                    if (i.getNodeId() > 0) {
+                                                        Inode newInode = i.clone();
+                                                        newInode.getXAttrMap().remove(QUOTA_KEY);
+                                                        vnode.inodeCache.cache.put(i.getNodeId(), newInode);
+                                                    }
+                                                });
                                     });
                         }
 
@@ -1027,14 +1059,14 @@ public class InodeOperator {
                 });
     }
 
-    private static Mono<Inode> markDeleteInode(Vnode vnode, Inode inode, UpdateArgs args){
+    private static Mono<Inode> markDeleteInode(Vnode vnode, Inode inode, UpdateArgs args) {
         String bucket = inode.getBucket();
         return BucketSyncSwitchCache.isSyncSwitchOffMono(bucket)
                 .doOnNext(isSyncSwitchOff -> {
                     inode.setVersionNum(VersionUtil.getVersionNumMaybeUpdate(isSyncSwitchOff, inode.getNodeId()));
-                }).flatMap(v ->{
+                }).flatMap(v -> {
                     Inode markDeleteInode = inode;
-                    if (!inode.isDeleteMark()){
+                    if (!inode.isDeleteMark()) {
                         markDeleteInode = INODE_DELETE_MARK.clone().setVersionNum(inode.getVersionNum())
                                 .setNodeId(inode.getNodeId())
                                 .setBucket(inode.getBucket())
@@ -1047,10 +1079,10 @@ public class InodeOperator {
                                 .setObjName(inode.getObjName());
                     }
                     return InodeUtils.updateInode(inode.getBucket(), markDeleteInode, args.isRecover, true)
-                            .flatMap(b ->{
-                                if (b){
+                            .flatMap(b -> {
+                                if (b) {
                                     return deleteChunkMeta(inode);
-                                }else {
+                                } else {
                                     return Mono.just(b);
                                 }
                             }).map(b0 -> inode)
@@ -1092,7 +1124,8 @@ public class InodeOperator {
                                 String bucketVnode = pool.getBucketVnodeId(bucket);
                                 List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(bucketVnode).block();
                                 String key = Utils.getMetaDataKey(bucketVnode, bucket, linkInode.getObjName(), metaData.versionId, metaData.stamp);
-                                return ErasureClient.getFsMetaVerUnlimited(oldInode.getBucket(), oldInode.getObjName(), oldInode.getVersionId(), nodeList, null, null, null, linkInode.getXAttrMap().get(QUOTA_KEY))
+                                return ErasureClient.getFsMetaVerUnlimited(oldInode.getBucket(), oldInode.getObjName(), oldInode.getVersionId(), nodeList, null, null, null,
+                                                linkInode.getXAttrMap().get(QUOTA_KEY))
                                         .flatMap(sourceMeta -> {
                                             if (sourceMeta.isAvailable()) {
                                                 //创建硬链接时，硬链接metaData中的sysMeta与源文件保持一致，owner和名称也一致
@@ -1144,7 +1177,6 @@ public class InodeOperator {
                 .setCtimensec(stampNano);
         renameInode.setCifsMode(CifsUtils.changeToHiddenCifsMode(newObjName, renameInode.getCifsMode(), true));
 
-        String versionNum = VersionUtil.getVersionNum();
 
         // 源文件置为deleteMark；versionNum置为最新，使当存在异常节点未rename时，up后会在list修复getObjectMetaVersion时修复为deleteMark
         MetaData deleteMark = new MetaData()
@@ -1152,7 +1184,6 @@ public class InodeOperator {
                 .setKey(oldObjName)
                 .setDeleteMark(true)
                 .setVersionId("null")  // 暂时未适配versionId
-                .setVersionNum(versionNum)
                 .setStamp(String.valueOf(stamp));
 
         SocketReqMsg msg = new SocketReqMsg("", 0)
@@ -1160,15 +1191,10 @@ public class InodeOperator {
                 .put("bucket", bucket)
                 .put("newObj", newObjName)
                 .put("oldObj", oldObjName)
-                .put("versionNum", versionNum)
                 .put("deleteMark", Json.encode(deleteMark));
 
         String key = Inode.getKey(bucketVnode, renameInode.getBucket(), renameInode.getNodeId());
 
-//        //文件已经被重命名，返not found
-//        if (!renameInode.getObjName().equals(newObjName) || args.hasReName) {
-//            return Mono.just(NOT_FOUND_INODE);
-//        }
         return RedisConnPool.getInstance().getReactive(REDIS_BUCKETINFO_INDEX)
                 .hget(bucket, "storage_strategy")
                 .flatMap(storageStrategy -> {
@@ -1193,10 +1219,16 @@ public class InodeOperator {
                     }
                     return pool.mapToNodeInfo(bucketVnode);
                 })
-                .flatMap(nodeList ->  ErasureClient.getFsMetaVerUnlimited(renameInode.getBucket(), oldObjName, renameInode.getVersionId(), nodeList, null, null, null, renameInode.getXAttrMap().get(QUOTA_KEY))
+                .flatMap(nodeList -> ErasureClient.getFsMetaVerUnlimited(renameInode.getBucket(), oldObjName, renameInode.getVersionId(), nodeList, null, null, null, renameInode.getXAttrMap().get(QUOTA_KEY))
                         .flatMap(sourceMeta -> {
-                            if (sourceMeta.isAvailable() && sourceMeta.inode == renameInode.getNodeId()){
-                                return FsUtils.rename(pool, msg, nodeList, stamp / 1000, stampNano, renameInode.getNodeId(), key);
+                            if (sourceMeta.isAvailable() && sourceMeta.inode == renameInode.getNodeId()) {
+                                return BucketSyncSwitchCache.isSyncSwitchOffMono(bucket)
+                                        .flatMap(isSync -> Mono.just(VersionUtil.getVersionNumMaybeUpdate(isSync, renameInode.getNodeId()))).flatMap(versionNum0 -> {
+                                            deleteMark.setVersionNum(versionNum0);
+                                            msg.put("versionNum", versionNum0);
+                                            msg.put("deleteMark", Json.encode(deleteMark));
+                                            return FsUtils.rename(pool, msg, nodeList, stamp / 1000, stampNano, renameInode.getNodeId(), key);
+                                        });
                             }
                             int r = ERROR_META.equals(sourceMeta) ? -1 : 0;
                             return Mono.just(r);
@@ -1300,7 +1332,7 @@ public class InodeOperator {
                                 }
 
                                 if (inode.getSize() != inode.getInodeData().stream().mapToLong(d -> d.size).sum()) {
-                                    log.info("nodeId:{},error inode size",nodeId);
+                                    log.info("nodeId:{},error inode size", nodeId);
                                 }
 
                                 return putInode(bucket, args, oldInode, inode);
@@ -1561,7 +1593,7 @@ public class InodeOperator {
                 .map(l -> l.fileName)
                 .toArray(String[]::new);
         return Flux.fromArray(chunkFiles)
-                .flatMap(fileName -> FsUtils.deleteChunkMeta(fileName, inode.getBucket()))
+                .flatMap(fileName -> FsUtils.deleteChunkMeta(fileName, inode.getBucket()), 24)
                 .collectList()
                 .map(l -> true);
     }
@@ -1580,6 +1612,10 @@ public class InodeOperator {
                 .put("offset", msg0.get("offset"))
                 .put("count", msg0.get("count"))
                 .put("type", msg0.get("type"));
+
+        if (msg0.get("end") != null) {
+            msg.put("end", msg0.get("end"));
+        }
 
         List<SocketReqMsg> msgs = nodeList.stream()
                 .map(tuple -> msg.copy())
@@ -1627,7 +1663,8 @@ public class InodeOperator {
     private static Mono<Boolean> tryFlushWriteCache(List<Tuple3<String, String, String>> writeTuple, List<SocketReqMsg> writeMsg, long nodeId) {
         MonoProcessor<Boolean> res = MonoProcessor.create();
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(writeMsg, FLUSH_WRITE_CACHE, String.class, writeTuple);
-        responseInfo.responses.subscribe(tuple3 -> {}, e -> {
+        responseInfo.responses.subscribe(tuple3 -> {
+        }, e -> {
             log.error("opt flushWriteCache {} fail", writeMsg.get(0));
             res.onNext(false);
         }, () -> {
@@ -1648,7 +1685,8 @@ public class InodeOperator {
     private static Mono<Boolean> tryDeleteWriteCache(List<Tuple3<String, String, String>> nodeList, List<SocketReqMsg> msgs, long nodeId) {
         MonoProcessor<Boolean> res = MonoProcessor.create();
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, FLUSH_WRITE_CACHE, String.class, nodeList);
-        responseInfo.responses.subscribe(tuple3 -> {}, e -> {
+        responseInfo.responses.subscribe(tuple3 -> {
+        }, e -> {
             log.error("opt deleteWriteCache {} fail", msgs.get(0));
             res.onNext(false);
         }, () -> {

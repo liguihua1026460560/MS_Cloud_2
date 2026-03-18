@@ -118,10 +118,10 @@ public class ListVersionsMergeChannel extends AbstractIndexShardMergeChannel<Tup
             return new Version()
                     .setKey(metaData.getKey())
                     .setVersionId(metaData.getVersionId())
-                    .setEtag('"' + sysMetaMap.get(ETAG) + '"')
+                    .setEtag(Utils.getEtag(sysMetaMap))
                     .setLastModified(MsDateUtils.dateToISO8601(sysMetaMap.get(LAST_MODIFY)))
                     .setOwner(new Owner().setDisplayName(sysMetaMap.get("displayName")).setId(sysMetaMap.get("owner")))
-                    .setSize(String.valueOf(metaData.endIndex - metaData.startIndex + 1))
+                    .setSize(Utils.getObjectSize(sysMetaMap, metaData))
                     .setStorageClass("STANDARD")
                     .setLatest(metaData.isLatest());
         } else {

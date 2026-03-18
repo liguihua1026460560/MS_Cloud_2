@@ -93,8 +93,7 @@ import static com.macrosan.database.rocksdb.batch.BatchRocksDB.toByte;
 import static com.macrosan.doubleActive.HeartBeatChecker.isMultiAliveStarted;
 import static com.macrosan.doubleActive.arbitration.Arbitrator.MASTER_INDEX;
 import static com.macrosan.doubleActive.arbitration.Arbitrator.TERM;
-import static com.macrosan.doubleActive.arbitration.DAVersionUtils.refreshMasterInfo;
-import static com.macrosan.doubleActive.arbitration.DAVersionUtils.verNum2timeStamp;
+import static com.macrosan.doubleActive.arbitration.DAVersionUtils.*;
 import static com.macrosan.doubleActive.archive.ArchieveUtils.ARCHIVE_SYNC_REC_MARK;
 import static com.macrosan.doubleActive.archive.ArchiveAnalyzer.ARCHIVE_ANALYZER_KEY;
 import static com.macrosan.ec.ECUtils.bytes2long;
@@ -192,7 +191,7 @@ public class RequestResponseServerHandler {
                                 if (null != newMetaOldInodeValue) {
                                     String inodeValueStr = new String(newMetaOldInodeValue);
                                     Inode newMetaOldInode = Json.decodeValue(inodeValueStr, Inode.class);
-                                    if (newMetaOldInode.getLinkN() == 1 && newMetaOldInode.getObjName().equals(newMeta.key)){
+                                    if (newMetaOldInode.getLinkN() == 1 && newMetaOldInode.getObjName().equals(newMeta.key)) {
                                         writeBatch.delete(newMetaOldInodeKey.substring(1).getBytes());
                                         writeBatch.delete(newMetaOldInodeKey.getBytes());
                                     }
@@ -212,7 +211,6 @@ public class RequestResponseServerHandler {
                             }
 
                         }
-
 
 
                         Tuple3<String, String, String> oldTuple = Utils.getAllMetaDataKey(vnode, newMeta.bucket, newMeta.key, newMeta.versionId, newMeta.stamp, newMeta.snapshotMark, newMeta.inode);
@@ -836,7 +834,7 @@ public class RequestResponseServerHandler {
                     writeBatch.put(tuple.var2.getBytes(), Json.encode(meta).getBytes());
                     writeBatch.put(tuple.var3.getBytes(), Json.encode(meta).getBytes());
                     // 如果是旧版本（3.0.6P03之前）的元数据，还需删除多余的、未适配新格式的文件生命周期键
-                    if(objMeta.inode > 0 && !VersionUtil.hasVersionMagicPrefix(metaBytes)) {
+                    if (objMeta.inode > 0 && !VersionUtil.hasVersionMagicPrefix(metaBytes)) {
                         // 构造旧版本的生命周期元数据 key
                         String legacyCtimeLifecycleKey = Utils.getLifeCycleMetaKey(vnode, objMeta.bucket, objMeta.key, objMeta.versionId, objMeta.stamp, objMeta.snapshotMark);
                         writeBatch.put(legacyCtimeLifecycleKey.getBytes(), Json.encode(meta).getBytes());
@@ -910,7 +908,7 @@ public class RequestResponseServerHandler {
                     // 创建硬链接本身会使容量加一，因此减去时多减一
                     deltaAvailableCapacity = objMeta.deleteMarker || objMeta.deleteMark ? 0 : -(inodeSize);
                 } else {
-                    deltaAvailableCapacity = objMeta.deleteMarker || objMeta.deleteMark || !meta.deleteMark ? 0 : -(objMeta.endIndex - objMeta.startIndex + 1);
+                    deltaAvailableCapacity = objMeta.deleteMarker || objMeta.deleteMark || !meta.deleteMark ? 0 : -Utils.getObjectSize(objMeta);
                 }
 
                 updateCapacityInfo(writeBatch, objMeta.getBucket(), objMeta.getKey(), vnode, num, deltaAvailableCapacity);
@@ -976,7 +974,7 @@ public class RequestResponseServerHandler {
                     Inode tmpInode = Json.decodeValue(new String(inodeBytes), Inode.class);
                     boolean needDeleteInode = tmpInode.isDeleteMark() && StringUtils.isNotBlank(tmpInode.getObjName())
                             && StringUtils.isNotBlank(objMeta.key) && tmpInode.getObjName().equals(objMeta.key);
-                    if(needDeleteInode){
+                    if (needDeleteInode) {
                         inode = tmpInode;
                         objMeta.setVersionNum(inode.getVersionNum());
                         objStamp = String.valueOf(inode.getMtime() * 1000L + inode.getMtimensec() / 1_000_000L);
@@ -1003,7 +1001,7 @@ public class RequestResponseServerHandler {
                     writeBatch.delete(oldStampKey.getBytes());
                     tuple.var1 = Utils.getMetaDataKey(vnode, objMeta.bucket, objMeta.key, objMeta.versionId, "0", objMeta.snapshotMark);
                 }
-                if (objMeta.inode > 0 && inode != null){
+                if (objMeta.inode > 0 && inode != null) {
                     tuple.var3 = Utils.getLifeCycleMetaKey(vnode, objMeta.bucket, objMeta.key, objMeta.versionId, objStamp, objMeta.inode);
                 }
                 writeBatch.delete(tuple.var1.getBytes());
@@ -1025,7 +1023,7 @@ public class RequestResponseServerHandler {
                     String cookieKey = Inode.getCookieKey(vnode, objMeta.bucket, deleteCookie);
                     writeBatch.delete(cookieKey.getBytes());
                     // 如果是旧版本（3.0.6P03之前）的元数据，还需删除多余的、未适配新格式的文件生命周期键
-                    if(!VersionUtil.hasVersionMagicPrefix(metaBytes)) {
+                    if (!VersionUtil.hasVersionMagicPrefix(metaBytes)) {
                         // 构造旧版本的生命周期元数据 key
                         String legacyCtimeLifecycleKey = Utils.getLifeCycleMetaKey(vnode, objMeta.bucket, objMeta.key, objMeta.versionId, objMeta.stamp, objMeta.snapshotMark);
                         writeBatch.delete(legacyCtimeLifecycleKey.getBytes());
@@ -1095,10 +1093,14 @@ public class RequestResponseServerHandler {
                         continue;
                     }
                     FileMeta fileMeta = Json.decodeValue(new String(fileMetaBytes), FileMeta.class);
-                    writeBatch.delete(fileMetaKey.getBytes());
                     if (fileMeta.getFlushStamp() != null) {
                         writeBatch.delete(Utils.getCacheOrderKey(fileMeta.getFlushStamp(), fileName).getBytes());
                     }
+                    if (fileMeta.getLastAccessStamp() != null) {//缓存盘上的数据下刷到数据池后删除时需要把访问记录的key删除
+                        log.debug("delete file access time key: {}", Utils.getAccessTimeKey(fileMeta.getLastAccessStamp(), fileName));
+                        writeBatch.delete(Utils.getAccessTimeKey(fileMeta.getLastAccessStamp(), fileName).getBytes());
+                    }
+                    writeBatch.delete(fileMetaKey.getBytes());
 
                     if (!fileName.replace("/split/", "").endsWith("/")) {
                         String sourceFileKey = FileMeta.getKey(fileName.split(ROCKS_FILE_META_PREFIX)[0]);
@@ -1649,7 +1651,7 @@ public class RequestResponseServerHandler {
         } catch (NullPointerException e) {
             return Mono.just(DefaultPayload.create(Json.encode(ERROR_BUCKET_INFO), ERROR.name()));
         } catch (Exception e) {
-            if (e.getMessage() != null  && e.getMessage().contains("rocks db fail")) {
+            if (e.getMessage() != null && e.getMessage().contains("rocks db fail")) {
                 if (!ERROR_LUN_SET.contains(lun)) {
                     ERROR_LUN_SET.add(lun);
                     log.error("", e);
@@ -1767,7 +1769,7 @@ public class RequestResponseServerHandler {
                 oldValue = writeBatch.getFromBatchAndDB(db, READ_OPTIONS, tuple.var2.getBytes());
             }
 
-            long deltaAvailableCapacity = newMeta.deleteMarker ? 0 : (newMeta.getEndIndex() - newMeta.getStartIndex() + 1);
+            long deltaAvailableCapacity = newMeta.deleteMarker ? 0 : Utils.getObjectSize(newMeta);
             if (snapshotLink != null && newMeta.partUploadId != null) {
                 long tempCap = 0L;
                 for (PartInfo partInfo : newMeta.partInfos) {
@@ -1789,7 +1791,7 @@ public class RequestResponseServerHandler {
                 if (!oldMeta.deleteMark) {
                     oldValueDeleteMark = false;
                     objNum = oldMeta.deleteMarker ? 1 : 0;
-                    oldDeltaCapacity = oldMeta.deleteMarker ? 0 : oldMeta.getEndIndex() - oldMeta.getStartIndex() + 1;
+                    oldDeltaCapacity = oldMeta.deleteMarker ? 0 : Utils.getObjectSize(oldMeta);
                 } else {
                     objNum = 1;
                 }
@@ -1798,9 +1800,16 @@ public class RequestResponseServerHandler {
                 }
 
                 // 元数据已经为最新无需更新
-                if (!oldMeta.isDiscard() && (!oldMeta.deleteMark || isMigrate) && oldMeta.getVersionNum().compareTo(newMeta.getVersionNum()) >= 0) {
-                    res.onNext(oldMeta.getVersionNum().compareTo(newMeta.getVersionNum()) == 0 ? "" : value[0]);
-                    return;
+                if (!oldMeta.isDiscard() && (!oldMeta.deleteMark || isMigrate)) {
+                    if (countHyphen(newMeta.syncStamp) == 2 && oldMeta.syncStamp != null && newMeta.syncStamp.compareTo(oldMeta.syncStamp) < 0) {
+                        res.onNext(value[0]);
+                        return;
+                    } else {
+                        if (oldMeta.getVersionNum().compareTo(newMeta.getVersionNum()) >= 0) {
+                            res.onNext(oldMeta.getVersionNum().compareTo(newMeta.getVersionNum()) == 0 ? "" : value[0]);
+                            return;
+                        }
+                    }
                 }
 
                 // 【文件】新版本执行：如果被覆盖的数据是文件，且当前由s3端操作，文件的inode>0，且不为删除标记，读取当前已存的inode放入oldValue的tmpInodeStr中，用于同步删除旧的数据块
@@ -2114,7 +2123,7 @@ public class RequestResponseServerHandler {
             }
             boolean renamedMeta = metaData.deleteMark && metaData.partInfos != null && metaData.partInfos.length == 0 && "inode".equals(metaData.partUploadId);
             Inode.reduceMeta(metaData);
-            if (renamedMeta){
+            if (renamedMeta) {
                 metaData.partInfos = new PartInfo[0];
                 metaData.partUploadId = "inode";
             }
@@ -2233,7 +2242,7 @@ public class RequestResponseServerHandler {
                 }
 
                 if (!metaData.isDeleteMark() && !metaData.isDeleteMarker()) {
-                    long capacity = metaData.endIndex - metaData.startIndex + 1;
+                    long capacity = Utils.getObjectSize(metaData);
                     if (metaData.inode > 0) {
                         if (StringUtils.isNotBlank(tmpInode[0])) {
                             Inode curInode = Json.decodeValue(tmpInode[0], Inode.class);
@@ -2316,33 +2325,16 @@ public class RequestResponseServerHandler {
 
                         String bucket = currentValue.containsKey("bucket") ? currentValue.getString("bucket") : currentValue.getString("a");
                         if (StringUtils.isBlank(updateCapKeys[0])) {
-                            MetaData fGetIdMeta;
-                            if (!oldMeta.deleteMark) {
-                                fGetIdMeta = oldMeta.clone();
-                            } else {
-                                fGetIdMeta = metaData.clone();
-                            }
-                            if (metaData.inode > 0) {
-                                String inodeKey = getKey(vnode, metaData.getBucket(), metaData.inode);
-                                byte[] curInodeBytes = writeBatch.getFromBatchAndDB(db, READ_OPTIONS, inodeKey.getBytes());
-                                if (curInodeBytes != null) {
-                                    Inode curInode = Json.decodeValue(new String(curInodeBytes), Inode.class);
-                                    updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(curInode.getBucket(), metaData.key, System.currentTimeMillis(), curInode.getUid(), curInode.getGid());
-                                } else {
-                                    updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(metaData.getBucket(), metaData.key, System.currentTimeMillis(), 0, 0);
-                                }
-                            } else {
-                                updateCapKeys[0] = FSQuotaUtils.getQuotaKeys(metaData.getBucket(), metaData.key, System.currentTimeMillis(), 0, 0);
-                            }
+                            FSQuotaUtils.getQuotaKeyByMetadata(metaData, oldMeta, updateCapKeys, writeBatch, db, vnode);
                         }
                         if (metaData.deleteMark && !oldMeta.deleteMark) {
                             if (!oldMeta.deleteMarker) {
-                                long capacity = oldMeta.endIndex - oldMeta.startIndex + 1;
+                                long capacity = Utils.getObjectSize(oldMeta);
                                 updateCapacityInfo(writeBatch, bucket, metaData.key, vnode, -1, -capacity);
                                 FSQuotaUtils.updateAllKeyCap(updateCapKeys[0], writeBatch, bucket, vnode, -1, -capacity);
                             }
                         } else if (!metaData.deleteMark && oldMeta.deleteMark) {
-                            long capacity = metaData.deleteMarker ? 0 : metaData.endIndex - metaData.startIndex + 1;
+                            long capacity = metaData.deleteMarker ? 0 : Utils.getObjectSize(metaData);
                             long num = metaData.deleteMarker ? 0 : 1;
 
                             if (metaData.inode > 0) {
@@ -2358,12 +2350,12 @@ public class RequestResponseServerHandler {
                             long updateDataCapacity = 0;
                             Inode oldInode = null;
                             if (OverWriteHandler.ASYNC_OVER_WRITE && ((currentStorage != null && updateStorage != null && !updateStorage.equals(currentStorage)) || (isAppendableObject(oldMeta) && metaData.inode <= 0))) {
-                                oldDataCapacity = oldMeta.deleteMarker ? 0 : oldMeta.endIndex - oldMeta.startIndex + 1;
-                                updateDataCapacity = metaData.deleteMarker ? 0 : metaData.endIndex - metaData.startIndex + 1;
+                                oldDataCapacity = oldMeta.deleteMarker ? 0 : Utils.getObjectSize(oldMeta);
+                                updateDataCapacity = metaData.deleteMarker ? 0 : Utils.getObjectSize(metaData);
                                 capacity = updateDataCapacity - oldDataCapacity;
                             }
                             if (!OverWriteHandler.ASYNC_OVER_WRITE) {
-                                oldDataCapacity = oldMeta.deleteMarker ? 0 : oldMeta.endIndex - oldMeta.startIndex + 1;
+                                oldDataCapacity = oldMeta.deleteMarker ? 0 : Utils.getObjectSize(oldMeta);
                                 if (metaData.inode <= 0 && oldMeta.inode > 0) {
                                     String oldInodeKey = getKey(vnode, oldMeta.bucket, oldMeta.inode);
                                     byte[] oldInodeBytes = writeBatch.getFromBatchAndDB(db, READ_OPTIONS, oldInodeKey.getBytes());
@@ -2374,7 +2366,7 @@ public class RequestResponseServerHandler {
                                         }
                                     }
                                 }
-                                updateDataCapacity = metaData.deleteMarker ? 0 : metaData.endIndex - metaData.startIndex + 1;
+                                updateDataCapacity = metaData.deleteMarker ? 0 : Utils.getObjectSize(metaData);
                                 capacity = updateDataCapacity - oldDataCapacity;
                             }
                             if ((metaData.deleteMark && oldMeta.deleteMark) || metaData.inode > 0) {
@@ -2409,7 +2401,7 @@ public class RequestResponseServerHandler {
             long inodeSize = 0;
             boolean updateDeleteInode = StringUtils.isBlank(inode[0]) && metaData.deleteMark && metaData.cookie > 0;
             boolean isUpdateInode = true;
-            if (putFlag && metaData.inode > 0 && oldMetaInode != null && oldMetaInode.getNodeId() != metaData.inode && StringUtils.isNotBlank(tmpInode[0])){
+            if (putFlag && metaData.inode > 0 && oldMetaInode != null && oldMetaInode.getNodeId() != metaData.inode && StringUtils.isNotBlank(tmpInode[0])) {
                 Inode curInode = Json.decodeValue(tmpInode[0], Inode.class);
                 String oldMetaInodeVersionNum = oldMetaInode.getVersionNum();
                 String curInodeVersionNum = curInode.getVersionNum();
@@ -2424,11 +2416,11 @@ public class RequestResponseServerHandler {
                             needDelete = false;
                         }
                     }
-                    if (oldMetaInode.getLinkN() > 1 || !oldMetaInode.getObjName().equals(metaData.key)){
+                    if (oldMetaInode.getLinkN() > 1 || !oldMetaInode.getObjName().equals(metaData.key)) {
                         needDelete = false;
                     }
-                    if (!OverWriteHandler.ASYNC_OVER_WRITE){
-                        if (needDelete && !oldMetaInode.isDeleteMark()){
+                    if (!OverWriteHandler.ASYNC_OVER_WRITE) {
+                        if (needDelete && !oldMetaInode.isDeleteMark()) {
                             writeBatch.delete(oldInodeMetaKey.substring(1).getBytes());
                             writeBatch.delete(oldInodeMetaKey.getBytes());
                             inodeSize += oldMetaInode.getSize();
@@ -2449,6 +2441,12 @@ public class RequestResponseServerHandler {
                             .setObjName(metaData.key)
                             .setCookie(metaData.cookie)
                             .setVersionId(metaData.versionId == null ? "null" : metaData.versionId);
+                    byte[] oldInodeBytes = writeBatch.getFromBatchAndDB(db, READ_OPTIONS, inodeKey.getBytes());
+                    if (null != oldInodeBytes) {
+                        Inode oldInode0 = Json.decodeValue(new String(oldInodeBytes), Inode.class);
+                        markInode.setUid(oldInode0.getUid());
+                        markInode.setGid(oldInode0.getGid());
+                    }
                     inode[0] = Json.encode(markInode);
                 }
                 Inode curInode = Json.decodeValue(inode[0], Inode.class);
@@ -2471,6 +2469,9 @@ public class RequestResponseServerHandler {
 
                 // put inode
                 if (isUpdateInode) {
+                    if (StringUtils.isBlank(updateCapKeys[0])) {
+                        FSQuotaUtils.getQuotaKeyByMetadata(metaData, oldMeta, updateCapKeys, writeBatch, db, vnode);
+                    }
                     writeBatch.put(inodeKey.getBytes(), inode[0].getBytes());
                     if (inodeSize != 0) {
                         updateCapacityInfo(writeBatch, metaData.bucket, metaData.key, vnode, 0, -inodeSize);
@@ -2500,12 +2501,12 @@ public class RequestResponseServerHandler {
                     Inode cookieInode0;
                     if (cookieBytes != null) {
                         cookieInode0 = Json.decodeValue(new String(writeBatch.getFromBatchAndDB(db, cookieKey.getBytes())), Inode.class);
-                        if (!metaData.key.equals(cookieInode0.getObjName()) && !cookieInode0.isDeleteMark()){
+                        if (!metaData.key.equals(cookieInode0.getObjName()) && !cookieInode0.isDeleteMark()) {
                             needDeleteMark = false;
                         }
                     }
                     // 如果要更新成的metaData是deleteMark，则将cookieInode设置为deleteMark
-                    if (needDeleteMark){
+                    if (needDeleteMark) {
                         Inode cookieInode = new Inode()
                                 .setNodeId(metaData.inode)
                                 .setVersionNum(metaData.versionNum)
@@ -2526,14 +2527,14 @@ public class RequestResponseServerHandler {
                 Inode cookieInode0;
                 if (cookieBytes != null) {
                     cookieInode0 = Json.decodeValue(new String(writeBatch.getFromBatchAndDB(db, cookieKey.getBytes())), Inode.class);
-                    if ((!metaData.key.equals(cookieInode0.getObjName()) || metaData.inode != cookieInode0.getNodeId()) && !cookieInode0.isDeleteMark()){
+                    if ((!metaData.key.equals(cookieInode0.getObjName()) || metaData.inode != cookieInode0.getNodeId()) && !cookieInode0.isDeleteMark()) {
                         needDeleteMark = false;
                     }
                 }
-                if (needDeleteMark){
+                if (needDeleteMark) {
                     needDeleteMark = !(metaData.partInfos != null && metaData.partInfos.length == 0 && "inode".equals(metaData.partUploadId));
                 }
-                if (needDeleteMark){
+                if (needDeleteMark) {
                     Inode cookieInode = new Inode()
                             .setNodeId(metaData.inode)
                             .setVersionNum(metaData.versionNum)
@@ -2883,6 +2884,51 @@ public class RequestResponseServerHandler {
                 writeBatch.put((FileMeta.getKey(oldFileName) + keySuffix).getBytes(), Json.encode(oldFileMeta).getBytes());
                 res.onNext("1");
             }
+        };
+        return BatchRocksDB.customizeOperateData(lun, consumer, res)
+                .map(str -> DefaultPayload.create(str, SUCCESS.name()))
+                .doOnError(e -> log.error("", e))
+                .onErrorReturn(ERROR_PAYLOAD);
+    }
+
+    /**
+     * 更新fileMeta中的最后访问时间
+     * @param payload
+     * @return
+     */
+    public static Mono<Payload> updateFileAccessTime(Payload payload) {
+        SocketReqMsg msg = Json.decodeValue(payload.getDataUtf8(), SocketReqMsg.class);
+        String fileName = msg.get("fileName");
+        String stamp = msg.get("stamp");
+        String lun = msg.get("lun");
+
+        String accessRecord = getAccessTimeKey(stamp, fileName);
+
+        MonoProcessor<String> res = MonoProcessor.create();
+        BatchRocksDB.RequestConsumer consumer = (db, writeBatch, request) -> {
+            //检查指定的fileMeta是否存在
+            byte[] oldValue = db.get(FileMeta.getKey(fileName).getBytes());
+            if (oldValue == null) {
+                res.onNext("1");
+                return;
+            }
+
+            //首先在当前缓存盘增加访问记录
+            //修改增加LastAccessTime
+
+            FileMeta fileMeta = Json.decodeValue(new String(oldValue), FileMeta.class);
+            //获取旧的时间戳对应的访问记录key
+            if (fileMeta.getLastAccessStamp() != null) {
+                String oldRecord = getAccessTimeKey(fileMeta.getLastAccessStamp(), fileName);
+                writeBatch.delete(oldRecord.getBytes());
+            }
+
+            writeBatch.put(accessRecord.getBytes(), ZERO_BYTES);
+            fileMeta.setLastAccessStamp(stamp);
+
+            writeBatch.put(FileMeta.getKey(fileName).getBytes(), Json.encode(fileMeta).getBytes());
+            res.onNext("1");
+
         };
         return BatchRocksDB.customizeOperateData(lun, consumer, res)
                 .map(str -> DefaultPayload.create(str, SUCCESS.name()))
@@ -3531,7 +3577,7 @@ public class RequestResponseServerHandler {
                     }
                 }
                 writeBatch.put(tuple.var2.getBytes(), value[0]);
-                deltaCapacity = deltaCapacity - (oldMeta.deleteMarker || oldMeta.deleteMark ? 0 : oldMeta.endIndex - oldMeta.startIndex + 1);
+                deltaCapacity = deltaCapacity - (oldMeta.deleteMarker || oldMeta.deleteMark ? 0 : Utils.getObjectSize(oldMeta));
                 if (oldTmpInode != null) {
                     if (oldTmpInode.getLinkN() == 1) {
                         oldCap = oldTmpInode.getSize();
@@ -5100,7 +5146,7 @@ public class RequestResponseServerHandler {
                         Set<String> difference = Sets.difference(objNamesSet, namesSet);
                         for (String obj : difference) {
                             String esStamp = esMeta.stamp;
-                            if (StringUtils.isNotBlank(inodeStamp)){
+                            if (StringUtils.isNotBlank(inodeStamp)) {
                                 esStamp = inodeStamp;
                             }
                             EsMeta esMeta0 = EsMeta.mapEsMeta(esMeta, obj);
@@ -5272,9 +5318,12 @@ public class RequestResponseServerHandler {
                     writeBatch.delete(Utils.getMetaDataKey(vnode, metaData.bucket, metaData.key, metaData.versionId, "0", metaData.snapshotMark).getBytes());
                 }
                 MetaData oldMeta = Json.decodeValue(new String(oldValue), MetaData.class);
+                if (oldMeta.discard) {
+                    return;
+                }
                 long capacity = 0;
                 if (oldMeta.snapshotMark == null || oldMeta.partUploadId == null) {
-                    capacity = oldMeta.deleteMarker || oldMeta.deleteMark ? 0 : oldMeta.endIndex - oldMeta.startIndex + 1;
+                    capacity = oldMeta.deleteMarker || oldMeta.deleteMark ? 0 : Utils.getObjectSize(oldMeta);
                 } else {
                     long tempCap = 0;
                     for (PartInfo partInfo : oldMeta.partInfos) {

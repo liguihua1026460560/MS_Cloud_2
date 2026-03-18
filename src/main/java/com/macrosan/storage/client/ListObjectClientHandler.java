@@ -152,7 +152,7 @@ public class ListObjectClientHandler extends AbstractListClient<Tuple3<Boolean, 
     @Override
     protected void publishErrorList() {
         //防止io占用太大，单条消息不能太大，需要分割errorList。
-        if (snapshotErrorList.isEmpty()){
+        if (snapshotErrorList.isEmpty()) {
             List<List<Tuple3<String, String, String>>> partition = Lists.partition(errorList, 50);
 
             for (List<Tuple3<String, String, String>> counterList : partition) {
@@ -161,12 +161,12 @@ public class ListObjectClientHandler extends AbstractListClient<Tuple3<Boolean, 
                         .put("counterList", Json.encode(counterList));
                 if (this.updateCapDirList.isEmpty()) {
                     ObjectPublisher.basicPublishToLowSpeed(ERROR_REPAIR_LSFILE, errorMsg);
-                }else{
+                } else {
                     errorMsg.put("updateDirList", Json.encode(this.updateCapDirList));
                     ObjectPublisher.basicPublishToLowSpeed(ERROR_REPAIR_LSFILE_WITH_FS_QUOTA, errorMsg);
                 }
             }
-        }else {
+        } else {
             // 开启桶快照
             List<List<Tuple2<String, Tuple3<String, String, String>>>> partition = Lists.partition(snapshotErrorList, 50);
 
@@ -186,11 +186,11 @@ public class ListObjectClientHandler extends AbstractListClient<Tuple3<Boolean, 
         });
 
         return new Contents()
-                .setEtag('"' + sysMetaMap.get(ETAG) + '"')
+                .setEtag(Utils.getEtag(sysMetaMap))
                 .setKey(metaData.getKey())
                 .setLastModified(MsDateUtils.dateToISO8601(sysMetaMap.get(LAST_MODIFY)))
                 .setOwner(new Owner().setDisplayName(sysMetaMap.get("displayName")).setId(sysMetaMap.get("owner")))
-                .setSize(String.valueOf(metaData.endIndex - metaData.startIndex + 1))
+                .setSize(Utils.getObjectSize(sysMetaMap, metaData))
                 .setStorageClass("STANDARD");
     }
 }

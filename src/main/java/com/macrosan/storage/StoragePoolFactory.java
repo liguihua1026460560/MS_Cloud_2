@@ -74,6 +74,7 @@ public class StoragePoolFactory {
     private static final Map<String, StoragePool> MAP = new ConcurrentHashMap<>();
     private static final Map<String, StoragePool> NO_USED_MAP = new ConcurrentHashMap<>();
     private static final Map<String, String> POOL_NAME_MAP = new ConcurrentHashMap<>();
+    public static final Map<String, String> DATA_POOL_STRATEGY_MAP = new ConcurrentHashMap<>();
     private static Set<String> needInitConsumer = new ConcurrentHashSet<>();
     private static Set<String> existsPoolConsumer = new ConcurrentHashSet<>();
 
@@ -278,13 +279,29 @@ public class StoragePoolFactory {
                 needInitConsumer.add(prefix);
                 String strategyName = "storage_" + prefix;
                 String poolName = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(strategyName, "pool");
+                if (prefix.startsWith("data")) {
+                    String poolStrategy = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(poolName, "storage_strategy");
+                    if (poolStrategy != null && !"[]".equals(poolStrategy)) {
+                        String[] strategies = Json.decodeValue(poolStrategy, String[].class);
+                        DATA_POOL_STRATEGY_MAP.put(prefix, strategies[0]);
+                    }
+                }
                 POOL_NAME_MAP.put(prefix, poolName);
                 log.info("load pool in MAP: {}", prefix);
                 List<String> vnodeList = vnodeListMap.get(prefix);
                 int linkSize = (int) (syncCommand.hget(vnodeList.get(0), "link")
                         .chars().filter(c -> c == ',').count() + 1);
                 StoragePool pool = loadStorage(prefix, linkSize, vnodeList, vnodeListMap);
-                MAP.put(prefix, pool);
+                MAP.compute(prefix, (k, oldPool) -> {
+                    if (oldPool != null) {
+                        oldPool.setStopHealthCheck(true);
+                    }
+                    StoragePool storagePool = NO_USED_MAP.get(prefix);
+                    if (storagePool != null) {
+                        storagePool.setStopHealthCheck(true);
+                    }
+                    return pool;
+                });
                 MAX_VNODE_NUM = Math.max(MAX_VNODE_NUM, pool.getVnodeNum());
             } else if (!prefix.startsWith("map-") && !poolSet.contains(prefix) &&
                     (1 == RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).exists("storage_" + prefix))) {
@@ -294,8 +311,16 @@ public class StoragePoolFactory {
                 int linkSize = (int) (syncCommand.hget(noUsedList.get(0), "link")
                         .chars().filter(c -> c == ',').count() + 1);
                 StoragePool noUsedPool = loadStorage(prefix, linkSize, noUsedList, vnodeListMap);
-                NO_USED_MAP.put(prefix, noUsedPool);
-                MAP.remove(prefix);//MAP中只保留存储策略中关联的存储池，移除掉不再使用的存储池,防止在reload时不覆盖同名的旧存储池对象
+                NO_USED_MAP.compute(prefix, (k, oldPool) -> {
+                    if (oldPool != null) {
+                        oldPool.setStopHealthCheck(true);
+                    }
+                    return noUsedPool;
+                });
+                StoragePool remove = MAP.remove(prefix);//MAP中只保留存储策略中关联的存储池，移除掉不再使用的存储池,防止在reload时不覆盖同名的旧存储池对象
+                if (remove != null) {
+                    remove.setStopHealthCheck(true);
+                }
             }
         }
 

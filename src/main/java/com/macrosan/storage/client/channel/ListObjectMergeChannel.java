@@ -119,11 +119,11 @@ public class ListObjectMergeChannel extends AbstractIndexShardMergeChannel<Tuple
         });
 
         return new Contents()
-                .setEtag('"' + sysMetaMap.get(ETAG) + '"')
+                .setEtag(Utils.getEtag(sysMetaMap))
                 .setKey(metaData.getKey())
                 .setLastModified(MsDateUtils.dateToISO8601(sysMetaMap.get(LAST_MODIFY)))
                 .setOwner(new Owner().setDisplayName(sysMetaMap.get("displayName")).setId(sysMetaMap.get("owner")))
-                .setSize(String.valueOf(metaData.endIndex - metaData.startIndex + 1))
+                .setSize(Utils.getObjectSize(sysMetaMap, metaData))
                 .setStorageClass("STANDARD");
     }
 }

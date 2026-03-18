@@ -204,6 +204,11 @@ public class AddClusterUtils {
         });
         headers.put(AUTHORIZATION, getTempAuthStr(sysMap.get("owner")));
 
+        // 添加影像压缩相关信息的header
+        Optional.ofNullable(sysMap.get(DECOMPRESSED_ETAG)).ifPresent(etag -> headers.put(DECOMPRESSED_ETAG, etag));
+        Optional.ofNullable(sysMap.get(DECOMPRESSED_LENGTH)).ifPresent(length -> headers.put(DECOMPRESSED_LENGTH, length));
+        Optional.ofNullable(sysMap.get(COMPRESSION_TYPE)).ifPresent(compressionType -> headers.put(COMPRESSION_TYPE, compressionType));
+
         headers.put(EXPECT, EXPECT_100_CONTINUE);
         pathStr = UrlEncoder.encode(File.separator + metaData.bucket + File.separator + metaData.key, "UTF-8");
 
@@ -224,7 +229,8 @@ public class AddClusterUtils {
                 .setVersionId(metaData.versionId)
                 .setSuccessIndex(LOCAL_CLUSTER_INDEX)
                 .setIndex(sendClusterIndex)
-                .setCommited(true);
+                .setCommited(true)
+                .setNodeId(metaData.inode);
 
         if (HttpMethod.DELETE.equals(method) && !newDelRocksKey) {
             // 删除相关的差异记录的recordKey将使用源对象中的syncStamp拼接。为了后台校验能找到差异记录。SERVER-1107

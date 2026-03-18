@@ -1,18 +1,15 @@
 package com.macrosan.message.socketmsg;
 
-import com.dslplatform.json.CompiledJson;
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.macrosan.utils.msutils.UnsafeUtils;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
-import lombok.experimental.Accessors;
-import sun.misc.Unsafe;
 
 import java.util.HashMap;
 import java.util.Map;
 
+@Data
+@EqualsAndHashCode(callSuper = true)
 public class SocketDataMsg extends SocketReqMsg {
     private Map<String, Object> objMap = new HashMap<>();
     public byte[] data;
@@ -200,4 +197,15 @@ public class SocketDataMsg extends SocketReqMsg {
         return msg;
     }
 
+    @Override
+    public String toString() {
+        return "SocketDataMsg{" +
+                "objMap=" + objMap +
+                ", data=" + data.length +
+                ", version='" + version + '\'' +
+                ", msgType='" + msgType + '\'' +
+                ", msgLen=" + msgLen +
+                ", dataMap=" + dataMap +
+                '}';
+    }
 }

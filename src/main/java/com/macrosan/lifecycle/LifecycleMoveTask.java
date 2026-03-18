@@ -34,6 +34,7 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 import reactor.util.concurrent.Queues;
 
+import java.io.File;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -48,6 +49,7 @@ import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.lifecycle.LifecycleCommandConsumer.*;
 import static com.macrosan.message.consturct.RequestBuilder.getRequestId;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 import static com.macrosan.storage.move.CacheMove.isEnableCacheOrderFlush;
 import static com.macrosan.storage.strategy.StorageStrategy.POOL_STRATEGY_MAP;
 
@@ -134,7 +136,8 @@ public class LifecycleMoveTask {
                                                 .flatMap(b -> {
                                                     String sourceStorage = metaData.storage;
                                                     if (b) {
-                                                        metaData.setFileName(Utils.getObjFileName(targetPool, metaData.bucket, metaData.key, requestId));
+                                                        String objectWithVersionId = "null".equals(metaData.getVersionId()) ? metaData.getKey() : metaData.getKey() + File.separator + metaData.getVersionId();
+                                                        metaData.setFileName(Utils.getObjFileName(targetPool, metaData.bucket, objectWithVersionId, requestId));
                                                         metaData.storage = targetPool.getVnodePrefix();
                                                         return ErasureClient.getAndUpdateDeduplicate(metaStoragePool, dedupKey, targetNodeList, null, null, metaData, md5)
                                                                 .timeout(Duration.ofSeconds(30));
@@ -261,7 +264,8 @@ public class LifecycleMoveTask {
         UnicastProcessor<Long> streamController = UnicastProcessor.create(Queues.<Long>unboundedMultiproducer().get());
         MonoProcessor<Boolean> res = MonoProcessor.create();
         List<Tuple3<String, String, String>> sourceNodeList = sourcePool.mapToNodeInfo(sourcePool.getObjectVnodeId(oldFileName)).block();
-        String newFileName = MOVE_TYPE.MOVE_OBJECT.equals(moveType) ? Utils.getObjFileName(targetPool, bucket, object, requestId)
+        String objectWithVersionId = "null".equals(versionId) ? object : object + File.separator + versionId;
+        String newFileName = MOVE_TYPE.MOVE_OBJECT.equals(moveType) ? Utils.getObjFileName(targetPool, bucket, objectWithVersionId, requestId)
                 : Utils.getPartFileName(targetPool, bucket, object, uploadId, partNum, requestId);
 
         String newObjectVnodeId = targetPool.getObjectVnodeId(newFileName);
@@ -311,6 +315,10 @@ public class LifecycleMoveTask {
         if (isEnableCacheOrderFlush(targetPool)) {
             msg.put("flushStamp", String.valueOf(System.currentTimeMillis()));
         }
+
+        if (isEnableCacheAccessTimeFlush(targetPool)) {//生命周期迁移如果准备迁到缓存池，那么访问时间需要更新
+            msg.put("lastAccessStamp", String.valueOf(System.currentTimeMillis()));
+        }
         CryptoUtils.generateKeyPutToMsg(crypto, msg);
 
         List<UnicastProcessor<Payload>> processors = new ArrayList<>();
@@ -338,7 +346,7 @@ public class LifecycleMoveTask {
         }
 
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(processors, String.class, targetNodeList);
-        List<Integer> errorChunksList = new ArrayList<>(targetPool.getM());
+        Set<Integer> errorChunksList = new HashSet<>(targetPool.getM());
 //        String storageName = "storage_" + targetPool.getVnodePrefix();
 //        String poolQueueTag = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(storageName, "pool");
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
@@ -374,11 +382,13 @@ public class LifecycleMoveTask {
                                 .put("fileName", newFileName)
                                 .put("endIndex", String.valueOf(endIndex))
                                 .put("fileSize", String.valueOf(ecEncodeHandler.size()))
-                                .put("errorChunksList", Json.encode(errorChunksList))
+                                .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                 .put("versionId", versionId)
                                 .put("poolQueueTag", poolQueueTag);
                         Optional.ofNullable(snapshotMark).ifPresent(v -> errorMsg.put("snapshotMark", v));
                         Optional.ofNullable(msg.get("flushStamp")).ifPresent(v -> errorMsg.put("flushStamp", v));
+                        Optional.ofNullable(msg.get("lastAccessStamp")).ifPresent(v -> errorMsg.put("lastAccessStamp", v));
+
                         publishEcError(responseInfo.res, targetNodeList, errorMsg, moveType.value.var2());
                     } else {
                         res.onNext(false);
@@ -534,6 +544,7 @@ public class LifecycleMoveTask {
                                                             }
                                                         }
                                                     } else {
+                                                        String objectWithVersionId = "null".equals(versionId) ? object : object + File.separator + versionId;
                                                         logger.debug("filename = {}, duplicateKey = {}", meta.fileName, meta.duplicateKey);
                                                         if (StringUtils.isNotEmpty(meta.duplicateKey)) {
                                                             if (meta.isCurrentSnapshotObject(currentSnapshotMark[0])) {
@@ -542,7 +553,7 @@ public class LifecycleMoveTask {
                                                             //目标桶没开重删,需要去掉重删字段,加上自己的fileName
                                                             if (!isDup[0]) {
                                                                 meta.setDuplicateKey(null);
-                                                                meta.fileName = Utils.getObjFileName(targetPool, bucket, object, requestId);
+                                                                meta.fileName = Utils.getObjFileName(targetPool, bucket, objectWithVersionId, requestId);
                                                             }
                                                         } else {
                                                             if (!isDup[0]) {
@@ -550,7 +561,7 @@ public class LifecycleMoveTask {
                                                                 if (meta.isCurrentSnapshotObject(currentSnapshotMark[0])) {
                                                                     oldFileName.add(meta.fileName);
                                                                 }
-                                                                meta.fileName = Utils.getObjFileName(targetPool, bucket, object, requestId);
+                                                                meta.fileName = Utils.getObjFileName(targetPool, bucket, objectWithVersionId, requestId);
                                                             } else {
                                                                 if (meta.isCurrentSnapshotObject(currentSnapshotMark[0])) {
                                                                     oldFileName.add(oldDedupFileName.get(0));

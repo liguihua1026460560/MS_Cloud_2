@@ -430,8 +430,8 @@ public class Vnode {
 
                     nodeList = list;
                     msgList = nodeList.stream().map(tuple3 -> new SocketReqMsg("", 0)
-                                    .put("vNum", String.valueOf(num))
-                                    .put("priority", String.valueOf(-1)))
+                            .put("vNum", String.valueOf(num))
+                            .put("priority", String.valueOf(-1)))
                             .collect(Collectors.toList());
                 }
 
@@ -474,13 +474,13 @@ public class Vnode {
                     runningNodeSet.clear();
 
                     List<SocketReqMsg> msgList = nodeList.stream().map(tuple3 -> {
-                                long lastHeart = lastHeartMap.getOrDefault(tuple3.var1, -1L);
-                                return new SocketReqMsg("", 0)
-                                        .put("lastHeart", String.valueOf(lastHeart))
-                                        .put("priority", String.valueOf(getPriority(nodeList, RabbitMqUtils.CURRENT_IP)))
-                                        .put("vNum", String.valueOf(num))
-                                        .put("node", curNode);
-                            })
+                        long lastHeart = lastHeartMap.getOrDefault(tuple3.var1, -1L);
+                        return new SocketReqMsg("", 0)
+                                .put("lastHeart", String.valueOf(lastHeart))
+                                .put("priority", String.valueOf(getPriority(nodeList, RabbitMqUtils.CURRENT_IP)))
+                                .put("vNum", String.valueOf(num))
+                                .put("node", curNode);
+                    })
                             .collect(Collectors.toList());
 
                     AtomicInteger heartSuccessNum = new AtomicInteger();

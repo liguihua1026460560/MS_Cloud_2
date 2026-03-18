@@ -2,6 +2,8 @@ package com.macrosan.action.command;
 
 import com.macrosan.ec.error.DiskErrorHandler;
 import com.macrosan.ec.server.WriteCacheServer;
+import com.macrosan.filesystem.FsConstants;
+import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cache.*;
 import com.macrosan.filesystem.cifs.CIFS;
 import com.macrosan.filesystem.cifs.handler.SMBHandler;
@@ -13,6 +15,7 @@ import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.lock.redlock.RedLockServer;
 import com.macrosan.filesystem.nfs.NFS;
 import com.macrosan.filesystem.nfs.api.NFS3Proc;
+import com.macrosan.filesystem.nfs.api.NFS4Proc;
 import com.macrosan.filesystem.nfs.lock.NLMLockClient;
 import com.macrosan.filesystem.nfs.lock.NLMLockServer;
 import com.macrosan.filesystem.utils.IpWhitelistUtils;
@@ -203,6 +206,9 @@ public class FsCommand extends Reusable {
                     ACLUtils.init();
                     log.info("load s3IDtoGids: {}", ACLUtils.s3IDToGids);
                     break;
+                case "printWriteCache":
+                    WriteCacheNode.printWriteCache();
+                    break;
                 case "initWhiteList":
                     IpWhitelistUtils.init();
                     log.info("load initWhiteList: {}", IpWhitelistUtils.nfsIpWhitelistMap);
@@ -213,6 +219,16 @@ public class FsCommand extends Reusable {
                     boolean aclStart = Boolean.parseBoolean(args[1]);
                     ACLUtils.NFS_ACL_START = aclStart;
                     break;
+                case "updateFsPort":
+                    CliResponse updateFsPortRes = new CliResponse();
+                    try {
+                        int res = updateFsPort();
+                        updateFsPortRes.setStatus(String.valueOf(res));
+                    } catch (Exception e) {
+                        log.error("update fs port error, ", e);
+                        updateFsPortRes.setStatus("-1");
+                    }
+                    return updateFsPortRes;
                 case "updateFsId":
                     String msg = args[1];
                     CliResponse updateRes = new CliResponse();
@@ -361,6 +377,9 @@ public class FsCommand extends Reusable {
                     boolean localIpDebug = Boolean.parseBoolean(args[1]);
                     SMBHandler.localIpDebug = localIpDebug;
                     break;
+                case "nfs4ErrorDebug":
+                    boolean nfs4Debug = Boolean.parseBoolean(args[1]);
+                    NFS4Proc.errorDebug = nfs4Debug;
                 default:
             }
         } catch (Exception e) {
@@ -664,5 +683,77 @@ public class FsCommand extends Reusable {
         }
 
         return response;
+    }
+
+    public static int updateFsPort() {
+        try {
+            int nfsPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_PORT, NFS.nfsPort);
+            int mountPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_MOUNT_PORT, NFS.mountPort);
+            int nlmPort = FsUtils.getFsPort(FsConstants.FSConfig.NLM_PORT, NFS.nlmPort);
+            int nsmPort = FsUtils.getFsPort(FsConstants.FSConfig.NSM_PORT, NFS.nsmPort);
+            int nfsRQuotaPort = FsUtils.getFsPort(FsConstants.FSConfig.NFS_QUOTA_PORT, NFS.nfsRQuotaPort);
+
+            boolean isRestartNfs = false;
+            if (nfsPort != NFS.nfsPort) {
+                NFS.nfsPort = nfsPort;
+                isRestartNfs = true;
+            }
+
+            if (mountPort != NFS.mountPort) {
+                NFS.mountPort = mountPort;
+                isRestartNfs = true;
+            }
+
+            if (nlmPort != NFS.nlmPort) {
+                NFS.nlmPort = nlmPort;
+                isRestartNfs = true;
+            }
+
+            if (nsmPort != NFS.nsmPort) {
+                NFS.nsmPort = nsmPort;
+                isRestartNfs = true;
+            }
+
+            if (nfsRQuotaPort != NFS.nfsRQuotaPort) {
+                NFS.nfsRQuotaPort = nfsRQuotaPort;
+                isRestartNfs = true;
+            }
+
+            if (isRestartNfs) {
+                NFS.restart();
+            }
+
+
+            int cifsPort = FsUtils.getFsPort(FsConstants.FSConfig.CIFS_PORT, CIFS.cifsPort);
+            if (cifsPort != CIFS.cifsPort) {
+                CIFS.cifsPort = cifsPort;
+                CIFS.restart();
+            }
+
+            int ftpControllerPort = FsUtils.getFsPort(FsConstants.FSConfig.FTP_CONTROL_PORT, FTP.ftpControllerPort);
+            int ftpsControllerPort = FsUtils.getFsPort(FsConstants.FSConfig.FTPS_CONTROL_PORT, FTP.ftpsControllerPort);
+
+            boolean isRestartFtp = false;
+            if (ftpControllerPort != FTP.ftpControllerPort) {
+                FTP.ftpControllerPort = ftpControllerPort;
+                isRestartFtp = true;
+            }
+
+            if (ftpsControllerPort != FTP.ftpsControllerPort) {
+                FTP.ftpsControllerPort = ftpsControllerPort;
+                isRestartFtp = true;
+            }
+
+            if (isRestartFtp) {
+                FTP.restart();
+            }
+
+            log.info("update fs port success");
+        } catch (Exception e) {
+            log.error("update fs port error, ", e);
+            return -1;
+        }
+
+        return 1;
     }
 }

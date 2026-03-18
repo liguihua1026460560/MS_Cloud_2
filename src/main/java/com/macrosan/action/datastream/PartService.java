@@ -10,10 +10,10 @@ import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.cifs.notify.NotifyServer;
 import com.macrosan.filesystem.cifs.reply.smb2.NotifyReply;
-import com.macrosan.filesystem.utils.acl.ACLUtils;
 import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.filesystem.utils.InodeUtils;
+import com.macrosan.filesystem.utils.acl.ACLUtils;
 import com.macrosan.filesystem.utils.acl.S3ACL;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.httpserver.ServerConfig;
@@ -482,7 +482,7 @@ public class PartService extends BaseService {
                                             return Mono.error(new MsException(ErrorNo.UNKNOWN_ERROR, "Upload Part fail"));
                                         }
 
-                                        if (contentMD5 != null) {
+                                        if (contentMD5 != null && !PASSWORD.equals(request.getHeader(SYNC_AUTH))) {
                                             checkMd5(contentMD5, md5);
                                         }
                                         partInfo.setEtag(md5);
@@ -1431,7 +1431,7 @@ public class PartService extends BaseService {
                                 if (StringUtils.isBlank(md5)) {
                                     throw new MsException(UNKNOWN_ERROR, "Upload Part fail");
                                 }
-                                if (contentMd5 != null) {
+                                if (contentMd5 != null && !PASSWORD.equals(request.getHeader(SYNC_AUTH))) {
                                     checkMd5(contentMd5, md5);
                                 }
                             });

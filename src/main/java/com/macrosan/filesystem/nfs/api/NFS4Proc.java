@@ -35,6 +35,8 @@ import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.UnicastProcessor;
+import reactor.util.concurrent.Queues;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -66,9 +68,6 @@ import static com.macrosan.filesystem.nfs.delegate.DelegateLock.unDelegateMap;
 import static com.macrosan.filesystem.nfs.types.FAttr4.*;
 import static com.macrosan.filesystem.nfs.types.NFS4Session.SessionConnection.DEFAULT_ADDRESS;
 import static com.macrosan.filesystem.nfs.types.StateId.*;
-import static com.macrosan.filesystem.nfs.types.StateIdOps.DELEGATE_CONFLICT;
-import static com.macrosan.filesystem.nfs.types.StateIdOps.LOCK_CONFLICT;
-import static com.macrosan.filesystem.nfs.types.StateOwner.ANONYMOUS_STATE_OWNER;
 import static com.macrosan.filesystem.utils.InodeUtils.*;
 import static com.macrosan.filesystem.utils.Nfs4Utils.*;
 import static com.macrosan.message.jsonmsg.Inode.*;
@@ -83,7 +82,7 @@ public class NFS4Proc {
     public static int ROOT_FSID = -1;
     private static final RedisConnPool pool = RedisConnPool.getInstance();
     public static boolean debug = false;
-    public static AtomicBoolean delegateSwitch = new AtomicBoolean(true);
+    public static boolean errorDebug = false;
 
     private NFS4Proc() {
     }
@@ -541,22 +540,16 @@ public class NFS4Proc {
             }
             reqHeader.bucket = getBucketName(call.fh.fsid);
             reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
-            return CheckUtils.nfsOpenCheck(call.fh.fsid,reqHeader)
+            return CheckUtils.nfsOpenCheck(call.fh.fsid, reqHeader)
                     .flatMap(res -> {
                         if (!res) {
                             reply.status = NfsErrorNo.NFS3ERR_STALE;
                         } else {
                             return nodeInstance.getInode(reqHeader.bucket, call.fh.ino)
                                     .flatMap(i -> {
-                                        if (NOT_FOUND_INODE.equals(i)) {
-                                            reply.status = NfsErrorNo.NFS3ERR_STALE;
-                                        } else if (ERROR_INODE.equals(i)) {
-                                            reply.status = EIO;
-                                        } else {
-                                            context.currFh = call.fh;
-                                            context.currStateId = StateId.zeroStateId();
-                                            context.setCurrentInode(i);
-                                        }
+                                        context.currFh = call.fh;
+                                        context.currStateId = StateId.zeroStateId();
+                                        context.setCurrentInode(i);
                                         return Mono.just(reply);
                                     });
                         }
@@ -659,6 +652,7 @@ public class NFS4Proc {
                         clone.setObjName(bucketInfo.get("bucket_name"));
                         long bucketFsid = Long.parseLong(bucketInfo.get("fsid"));
                         clone.setCookie(bucketFsid);
+//                        clone.setNodeId(bucketFsid);
                         DirEntV4 entry = DirEntV4.mapDirEnt(clone, ROOT_FSID, call.mask, follows, minorVersion, dirBytesLength.get());
                         if (replySize + entry.size() >= call.maxCount - SunRpcHeader.SIZE) {
                             break;
@@ -741,7 +735,7 @@ public class NFS4Proc {
                     && "1".equals(RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hget(name, "nfs"))) {
                 int fsid = Integer.parseInt(RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hget(name, "fsid"));
                 Map<String, String> bucketInfo = RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hgetall(name);
-                if (!CheckUtils.siteCanAccess(bucketInfo)){
+                if (!CheckUtils.siteCanAccess(bucketInfo)) {
                     reply.status = NFS3ERR_ACCES;
                     return Mono.just(reply);
                 }
@@ -909,6 +903,10 @@ public class NFS4Proc {
                             InodeUtils.nfsCreate(reqHeader, dirInode, objAttr.mode, call.name, entryOutReply, call.context.currFh.fsid, callHeader, finalMkNodCall);
                 })
                 .flatMap(inode -> {
+                    if (entryOutReply.status != 0){
+                        reply.status = entryOutReply.status;
+                        return Mono.just(inode);
+                    }
                     if (InodeUtils.isError(inode) || checkSetAttr(objAttr)) {
                         return Mono.just(inode);
                     }
@@ -922,6 +920,9 @@ public class NFS4Proc {
                 .flatMap(i -> Node.getInstance().updateInodeTime(currentInode.getNodeId(), reqHeader.bucket, i.getMtime(), i.getMtimensec(), false, true, true)
                         .map(f -> i))
                 .map(inode -> {
+                    if (reply.status != 0){
+                        return reply;
+                    }
                     if (InodeUtils.isError(inode)) {
                         reply.status = EIO;
                     } else {
@@ -967,6 +968,7 @@ public class NFS4Proc {
             reply.status = NFS4ERR_GRACE;
             return Mono.just(reply);
         }
+        Inode currentInode = context.getCurrentInode();
         //todo 判断是否在宽限期
 //        if (clientControl.isGracePeriod() && call.claimType != NFS4_OPEN_CLAIM_NULL){
 //            reply.status = NFS4ERR_GRACE;
@@ -987,7 +989,6 @@ public class NFS4Proc {
                                 }));
         switch (call.claimType) {
             case NFS4_OPEN_CLAIM_NULL:
-                Inode currentInode = context.getCurrentInode();
                 Nfs4Utils.checkDirAndName(currentInode, call.name);
                 preMono.flatMap(result -> {
                     if (!result) {
@@ -1039,6 +1040,10 @@ public class NFS4Proc {
                         EntryOutReply entryOutReply = new EntryOutReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
                         InodeUtils.nfsCreate(reqHeader, dirNode, mode | S_IFREG, call.name, entryOutReply, fsid, callHeader, null)
                                 .flatMap(inode -> {
+                                    if (entryOutReply.status != 0){
+                                        reply.status = entryOutReply.status;
+                                        return Mono.just(inode);
+                                    }
                                     if (!InodeUtils.isError(inode) && call.createMode != CREATE_EXCLUSIVE && !checkSetAttr(call.fAttr4.objAttr)) {
                                         return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, call.fAttr4.objAttr, null)
                                                 .doOnNext(i -> {
@@ -1050,6 +1055,10 @@ public class NFS4Proc {
                                     return Mono.just(inode);
                                 })
                                 .subscribe(inode -> {
+                                    if (reply.status != 0){
+                                        res.onNext(reply);
+                                        return;
+                                    }
                                     if (InodeUtils.isError(inode)) {
                                         reply.status = EIO;
                                         res.onNext(reply);
@@ -1131,24 +1140,22 @@ public class NFS4Proc {
 //                                stateIdOps.
 //                            }
                             return stateIdOps.addOpen(client, owner, context, shareAccess, shareDeny, NFS4_OPEN_STID, openReply)
-                                    .flatMap(stateId -> {
+                                    .flatMap(state -> {
                                         if (openReply.status == 0) {
                                             //todo 未实现宽限期不可委托
                                             boolean canDelegate = (call.claimType == NFS4_OPEN_CLAIM_NULL || call.claimType == NFS4_OPEN_CLAIM_FH)
-                                                    && call.openType != OPEN_CREATE && minorVersion >= 1 && (call.want & OPEN_SHARE_ACCESS_WANT_NO_DELEG) == 0;
-                                            return stateIdOps.checkOpenAndLock(context.getCurrentInode(), owner, shareAccess, shareDeny, stateId, context, canDelegate)
+                                                    && (call.openType != OPEN_CREATE || (call.openType == OPEN_CREATE && call.shareAccess == OPEN_SHARE_ACCESS_WRITE))
+                                                    && minorVersion >= 1 && (call.want & OPEN_SHARE_ACCESS_WANT_NO_DELEG) == 0 && (context.getCurrentInode().getMode() & S_IFMT) != S_IFDIR;
+                                            return stateIdOps.checkOpen(context.getCurrentInode(), owner, state.getShareAccess(), state.getShareDeny(), state.stateId(), context, canDelegate)
                                                     .flatMap(delegate -> {
-                                                        if (delegate == 0) {
-                                                            return stateIdOps.addDelegate(client, context, owner, shareAccess, shareDeny, call, openReply, stateId, canDelegate).map(f -> openReply);
-                                                        }
-                                                        return Mono.just(openReply);
+                                                        return stateIdOps.addDelegate(client, context, owner, state.getShareAccess(), state.getShareDeny(), call, openReply, state.stateId(), canDelegate, delegate).map(f -> openReply);
                                                     }).doOnNext(f -> {
-                                                        reply.resultFlags = OPEN4_RESULT_LOCKTYPE_POSIX;
+                                                        reply.resultFlags = OPEN4_RESULT_LOCKTYPE_POSIX | OPEN4_RESULT_MAY_NOTIFY_LOCK;
                                                         if (minorVersion == 0) {
                                                             reply.resultFlags = reply.resultFlags | OPEN4_RESULT_CONFIRM;
                                                         }
-                                                        context.currStateId = stateId;
-                                                        reply.stateId = stateId;
+                                                        context.currStateId = state.stateId();
+                                                        reply.stateId = state.stateId();
                                                     });
 
                                         }
@@ -1178,7 +1185,7 @@ public class NFS4Proc {
             reply.status = NFS3ERR_INVAL;
             return Mono.just(reply);
         }
-        Inode currentInode = context.getCurrentInode();
+//        Inode currentInode = context.getCurrentInode();
         StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
         NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
         return client.openDownGrade(context, client, stateId, shareAccess, shareDeny, call.seqId, reply)
@@ -1205,7 +1212,7 @@ public class NFS4Proc {
         Nfs4Utils.checkNotDirAndSym(currentInode);
         StateId stateId = call.stateId;
         NFS4Client client = clientControl.getClient(stateId);
-        NFS4State openState = client.openConfirm(stateId, call.seqId);
+        NFS4State openState = client.openConfirm(context, stateId, call.seqId);
         reply.stateId = openState.stateId();
         context.currStateId = openState.stateId();
         return Mono.just(reply);
@@ -1228,34 +1235,28 @@ public class NFS4Proc {
                     }
                     return Mono.just(context.getCurrentInode());
                 }).flatMap(i -> {
-                    if (mask.length > 0 && (mask[0] & size) != 0) {
-                        //修改文件size并且stateId不是特殊id,open时检查了lock和delegation,此处不检查
-                        if (!StateId.isStateLess(call.stateId)) {
-                            StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
-                            NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
-                            NFS4State state = client.state(stateId, reply);
-                            if (reply.status != 0) {
-                                return Mono.just(i);
-                            }
-                            if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
-                                reply.status = NFS4ERR_OPENMODE;
-                            }
+                    //stateId不是特殊id,open时检查了lock和delegation,此处不检查
+                    if (!StateId.isStateLess(call.stateId)) {
+                        StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
+                        NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
+
+                        NFS4State state = client.state(stateId, reply);
+                        if (reply.status != 0) {
                             return Mono.just(i);
-                        } else {
-                            return clientControl.getStateIdOps().hasDelegateAndLockConflict(i, ANONYMOUS_STATE_OWNER, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context)
-                                    .flatMap(b -> {
-                                        if (b == LOCK_CONFLICT) {
-                                            reply.status = NFS4ERR_LOCKED;
-//                                            return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not setAttr , exist lock"));
-                                        } else if (b == DELEGATE_CONFLICT) {
-                                            reply.status = NFS4ERR_DELAY;
-//                                            return Mono.error(new NFSException(NFS4ERR_DELAY, "can not setAttr , exist delegation"));
-                                        }
-                                        return Mono.just(i);
-                                    });
                         }
+                        if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
+                            reply.status = NFS4ERR_OPENMODE;
+                        }
+                        return Mono.just(i);
+                    } else {
+                        return clientControl.getStateIdOps().hasDelegateConflict(i, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
+                                .flatMap(b -> {
+                                    if (b) {
+                                        reply.status = NFS4ERR_DELAY;
+                                    }
+                                    return Mono.just(i);
+                                });
                     }
-                    return Mono.just(i);
                 })
                 .flatMap(inode -> {
                     if (reply.status != 0) {
@@ -1283,25 +1284,20 @@ public class NFS4Proc {
         long nodeId = context.currFh.ino;
         StateIdReply reply = new StateIdReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_CLOSE.opcode;
-        Inode currentInode = context.getCurrentInode();
+//        Inode currentInode = context.getCurrentInode();
         StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
         NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
-        NFS4State openState = client.state(stateId);
-        StateId.checkStateId(openState.stateId(), stateId);
-        if (context.getMinorVersion() == 0) {
-            openState.getStateOwner().incrSequence(call.seqId);
-            client.updateLeaseTime();
-        }
         //释放所有stateId以及关联lockStateId和lock
-        client.tryReleaseState(stateId, NFS4_OPEN_STID);
         reply.stateId = StateId.invalidStateId();
-        return Mono.just(reply);
+        return client.tryReleaseState(context, stateId, NFS4_OPEN_STID, call.seqId).map(f -> reply);
     }
 
     @NFSV4.Opt(NFSV4.Opcode.NFS4PROC_REMOVE)
     public Mono<RpcReply> remove(RpcCallHeader callHeader, ReqInfo reqHeader, RemoveV4Call call) {
-        long start = System.currentTimeMillis();
         CompoundContext context = call.context;
+        checkIsRoot(context.currFh.fsid);
+        reqHeader.bucket = getBucketName(context.currFh.fsid);
+        long start = System.currentTimeMillis();
         checkIsRoot(context.currFh.fsid);
         reqHeader.bucket = getBucketName(context.currFh.fsid);
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
@@ -1313,6 +1309,7 @@ public class NFS4Proc {
         Inode currentInode = context.getCurrentInode();
         Nfs4Utils.checkDirAndName(currentInode, call.name);
         String name = new String(call.name);
+        boolean esSwitch = ES_ON.equals(reqHeader.bucketInfo.get(ES_SWITCH));
         boolean[] isRmDirErr = new boolean[1];
         boolean[] isRepeat = new boolean[1];
         long optTime = System.currentTimeMillis();
@@ -1384,20 +1381,37 @@ public class NFS4Proc {
                         reply.status = NfsErrorNo.NFS3ERR_ROFS;
                         return Mono.just(reply);
                     } else {
-                        return nodeInstance.deleteInode(inode.getNodeId(), bucketName, objName[0])
-                                .flatMap(inode1 -> {
-                                    return nodeInstance.updateInodeTime(dirInodes[0].getNodeId(), bucketName, inode1.getCtime(), inode1.getCtimensec(), false, true, true)
-                                            .map(i0 -> {
-                                                if (isError(inode1)) {
-                                                    reply.status = EIO;
-                                                } else {
-                                                    long end = System.currentTimeMillis();
-                                                    if (end - start > 55_000L) {
-                                                        NFSHandler.delTimeout.put(currentInode.getNodeId(), end);
-                                                    }
-                                                    reply.status = OK;
-                                                }
-                                                return reply;
+//                        if (clientControl.getStateIdOps().existOpen(context.getCurrentInode().getNodeId())) {
+//                            reply.status = NFS4ERR_FILE_OPEN;
+//                            return Mono.just(reply);
+//                        }
+                        return clientControl.getStateIdOps().hasDelegateConflict(inode, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
+                                .flatMap(conflict -> {
+                                    if (conflict) {
+                                        reply.status = NFS4ERR_DELAY;
+                                        return Mono.just(reply);
+                                    }
+                                    return nodeInstance.deleteInode(inode.getNodeId(), bucketName, objName[0])
+                                            .flatMap(inode1 -> {
+                                                return nodeInstance.updateInodeTime(dirInodes[0].getNodeId(), bucketName, inode1.getCtime(), inode1.getCtimensec(), false, true, true)
+                                                        .map(i0 -> {
+                                                            if (isError(inode1)) {
+                                                                reply.status = EIO;
+                                                            } else {
+                                                                long end = System.currentTimeMillis();
+                                                                if (end - start > 55_000L) {
+                                                                    NFSHandler.delTimeout.put(currentInode.getNodeId(), end);
+                                                                }
+                                                                reply.status = OK;
+                                                            }
+                                                            return reply;
+                                                        }).flatMap(i -> {
+                                                            if (esSwitch && !isError(inode1)) {
+                                                                return EsMetaTask.delEsMeta(inode1.clone().setObjName(objName[0]), inode.clone().setObjName(objName[0]), bucketName, objName[0], inode.getNodeId(), true)
+                                                                        .map(b0 -> reply);
+                                                            }
+                                                            return Mono.just(reply);
+                                                        });
                                             });
                                 });
                     }
@@ -1440,13 +1454,11 @@ public class NFS4Proc {
                         StateIdOps stateIdOps = clientControl.getStateIdOps();
                         return stateIdOps.checkDeny(currentInode, OPEN_SHARE_DENY_WRITE).flatMap(b -> {
                             if (!b) {
-                                return Mono.error(new NFSException(NFS4ERR_SHARE_DENIED, "can not read , share deny read"));
+                                return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not read , share deny write"));
                             }
-                            return stateIdOps.hasDelegateAndLockConflict(i, ANONYMOUS_STATE_OWNER, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context);
+                            return stateIdOps.hasDelegateConflict(currentInode, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true);
                         }).flatMap(b -> {
-                            if (b == LOCK_CONFLICT) {
-                                return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not write , exist lock"));
-                            } else if (b == DELEGATE_CONFLICT) {
+                            if (b) {
                                 return Mono.error(new NFSException(NFS4ERR_DELAY, "can not write , exist delegation"));
                             }
                             return Mono.just(i);
@@ -1466,30 +1478,34 @@ public class NFS4Proc {
                         return Mono.just(reply);
                     }
                     inodes[0] = inode;
-                    return WriteCache.getCache(bucketName, context.currFh.ino, call.stable, inode.getStorage())
-                            .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.contents, inode, call.stable))
-                            .map(b -> {
-                                reply.count = call.writeLen;
-                                reply.committed = call.stable;
+                    return FSQuotaUtils.checkFsQuota(inode)
+                            .flatMap(i->{
+                                return WriteCache.getCache(bucketName, context.currFh.ino, call.stable, inode.getStorage())
+                                        .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.contents, inode, call.stable))
+                                        .map(b -> {
+                                            reply.count = call.writeLen;
+                                            reply.committed = call.stable;
 
-                                if (!b) {
-                                    reply.status = NfsErrorNo.NFS3ERR_I0;
-                                } else {
-                                    reply.status = 0;
-                                    inode.setSize(call.offset + call.writeLen);
-                                }
-                                return (RpcReply) reply;
-                            }).onErrorResume(e -> {
-                                log.error("", e);
-                                reply.status = NfsErrorNo.NFS3ERR_I0;
-                                if (e instanceof NFSException) {
-                                    int stat = ((NFSException) e).getErrCode();
-                                    if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
-                                        reply.status = NfsErrorNo.NFS3ERR_DQUOT;
-                                    }
-                                }
-                                return Mono.just(reply);
+                                            if (!b) {
+                                                reply.status = NfsErrorNo.NFS3ERR_I0;
+                                            } else {
+                                                reply.status = 0;
+                                                inode.setSize(call.offset + call.writeLen);
+                                            }
+                                            return (RpcReply) reply;
+                                        }).onErrorResume(e -> {
+                                            log.error("", e);
+                                            reply.status = NfsErrorNo.NFS3ERR_I0;
+                                            if (e instanceof NFSException) {
+                                                int stat = ((NFSException) e).getErrCode();
+                                                if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                                    reply.status = NfsErrorNo.NFS3ERR_DQUOT;
+                                                }
+                                            }
+                                            return Mono.just(reply);
+                                        });
                             });
+
 
                 });
     }
@@ -1522,15 +1538,13 @@ public class NFS4Proc {
                         StateIdOps stateIdOps = clientControl.getStateIdOps();
                         return stateIdOps.checkDeny(currentInode, OPEN_SHARE_DENY_READ).flatMap(b -> {
                                     if (!b) {
-                                        return Mono.error(new NFSException(NFS4ERR_SHARE_DENIED, "can not read , share deny read"));
+                                        return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not read , share deny read"));
                                     } else {
-                                        return stateIdOps.hasDelegateAndLockConflict(currentInode, ANONYMOUS_STATE_OWNER, OPEN_SHARE_ACCESS_READ, OPEN_SHARE_DENY_NONE, context);
+                                        return stateIdOps.hasDelegateConflict(currentInode, OPEN_SHARE_ACCESS_READ, OPEN_SHARE_DENY_NONE, context, null, true);
                                     }
                                 })
                                 .flatMap(b -> {
-                                    if (b == LOCK_CONFLICT) {
-                                        return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not read , exist lock"));
-                                    } else if (b == DELEGATE_CONFLICT) {
+                                    if (b) {
                                         return Mono.error(new NFSException(NFS4ERR_DELAY, "can not read , exist delegation"));
                                     }
                                     return Mono.just(lock);
@@ -1934,76 +1948,104 @@ public class NFS4Proc {
                                 .doOnNext(r2 -> releaseLock(reqHeader, r2));
                     }
 
-//                    Mono<Boolean> checkRes = clientControl.getStateIdOps().hasDelegateAndLockConflict(oldInode[0], ANONYMOUS_STATE_OWNER, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context)
-//                            .flatMap(b -> {
-//                                if (b == LOCK_CONFLICT) {
-//                                    reply.status = NFS4ERR_LOCKED;
-//                                    return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not setAttr , exist lock"));
-//                                } else if (b == DELEGATE_CONFLICT) {
-//                                    reply.status = NFS4ERR_DELAY;
-//                                    return Mono.error(new NFSException(NFS4ERR_DELAY, "can not setAttr , exist delegation"));
-//                                }
-//                                return Mono.just(b == 0);
-//                            });
-                    Mono<Boolean> checkRes = Mono.just(true);
                     // 如果更改的为目录
                     if (dir.get()) {
                         // 如果更新后的目录名已经存在，则检查这个新的目录名之下是否还有与旧目录名称相同的dirInode
-                        return checkRes.flatMap(b -> Mono.just(overWrite.get()))
-                                .flatMap(isOverWrite -> {
-                                    return FSQuotaUtils.canRename(bucket, oldInode[0].getNodeId(), newInode[0])
-                                            .flatMap(can -> {
-                                                if (!can) {
-                                                    reply.status = NfsErrorNo.NFS3ERR_I0;
-                                                    return Mono.just(reply)
-                                                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
-                                                }
-                                                if (isOverWrite) {
-                                                    String prefix = newInode[0].getObjName();
-                                                    return ReadDirCache.listAndCache(bucket, prefix, 0, 4096, reqHeader.nfsHandler, newInode[0].getNodeId(), null, newInode[0].getACEs())
-                                                            .flatMap(list1 -> {
-                                                                if (!list1.isEmpty()) {
-                                                                    log.error("directory already exists: {}", newObjName0[0]);
-                                                                    reply.status = NFS3ERR_EXIST;
-                                                                    return Mono.just(reply)
-                                                                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
-                                                                }
+                        return clientControl.getStateIdOps().hasDelegateConflict(oldInode[0], OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
+                                .flatMap(b -> {
+                                    if (b) {
+                                        reply.status = NFS4ERR_DELAY;
+                                        return Mono.just(reply);
+                                    }
+                                    return Mono.just(overWrite.get())
+                                            .flatMap(isOverWrite -> {
+                                                return FSQuotaUtils.canRename(bucket, oldInode[0].getNodeId(), newInode[0])
+                                                        .flatMap(can -> {
+                                                            if (!can) {
+                                                                reply.status = NfsErrorNo.NFS3ERR_I0;
+                                                                return Mono.just(reply)
+                                                                        .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                                            }
+                                                            if (isOverWrite) {
+                                                                String prefix = newInode[0].getObjName();
+                                                                return ReadDirCache.listAndCache(bucket, prefix, 0, 4096, reqHeader.nfsHandler, newInode[0].getNodeId(), null, newInode[0].getACEs())
+                                                                        .flatMap(list1 -> {
+                                                                            if (!list1.isEmpty()) {
+                                                                                log.error("directory already exists: {}", newObjName0[0]);
+                                                                                reply.status = NfsErrorNo.NFS3ERR_EXIST;
+                                                                                return Mono.just(reply)
+                                                                                        .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                                                            }
+                                                                            if (newObjName0[0].startsWith(oldInode[0].getObjName())) {
+                                                                                reply.status = NfsErrorNo.NFS3ERR_INVAL;
+                                                                                return Mono.just(reply)
+                                                                                        .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                                                            }
+                                                                            MonoProcessor<ReNameV4Reply> reNameReplyRes = MonoProcessor.create();
+                                                                            Mono.defer(() -> scanAndReName0(oldInode[0], bucket, newObjName0[0], 0, reqHeader, reply, dirInodes, context.saveFh.fsid))
+                                                                                    .doOnSubscribe(subscription -> {
+                                                                                        reqHeader.optCompleted = false;
+                                                                                    })
+                                                                                    .doOnNext(reply0 -> {
+                                                                                        reqHeader.optCompleted = true;
+                                                                                        if (!reqHeader.timeout) {
+                                                                                            deleteRequestInodeTimeMap(oldObjectName.get(), optTime);
+                                                                                        }
+                                                                                        reNameReplyRes.onNext(reply0);
+                                                                                    })
+                                                                                    .subscribe();
+                                                                            return reNameReplyRes;
+                                                                        });
+                                                            } else {
+                                                                // 将oldInode视为dirInode，遍历该目录下的所有子目录与文件
+                                                                // 重命名时不需要再get新的inode，直接rename即可
                                                                 if (newObjName0[0].startsWith(oldInode[0].getObjName())) {
                                                                     reply.status = NfsErrorNo.NFS3ERR_INVAL;
                                                                     return Mono.just(reply)
                                                                             .doOnNext(r2 -> releaseLock(reqHeader, r2));
                                                                 }
-                                                                return scanAndReName0(oldInode[0], bucket, newObjName0[0], 0, reqHeader, reply, dirInodes, context.saveFh.fsid);
-                                                            });
-                                                } else {
-                                                    if (newObjName0[0].startsWith(oldInode[0].getObjName())) {
-                                                        reply.status = NfsErrorNo.NFS3ERR_INVAL;
-                                                        return Mono.just(reply)
-                                                                .doOnNext(r2 -> releaseLock(reqHeader, r2));
-                                                    }
-                                                    // 将oldInode视为dirInode，遍历该目录下的所有子目录与文件
-                                                    // 重命名时不需要再get新的inode，直接rename即可
-                                                    return scanAndReName0(oldInode[0], bucket, newObjName0[0], 0, reqHeader, reply, dirInodes, context.saveFh.fsid);
-                                                }
+                                                                MonoProcessor<ReNameV4Reply> reNameReplyRes = MonoProcessor.create();
+                                                                Mono.defer(() -> scanAndReName0(oldInode[0], bucket, newObjName0[0], 0, reqHeader, reply, dirInodes, context.saveFh.fsid))
+                                                                        .doOnSubscribe(subscription -> {
+                                                                            reqHeader.optCompleted = false;
+                                                                        })
+                                                                        .doOnNext(reply0 -> {
+                                                                            reqHeader.optCompleted = true;
+                                                                            if (!reqHeader.timeout) {
+                                                                                deleteRequestInodeTimeMap(oldObjectName.get(), optTime);
+                                                                            }
+                                                                            reNameReplyRes.onNext(reply0);
+                                                                        })
+                                                                        .subscribe();
+                                                                return reNameReplyRes;
+                                                            }
+                                                        });
                                             });
                                 });
                     } else {
                         // 如果更改的为文件
-                        return checkRes.flatMap(b -> renameFile(oldInode[0].getNodeId(), newInode[0], oldObjName0[0], newObjName0[0], bucket, overWrite.get()))
-                                .flatMap(inode -> {
-                                    if (isError(inode) || inode.isDeleteMark()) {
-                                        if (NOT_FOUND_INODE.getLinkN() == inode.getLinkN() || inode.isDeleteMark()) {
-                                            reply.status = NfsErrorNo.NFS3ERR_NOENT;
-                                        }
-                                        if (ERROR_INODE.getLinkN() == inode.getLinkN()) {
-                                            reply.status = NfsErrorNo.NFS3ERR_I0;
-                                        }
-                                        return Mono.just(reply)
-                                                .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                        return clientControl.getStateIdOps().hasDelegateConflict(oldInode[0], OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
+                                .flatMap(b -> {
+                                    if (b) {
+                                        reply.status = NFS4ERR_DELAY;
+                                        return Mono.just(reply);
                                     }
-                                    return Mono.just(inode)
-                                            .flatMap(i -> updateTime(dirInodes, reply, bucket))
-                                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                    return renameFile(oldInode[0].getNodeId(), newInode[0], oldObjName0[0], newObjName0[0], bucket, overWrite.get(), new AtomicInteger(0))
+                                            .flatMap(inode -> {
+                                                if (isError(inode) || inode.isDeleteMark()) {
+                                                    if (NOT_FOUND_INODE.getLinkN() == inode.getLinkN() || inode.isDeleteMark()) {
+                                                        reply.status = NfsErrorNo.NFS3ERR_NOENT;
+                                                    }
+                                                    if (ERROR_INODE.getLinkN() == inode.getLinkN()) {
+                                                        reply.status = NfsErrorNo.NFS3ERR_I0;
+                                                    }
+                                                    return Mono.just(reply)
+                                                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                                }
+                                                return Mono.just(inode)
+                                                        .flatMap(i -> updateTime(dirInodes, reply, bucket))
+                                                        .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                                            });
                                 });
 
                     }
@@ -2011,6 +2053,12 @@ public class NFS4Proc {
                 .map(res -> (RpcReply) res)
                 .doFinally(s -> {
                     deleteRequestInodeTimeMap(oldObjectName.get(), optTime);
+                    if (reqHeader.optCompleted && !reqHeader.repeat) {
+                        deleteRequestInodeTimeMap(oldObjectName.get(), optTime);
+                    } else {
+                        log.info("rename running {}", oldObjectName.get());
+                    }
+                    reqHeader.timeout = true;
                 });
     }
 
@@ -2052,7 +2100,13 @@ public class NFS4Proc {
         }
     }
 
-    public Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String bucket, boolean isOverWrite) {
+    public Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String bucket, boolean isOverWrite, AtomicInteger renameNum) {
+        if (renameNum != null) {
+            int num = renameNum.incrementAndGet();
+            if ((num % 100000) == 0) {
+                log.info("rename {} --> {}, num:{}", oldObjName, newObjName, num);
+            }
+        }
         boolean esSwitch = ES_ON.equals(NFSBucketInfo.getBucketInfo(bucket).get(ES_SWITCH));
         return Mono.just(isOverWrite)
                 .flatMap(b -> {
@@ -2103,9 +2157,56 @@ public class NFS4Proc {
      * @param bucket     桶名
      * @param count      offset
      **/
-    public Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler nfsHandler) {
-        String prefix = dirInode.getObjName();
+    public Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler nfsHandler, AtomicInteger renameNum) {
+        MonoProcessor<Boolean> res = MonoProcessor.create();
         AtomicLong offset = new AtomicLong(count);
+        UnicastProcessor<Boolean> listController = UnicastProcessor.create(Queues.<Boolean>unboundedMultiproducer().get());
+        listController.concatMap(isEmpty -> {
+                    // 如果是非空的话则继续往下遍历；如果是空的话结束遍历，直接更改当前目录本身
+                    return scanAndReNamePart(dirInode, bucket, newObjName, offset, nfsHandler, renameNum)
+                            .flatMap(list -> {
+                                if (!list.isEmpty()) {
+                                    listController.onNext(false);
+                                    return Mono.just(false);
+                                } else {
+                                    listController.onComplete();
+                                    return Mono.just(true);
+                                }
+                            })
+                            .onErrorResume(throwable -> {
+                                listController.onComplete();
+                                res.onError(throwable);
+                                return Mono.just(false);
+                            });
+                })
+                .doOnComplete(() -> {
+                    res.onNext(true);
+                })
+                .subscribe();
+        listController.onNext(false);
+        return res
+                .flatMap(ignore -> renameFile(dirInode.getNodeId(), null, dirInode.getObjName(), newObjName, bucket, false, renameNum))
+                .onErrorResume(throwable -> Mono.just(ERROR_INODE));
+    }
+
+    public Mono<ReNameV4Reply> scanAndReName0(Inode oldInode, String bucket, String newObjName, long offset, ReqInfo reqHeader, ReNameV4Reply reNameReply, Inode[] dirInodes, long fsid) {
+        AtomicInteger renameNum = new AtomicInteger();
+        return scanAndReName(oldInode, bucket, newObjName, offset, reqHeader.nfsHandler, renameNum)
+                .flatMap(inode -> {
+                    if (isError(inode)) {
+                        log.info("rename {}->{} fail: {}", oldInode.getObjName(), newObjName, inode.getLinkN());
+                    }
+                    if (renameNum.get() >= 100000) {
+                        log.info("renameNum {}", renameNum.get());
+                    }
+                    return updateTime(dirInodes, reNameReply, bucket)
+                            .onErrorReturn(reNameReply)
+                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
+                });
+    }
+
+    public Mono<List<Inode>> scanAndReNamePart(Inode dirInode, String bucket, String newObjName, AtomicLong offset, NFSHandler nfsHandler, AtomicInteger renameNum) {
+        String prefix = dirInode.getObjName();
         return ReadDirCache.listAndCache(bucket, prefix, offset.get(), 1 << 20, nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
                 .flatMap(list -> {
                     if (list.size() > 0) {
@@ -2124,37 +2225,15 @@ public class NFS4Proc {
                         if (!curNewName.endsWith("/")) {
                             curNewName = curNewName + "/";
                         }
-                        return scanAndReName(inode, bucket, curNewName, 0, nfsHandler);
+                        return scanAndReName(inode, bucket, curNewName, 0, nfsHandler, renameNum);
                     } else {
                         // 如果是文件则进行重命名
-                        return renameFile(inode.getNodeId(), null, curOldName, curNewName, bucket, false);
+                        return renameFile(inode.getNodeId(), null, curOldName, curNewName, bucket, false, renameNum);
                     }
                 })
-                .collectList()
-                .flatMap(list -> {
-                    // 如果是非空的话则继续往下遍历；如果是空的话直接更改当前目录本身
-                    return ReadDirCache.listAndCache(bucket, dirInode.getObjName(), offset.get(), 4096, nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
-                            .flatMap(list0 -> {
-                                if (list0.isEmpty()) {
-                                    return renameFile(dirInode.getNodeId(), null, dirInode.getObjName(), newObjName, bucket, false);
-                                } else {
-                                    return scanAndReName(dirInode, bucket, newObjName, offset.get(), nfsHandler);
-                                }
-                            });
-                })
-                .onErrorReturn(ERROR_INODE);
+                .collectList();
     }
 
-    public Mono<ReNameV4Reply> scanAndReName0(Inode oldInode, String bucket, String newObjName, long offset, ReqInfo reqHeader, ReNameV4Reply reNameReply, Inode[] dirInodes, long fsid) {
-        return scanAndReName(oldInode, bucket, newObjName, offset, reqHeader.nfsHandler)
-                .flatMap(inode -> {
-                    if (isError(inode)) {
-                        log.info("rename {}->{} fail: {}", oldInode.getObjName(), newObjName, inode.getLinkN());
-                    }
-                    return updateTime(dirInodes, reNameReply, bucket)
-                            .doOnNext(r2 -> releaseLock(reqHeader, r2));
-                });
-    }
 
     public Mono<ReNameV4Reply> releaseLock(ReqInfo reqHeader, ReNameV4Reply reply) {
         if (!reqHeader.lock.isEmpty()) {
@@ -2184,8 +2263,11 @@ public class NFS4Proc {
         client = call.isNewOwner ? context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getConfirmedClient(call.clientId)
                 : clientControl.getClient(oldStateId);
         NFS4State lockState = client.lockState(context, client, oldStateId, call.owner, call.lockSeqId, call.seqId, call.isNewOwner);
-        //写锁检查shareAccess是否只读
-        NFS4Lock nfs4Lock = NFS4Lock.newLock(call.lockType, lockState.getStateOwner(), call.offset, call.length, node, client.getClientId());
+        byte[] sessionId = context.minorVersion >= 1 ? context.getSessionId() : new byte[0];
+        NFS4Lock nfs4Lock = NFS4Lock.newLock(call.lockType, lockState.getStateOwner(), call.offset, call.length, node,
+                client.getClientId(), context.minorVersion, sessionId, FH2.mapToFH2(inode, context.currFh.fsid));
+        nfs4Lock.clientLock = true;
+        nfs4Lock.clientUnLock = true;
         return Mono.just(true).flatMap(b -> {
                     if (call.lockType == WRITEW_LT || call.lockType == WRITE_LT) {
                         NFS4State state = lockState.getOpenState();
@@ -2194,16 +2276,17 @@ public class NFS4Proc {
                         }
                     }
                     return Mono.just(true);
-                }).flatMap(b -> NFS4LockClient.lock(inode.getBucket(), inode.getObjName(), nfs4Lock))
+                }).flatMap(b -> NFS4LockClient.lock(inode.getBucket(), String.valueOf(inode.getNodeId()), nfs4Lock))
                 .flatMap(lock -> {
                     if (NFS4Lock.ERROR_LOCK.equals(lock)) {
+                        client.removeState(lockState.stateId());
                         reply.status = EIO;
                     } else if (NFS4Lock.DEFAULT_LOCK.equals(lock)) {
-                        lockState.incrSeqId();
                         context.setCurrStateId(lockState.stateId());
                         reply.stateId = lockState.stateId();
-                        lockState.addLockDispose(nfs4Lock, s -> NFS4LockClient.unLock(inode.getBucket(), inode.getObjName(), nfs4Lock).subscribe());
+                        lockState.addLockDispose(nfs4Lock, s -> NFS4LockClient.unLockOrRemoveWait(inode.getBucket(), String.valueOf(inode.getNodeId()), nfs4Lock).map(f -> true));
                     } else {
+                        client.removeState(lockState.stateId());
                         reply.status = NFS4ERR_DENIED;
                         reply.lockType = lock.lockType;
                         reply.offset = lock.offset;
@@ -2236,8 +2319,11 @@ public class NFS4Proc {
             lockOwner.incrSequence(call.seqId);
         }
         String node = ServerConfig.getInstance().getHostUuid();
-        NFS4Lock nfs4Lock = NFS4Lock.newLock(call.lockType, lockOwner, call.offset, call.length, node, client.getClientId());
-        return NFS4LockClient.unLock(inode.getBucket(), inode.getObjName(), nfs4Lock)
+        byte[] sessionId = context.minorVersion >= 1 ? context.getSessionId() : new byte[0];
+        NFS4Lock nfs4Lock = NFS4Lock.newLock(call.lockType, lockOwner, call.offset, call.length, node,
+                client.getClientId(), context.minorVersion, sessionId, FH2.mapToFH2(inode, context.currFh.fsid));
+        nfs4Lock.clientUnLock = true;
+        return NFS4LockClient.unLockOrRemoveWait(inode.getBucket(), String.valueOf(inode.getNodeId()), nfs4Lock)
                 .flatMap(lock -> {
                     if (NFS4Lock.ERROR_LOCK.equals(lock)) {
                         reply.status = EIO;
@@ -2274,8 +2360,7 @@ public class NFS4Proc {
         String bucket = reqHeader.bucket;
         NFS4Client client = context.getSession().getClient();
         StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
-        client.releaseState(stateId, NFS4_LOCK_STID);
-        return Mono.just(reply);
+        return  client.releaseState(stateId, NFS4_LOCK_STID).map(v -> reply);
     }
 
     @NFSV4.Opt(NFSV4.Opcode.NFS4PROC_TEST_STATEID)
@@ -2322,10 +2407,7 @@ public class NFS4Proc {
         Inode inode = context.getCurrentInode();
         Nfs4Utils.checkNotDir(inode);
         NFS4Client client = clientControl.getClient(call.stateId);
-        NFS4State openState = client.state(call.stateId);
-        client.tryReleaseState(call.stateId, NFS4_DELEG_STID);
-
-        return Mono.just(reply);
+        return client.tryReleaseState(context, call.stateId, NFS4_DELEG_STID, 0).map(v -> reply);
     }
 
 
@@ -2341,9 +2423,8 @@ public class NFS4Proc {
             return Mono.just(reply);
         }
         NFS4Client client = clientControl.getConfirmedClient(call.clientId);
-        client.releaseOwner(call.owner);
         client.updateLeaseTime();
-        return Mono.just(reply);
+        return client.releaseOwner(call.owner).map(v -> reply);
     }
 
     @NFSV4.Opt(NFSV4.Opcode.NFS4PROC_VERIFY)
@@ -2557,19 +2638,19 @@ public class NFS4Proc {
             NFS4Session session0 = null;
             if (client0 != null) {
                 session0 = client0.getSession0(delegateLock.sessionId);
-                if (session0 != null) {
-                    if (session0.recallQueue.isEmpty()) {
-                        session0.canSend.set(true);
-                    } else {
-                        Tuple2<CompoundCall, DelegateLock> poll = session0.recallQueue.poll();
-                        if (poll != null) {
-                            session0.nfsHandler.write(poll.var1);
-                            poll.var2.sendCheck(poll, session0);
-                        } else {
-                            session0.canSend.set(true);
-                        }
-                    }
-                }
+//                if (session0 != null) {
+//                    if (session0.recallQueue.isEmpty()) {
+//                        session0.canSend.set(true);
+//                    } else {
+//                        Tuple2<CompoundCall, Lock> poll = session0.recallQueue.poll();
+//                        if (poll != null) {
+//                            session0.nfsHandler.write(poll.var1);
+//                            poll.var2.sendCheck(poll, session0);
+//                        } else {
+//                            session0.canSend.set(true);
+//                        }
+//                    }
+//                }
             }
             if (reply.status != 0) {
                 if (reply.status == NFS3ERR_BADHANDLE) {
@@ -2577,8 +2658,8 @@ public class NFS4Proc {
                     return nodeInstance.getInode(delegateLock.bucket, delegateLock.nodeId)
                             .map(InodeUtils::isError).flatMap(b -> {
                                 if (b) {
-                                    NFSHandler.CBInfoMap.remove(replyHeader.getHeader().id);
-                                    DelegateLock.sendDelegateMap.remove(replyHeader.getHeader().id);
+//                                    NFSHandler.CBInfoMap.remove(replyHeader.getHeader().id);
+//                                    DelegateLock.sendDelegateMap.remove(replyHeader.getHeader().id);
                                     return DelegateClient.unLock(delegateLock.bucket, String.valueOf(delegateLock.nodeId), delegateLock);
                                 } else {
                                     unDelegateMap.compute(delegateLock, (k, v) -> {
@@ -2617,7 +2698,19 @@ public class NFS4Proc {
 
     @NFSV4.Opt0(NFSV4.CBOpcode.NFS4PROC_CB_SEQUENCE)
     public Mono<Object> sequence(RpcReplyHeader replyHeader, ReqInfo reqHeader, SequenceReply reply) {
-        //由于当前recall实现是一个session单并发回调所以不会出现seq相关报错,后续实现增加slot缓存 需增加回调逻辑
+        return Mono.just(true);
+    }
+
+    @NFSV4.Opt0(NFSV4.CBOpcode.NFS4PROC_CB_NOTIFY_LOCK)
+    public Mono<Object> notifyLock(RpcReplyHeader replyHeader, ReqInfo reqHeader, EmptyReply reply) {
+        int oldId = replyHeader.getHeader().id;
+        Tuple2<CompoundCall, NFS4Lock> tuple2 = NFS4Lock.sendLockMap.get(oldId);
+        if (tuple2 != null) {
+            CompoundCall compoundCall = tuple2.var1;
+            NFS4Lock nfs4Lock = tuple2.var2;
+            NFSHandler.CBInfoMap.remove(oldId);
+            NFS4Lock.sendLockMap.remove(oldId);
+        }
         return Mono.just(true);
     }
 

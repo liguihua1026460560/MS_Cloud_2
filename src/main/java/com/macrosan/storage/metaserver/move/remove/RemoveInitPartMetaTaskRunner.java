@@ -54,7 +54,8 @@ public class RemoveInitPartMetaTaskRunner extends AbstractRemoveTaskRunner<Tuple
                     String initPartSnapshotMark = initPartInfo.snapshotMark;
                     String completePartSnapshotMark = initPartInfo.metaData == null ? initPartInfo.snapshotMark : initPartInfo.metaData.snapshotMark;
                     return storagePool.mapToNodeInfo(vnode)
-                            .flatMap(nodeList -> PartUtils.deleteMultiPartUploadMeta(initPartInfo.bucket, initPartInfo.object, initPartInfo.uploadId, nodeList, true, initPartSnapshotMark, completePartSnapshotMark));
+                            .flatMap(nodeList -> PartUtils.deleteMultiPartUploadMeta(initPartInfo.bucket, initPartInfo.object, initPartInfo.uploadId, nodeList, true,
+                                    null,null, initPartSnapshotMark, completePartSnapshotMark, true));
                 }
             }
             return Mono.just(true);

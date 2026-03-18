@@ -1,11 +1,13 @@
 package com.macrosan.filesystem.cache;
 
+import com.macrosan.filesystem.async.AsyncUtils;
 import com.macrosan.filesystem.cache.InodeOperator.UpdateArgs;
 import com.macrosan.filesystem.cifs.notify.NotifyServer;
 import com.macrosan.filesystem.cifs.reply.smb2.NotifyReply;
 import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.filesystem.utils.timeout.FastMonoTimeOut;
 import com.macrosan.message.jsonmsg.Inode;
+import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.utils.quota.QuotaRecorder;
 import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Mono;
@@ -16,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import static com.macrosan.message.jsonmsg.Inode.*;
 
@@ -194,7 +197,19 @@ public class InodeCache {
                                 return Mono.just(inode);
                             }
                         });
-                FastMonoTimeOut.fastTimeout(res,Duration.ofSeconds(EXEC_TIMEOUT))
+                Mono<Inode> mono;
+                if (inodeOperator.getMsg() != null) {
+                    // 异步复制写预提交记录操作放在这里是为了保证写预提交记录的顺序和waitLit中任务处理的顺序一致
+                    // todo del
+                    log.debug("opt1 : {}, {}, {}", inodeOperator.nodeId, inodeOperator.opt, inodeOperator.getMsg());
+                    List<SocketReqMsg> msgs = batch.stream()
+                            .map(InodeOperator::getMsg)
+                            .collect(Collectors.toList());
+                    mono = AsyncUtils.asyncBatch(inodeOperator.getMsg().get("bucket"), inodeOperator.nodeId, inodeOperator.opt, msgs, res);
+                } else {
+                    mono = res;
+                }
+                FastMonoTimeOut.fastTimeout(mono, Duration.ofSeconds(EXEC_TIMEOUT))
                         .doFinally(s -> release(inodeOperator, readCounter, isReleaseNum))
                         .doOnNext(i -> onNext(batch, i))
                         .doOnError(e -> {

@@ -1,9 +1,11 @@
 package com.macrosan.component;
 
 import com.alibaba.fastjson.JSONObject;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.macrosan.component.pojo.ComponentRecord;
 import com.macrosan.component.pojo.ComponentStrategy;
 import com.macrosan.component.pojo.ComponentTask;
+import com.macrosan.constants.ServerConstants;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache;
 import com.macrosan.ec.*;
@@ -174,8 +176,6 @@ public class ComponentUtils {
                 .setVersionNum(metaData.versionNum)
                 .setSyncStamp(metaData.syncStamp)
                 .setTaskMarker(task.getMarker())
-//                .setAk(ak)
-//                .setSk(sk)
                 .setTaskName(task.taskName)
                 .setHeaderMap(headersMap);
 
@@ -354,6 +354,21 @@ public class ComponentUtils {
         return metaData.strategySet != null && metaData.strategySet.contains(strategy.strategyMark);
     }
 
+    /**
+     * 判断对象是否已经被压缩过
+     * 不支持目标位置且当前对象已经被压缩过，则返回true
+     * @param metaData 源对象元数据
+     * @return boolean
+     */
+    public static boolean hasCompressed(MetaData metaData, ComponentRecord.Type type) {
+        if (type != ComponentRecord.Type.DICOM) {
+            return false;
+        }
+        Map<String, String> sysMetaMap = Json.decodeValue(metaData.getSysMetaData(), new TypeReference<Map<String, String>>() {
+        });
+        return !DICOM_SUPPORT_DESTINATION && sysMetaMap.containsKey(ServerConstants.COMPRESSION_TYPE);
+    }
+
     public static boolean isImageObject(String objectName) {
         String[] split = objectName.split("\\.");
         if (split.length == 0) {
@@ -363,9 +378,20 @@ public class ComponentUtils {
         return SUPPORT_IMAGE_FORMAT.contains(type);
     }
 
-    public static String getRadomAvailIp() {
-        Set<String> set = AVAIL_IP_SET;
-        if (AVAIL_IP_SET.isEmpty()) {
+    public static String getMediaServerRadomAvailIp() {
+        Set<String> set = AVAIL_MEDIA_SERVER_IP_SET;
+        if (AVAIL_MEDIA_SERVER_IP_SET.isEmpty()) {
+            set = ALL_IP_SET;
+        }
+
+        String[] publishIps = set.toArray(new String[0]);
+        final int currentIndex = ThreadLocalRandom.current().nextInt(0, publishIps.length);
+        return publishIps[currentIndex];
+    }
+
+    public static String getMossServerRadomAvailIp() {
+        Set<String> set = AVAIL_MOSS_SERVER_IP_SET;
+        if (AVAIL_MOSS_SERVER_IP_SET.isEmpty()) {
             set = ALL_IP_SET;
         }
 
@@ -392,6 +418,8 @@ public class ComponentUtils {
                 return SUPPORT_IMAGE_FORMAT.contains(format);
             case VIDEO:
                 return true;
+            case DICOM:
+                return SUPPORT_DICOM_FORMAT.contains(format);
             default:
                 return false;
         }
@@ -455,7 +483,7 @@ public class ComponentUtils {
         jsonObject.put("bucket", record.bucket);
         jsonObject.put("object", record.object);
         jsonObject.put("versionId", record.versionId);
-        jsonObject.put("mediaDeleteSource","");
+        jsonObject.put("mediaDeleteSource", "");
         return MsObjVersionUtils.versionStatusReactive(record.bucket)
                 .doOnNext(status -> jsonObject.put("status", status))
                 .flatMap(b -> LifecycleCommandConsumer.expirationOperation(jsonObject))

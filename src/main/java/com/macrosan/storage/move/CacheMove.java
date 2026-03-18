@@ -32,14 +32,18 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
+import java.time.LocalTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.constants.SysConstants.ROCKS_CACHE_ACCESS_KEY;
+import static com.macrosan.ec.Utils.getFileMetaKeyByAccessTimeKey;
 import static com.macrosan.ec.Utils.getFileMetaKeyByCacheOrderKey;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.storage.strategy.CacheSmallObjectStrategy.*;
@@ -316,15 +320,36 @@ public class CacheMove implements Runnable {
 
     private int scan(StoragePool pool, int max) {
         String[] disks = getCurNodePoolDisk(pool);
-        // 先按照上传时间进行扫描
-        int total = orderedScan(pool, max, new LinkedList<>(Arrays.asList(disks)));
+        /**************************** 开启数据分层 ********************/
+        int total = 0;
+        log.debug("isEnableCacheAccessTimeFlush:{}", isEnableCacheAccessTimeFlush(pool));
+        if (isEnableCacheAccessTimeFlush(pool)) {
+            LocalTime startTime = LocalTime.MIN;
+            LocalTime endTime = LocalTime.MAX;
+
+            LocalTime now = LocalTime.now();
+            if (now.isAfter(startTime) && now.isBefore(endTime)) {
+                //开启分层这里只按照最后访问时间表进行扫描
+                //且配置一个开启时间，到达每天的指定时间后再触发扫描
+                //扫描一定数量的数据，当前时间戳据上次访问时间大于30天进行下刷
+                total = scanByAccessTime(pool, max, new LinkedList<>(Arrays.asList(disks)));
+                log.debug("scanByAccessTime:{}", total);
+            } else {
+                return 0;//不执行
+            }
+
+        } else {
+            // 先按照上传时间进行扫描
+            total = orderedScan(pool, max, new LinkedList<>(Arrays.asList(disks)));
+        }
+
         if (total == max) {
             return total;
         }
 
         int remainingSacnNum = max - total;
         for (String disk : disks) {
-            remainingSacnNum -= scanCacheDisk(pool, disk, remainingSacnNum, false);
+            remainingSacnNum -= scanCacheDisk(pool, disk, remainingSacnNum, ScanType.DEFAULT);
             if (remainingSacnNum == 0) {
                 break;
             }
@@ -355,7 +380,7 @@ public class CacheMove implements Runnable {
         while (iterator.hasNext()) {
             String disk = iterator.next();
             int expectedScanNum = firstDisk ? avgScanNum + remainingScanNum : avgScanNum;
-            int realScanNum = scanCacheDisk(pool, disk, expectedScanNum, true);
+            int realScanNum = scanCacheDisk(pool, disk, expectedScanNum, ScanType.BY_UPLOAD_TIME);
             if (expectedScanNum == realScanNum) {
                 // 该磁盘扫描数量已到指定值
                 completeScanDiskCount++;
@@ -375,89 +400,152 @@ public class CacheMove implements Runnable {
         return total + orderedScan(pool, (scanMax - total), disks);
     }
 
-    public int scanCacheDisk(StoragePool pool, String disk, int scanNum, boolean orderedScan) {
-        int n = 0;
-        if (scanNum == 0) {
-            return n;
+    //按照最后访问时间
+    public int scanByAccessTime(StoragePool pool, int scanNum, List<String> disks) {
+        //这里还是要应该多个盘同时扫描，目前界面基本限制了副本数的创建，那么基本不存在同节点存在多个同一对象数据块的副本，可以不考虑重复扫描的问题
+        int total = 0;
+        int diskSize = disks.size();
+        int avgScanNum = scanNum / diskSize;
+        int completeScanDiskCount = 0;
+        int remainingScanNum = scanNum - (avgScanNum * diskSize);
+        boolean firstDisk = true;
+        Iterator<String> iterator = disks.iterator();
+        while (iterator.hasNext()) {
+            String disk = iterator.next();
+            int expectedScanNum = firstDisk ? avgScanNum + remainingScanNum : avgScanNum;
+            int realScanNum = scanCacheDisk(pool, disk, expectedScanNum, ScanType.BY_ACCESS_TIME);
+            if (expectedScanNum == realScanNum) {
+                // 该磁盘扫描数量已到指定值
+                completeScanDiskCount++;
+            } else {
+                // 该磁盘扫描数量未到指定值，说明没有可扫描数据了，则从集合中移除
+                iterator.remove();
+            }
+            total += realScanNum;
+            firstDisk = false;
         }
-        boolean isMigrating = false;
-        String keyPrefix = orderedScan ? ROCKS_CACHE_ORDERED_KEY : ROCKS_FILE_META_PREFIX;
+        if (disks.isEmpty() || completeScanDiskCount == diskSize) {
+            return total;
+        }
+        return total + scanByAccessTime(pool, (scanNum - total), disks);
+
+    }
+    public int scanCacheDisk(StoragePool pool, String disk, int scanNum, ScanType scanType) {
+        AtomicInteger n = new AtomicInteger(0);
+        if (scanNum == 0) {
+            return n.get();
+        }
+
+        long endStamp = 0;
+        String endStampMarker = "";
+        if (ScanType.BY_ACCESS_TIME.equals(scanType) || isEnableCacheAccessTimeFlush(pool)) {
+            //根据当前时间生成截止日期
+            //这里需要获取配置分层时的结束日期
+            long days = getLowFrequencyAccessDays(pool);//假设是30天,目前代码这里是每个池单独设置，按规格的话同一个策略下的缓存池配置应该统一
+            endStamp = System.currentTimeMillis() - days * 24 * 60 * 60 * 1000;//本次扫描往前推30天
+            endStampMarker = Utils.getEndTimeStampMarker(String.valueOf(endStamp));
+        }
+        String keyPrefix;
+
+        switch (scanType) {
+            case BY_UPLOAD_TIME:
+                keyPrefix = ROCKS_CACHE_ORDERED_KEY;
+                break;
+            case BY_ACCESS_TIME:
+                keyPrefix = ROCKS_CACHE_ACCESS_KEY;
+                break;
+            default:
+                keyPrefix = ROCKS_FILE_META_PREFIX;
+                break;
+        }
         MSRocksDB cacheDb = MSRocksDB.getRocksDB(disk);
         if (cacheDb == null) {
-            return n;
+            return n.get();
+        }
+
+        /**
+         * 对于扫描访问时间记录，从头开始扫描，然后判断扫描到的时间是否在应扫描的时间戳内
+         * 首先确定结束扫描的时间戳，然后用结束的时间戳生成扫描结束的key，ROCKS_CACHE_ACCESS_KEY + endTimestamp;
+         * 扫描key时判断是否大于结束key，大于就不再进行扫描
+         */
+        boolean isEnd = false;
+        String marker = "";
+        if (isEnableCacheAccessTimeFlush(pool) && ScanType.DEFAULT.equals(scanType)) {
+            marker = redisConnPool.getShortMasterCommand(15).hget("access_flush_marker_" + pool.getVnodePrefix(), this.node);
         }
         try (MSRocksIterator iterator = cacheDb.newIterator()) {
-            iterator.seek(keyPrefix.getBytes());
-            while (iterator.isValid() && n < scanNum) {
+            if (StringUtils.isNotEmpty(marker)) {
+                iterator.seek(marker.getBytes());
+            } else {
+                iterator.seek(keyPrefix.getBytes());
+            }
+            while (iterator.isValid() && n.get() < scanNum) {
                 String key = new String(iterator.key());
                 if (!key.startsWith(keyPrefix)) {
                     break;
                 }
-                FileMeta meta;
-                if (orderedScan) {
-                    String cacheOrderKey = new String(iterator.key());
-                    byte[] bytes = cacheDb.get(getFileMetaKeyByCacheOrderKey(cacheOrderKey).getBytes());
-                    if (null == bytes) {
-                        meta = null;
-                    } else {
-                        meta = Json.decodeValue(new String(bytes), FileMeta.class);
-                    }
-                } else {
-                    meta = Json.decodeValue(new String(iterator.value()), FileMeta.class);
-                }
-                if (null != meta && null != meta.getMetaKey()) {
-                    try {
-                        // 考虑单个大文件(100GB)存在多个(100+)等待下刷文件的情况，避免单个文件每次只能下刷一块数据
-                        // 在key后缀增加 _objVnodeId 从 meta.getFileName() 中提取
-                        String objVnodeId = meta.getFileName().substring(1).split("_")[0];
-                        byte[] taskKey = getTaskKey(pool.getVnodePrefix(), meta.getMetaKey() + "_" + objVnodeId);
-                        if (null == mqDB.get(taskKey)) {
-                            List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(pool.getObjectVnodeId(meta.getFileName())).block();
-                            Set<String> fileDiskSet = nodeList.stream()
-                                    .filter(t -> t.var1.equalsIgnoreCase(CURRENT_IP))
-                                    .map(t -> t.var2)
-                                    .collect(Collectors.toSet());
-                            if (fileDiskSet.contains(disk)) {
-                                n++;
-                                long fileOffset = meta.getFileOffset();
-                                String value;
-                                if (fileOffset >= 0L) {
-                                    value = meta.getFileName() + "#" + fileOffset + "#" + meta.getSize();
-                                    mqDB.put(taskKey, value.getBytes());
-                                }
+                FileMeta meta = null;
+                byte[] bytes;
+                switch (scanType) {
+                    case BY_UPLOAD_TIME:
+                        //获取key之后进行转换，然后再通过转换得到的fileMeta进行后续处理
+                        String cacheOrderKey = new String(iterator.key());
+                        bytes = cacheDb.get(getFileMetaKeyByCacheOrderKey(cacheOrderKey).getBytes());//这里拿到orderkey之后又转成了#开头的key去查fileMeta
+                        if (null == bytes) {
+                            meta = null;
+                        } else {
+                            meta = Json.decodeValue(new String(bytes), FileMeta.class);
+                        }
+                        break;
+                    case BY_ACCESS_TIME:
+                        //获取key之后进行转换，然后再通过转换得到的fileMeta进行后续处理
+                        String accessKey = new String(iterator.key());
+                        //与结束时间戳进行比较确定是否需要处理
+                        if (accessKey.compareTo(endStampMarker) < 0) {
+                            bytes = cacheDb.get(getFileMetaKeyByAccessTimeKey(accessKey).getBytes());
+                            if (null == bytes) {
+                                meta = null;
                             } else {
-                                try {
-                                    List<String> runningKeys = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).keys("running_*");
-                                    for (String runningKey : runningKeys) {
-                                        String type = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).type(runningKey);
-                                        if ("hash".equalsIgnoreCase(type)) {
-                                            Map<String, String> map = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).hgetall(runningKey);
-                                            String operate = map.getOrDefault("operate", "add_node");
-                                            String diskName = map.getOrDefault("diskName", "cache");
-                                            if (!map.isEmpty() && diskName.contains("cache")) {
-                                                isMigrating = "add_node".equals(operate) || "add_disk".equals(operate);
-                                            }
-                                        }
-                                        if (isMigrating) {
-                                            break;
-                                        }
-                                    }
-                                } catch (Exception e) {
-                                    isMigrating = true;
-                                }
-                                if (!isMigrating) {
-                                    //当前文件已经不在vnode的映射中
-                                    log.info("delete file {} in {}", meta.getFileName(), disk);
-                                    SocketReqMsg msg = new SocketReqMsg("", 0)
-                                            .put("fileName", Json.encode(new String[]{meta.getFileName()}))
-                                            .put("lun", disk);
-                                    RequestResponseServerHandler.deleteFile(DefaultPayload.create(msg.toBytes()))
-                                            .subscribe();
-                                }
+                                meta = Json.decodeValue(new String(bytes), FileMeta.class);
+                            }
+                        } else {
+                            //当扫到的key大于等于结束的key时跳出循环
+                            isEnd = true;
+                        }
+                        break;
+                    default:
+                        //这里直接getFileMeta进行下刷
+                        meta = Json.decodeValue(new String(iterator.value()), FileMeta.class);
+                        break;
+                }
+                if (isEnd) {
+                    log.debug("scan access record over in {}",  disk);
+                    break;
+                }
+
+                if (null != meta && null != meta.getMetaKey()) {
+                    if (isEnableCacheAccessTimeFlush(pool)) {//开启了访问时间分层之后，之前扫“}”表结束，这里继续扫“#”对本次开启分层前已存在的数据进行处理
+                        if (StringUtils.isNotEmpty(meta.getLastAccessStamp())) {
+                            if (meta.getLastAccessStamp().compareTo(String.valueOf(endStamp)) < 0) {
+                                //这里如果fileMeta中的lastAccessStamp是上次开启分层时更新的，然后后面关闭了分层后就没再更新，本次开启分层后还未进行访问，缓存盘中的访问记录还是上次的
+                                //如果访问记录中或者fileMeta中上次的访问时间戳在处理范围内，则进行下刷，无论是否访问都按照冷数据处理，就不再统一用本次开启分层的时间作为其访问时间了
+                                recordTask(pool, meta, disk, n);
+                            }
+                        } else {
+                            //无访问时间属性，使用开启分层功能的时间作为其最后访问时间
+                            log.debug("endStamp:{}, flag:{}", endStamp, getEnableLayeringStamp(pool).compareTo(String.valueOf(endStamp)) < 0);
+                            if (getEnableLayeringStamp(pool).compareTo(String.valueOf(endStamp)) < 0) {
+                                recordTask(pool, meta, disk, n);
                             }
                         }
-                    } catch (Exception e) {
-                        log.error("", e);
+                    } else {
+                        recordTask(pool, meta, disk, n);
+                    }
+                }
+                if (isEnableCacheAccessTimeFlush(pool) && ScanType.DEFAULT.equals(scanType)) {
+                    if (scanNum == n.get()) {
+                        marker = key;
+                        redisConnPool.getShortMasterCommand(15).hset("access_flush_marker_" + pool.getVnodePrefix(), this.node, marker);//关闭分层后maker也需要被清除
                     }
                 }
 
@@ -467,7 +555,71 @@ public class CacheMove implements Runnable {
         } catch (RocksDBException e) {
             log.error("", e);
         }
-        return n;
+        return n.get();
+    }
+
+    public void recordTask(StoragePool pool, FileMeta meta, String disk, AtomicInteger n) {
+        boolean isMigrating = false;
+        try {
+            // 考虑单个大文件(100GB)存在多个(100+)等待下刷文件的情况，避免单个文件每次只能下刷一块数据
+            // 在key后缀增加 _objVnodeId 从 meta.getFileName() 中提取
+            String objVnodeId = meta.getFileName().substring(1).split("_")[0];
+            byte[] taskKey = getTaskKey(pool.getVnodePrefix(), meta.getMetaKey() + "_" + objVnodeId);
+            if (null == mqDB.get(taskKey)) {
+                List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(pool.getObjectVnodeId(meta.getFileName())).block();
+                Set<String> fileDiskSet = nodeList.stream()
+                        .filter(t -> t.var1.equalsIgnoreCase(CURRENT_IP))
+                        .map(t -> t.var2)
+                        .collect(Collectors.toSet());
+                if (fileDiskSet.contains(disk)) {
+                    n.incrementAndGet();
+                    long fileOffset = meta.getFileOffset();
+                    String value;
+                    if (fileOffset >= 0L) {
+                        value = meta.getFileName() + "#" + fileOffset + "#" + meta.getSize();
+                        mqDB.put(taskKey, value.getBytes());
+                    }
+                } else {
+                    try {
+                        List<String> runningKeys = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).keys("running_*");
+                        for (String runningKey : runningKeys) {
+                            String type = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).type(runningKey);
+                            if ("hash".equalsIgnoreCase(type)) {
+                                Map<String, String> map = RedisConnPool.getInstance().getShortMasterCommand(REDIS_MIGING_V_INDEX).hgetall(runningKey);
+                                String operate = map.getOrDefault("operate", "add_node");
+                                String poolName = map.get("poolName");
+                                if (!map.isEmpty()) {
+                                    if (poolName != null) {
+                                        String role = RedisConnPool.getInstance().getShortMasterCommand(REDIS_POOL_INDEX).hget(poolName, "role");
+                                        if ("cache".equals(role)) {
+                                            isMigrating = "add_node".equals(operate) || "add_disk".equals(operate) || "expand".equals(operate) || "remove_node".equals(operate);
+                                        }
+                                    } else {
+                                        isMigrating = "add_node".equals(operate) || "add_disk".equals(operate) || "expand".equals(operate) || "remove_node".equals(operate);
+                                    }
+                                }
+                            }
+                            if (isMigrating) {
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        isMigrating = true;
+                    }
+                    if (!isMigrating) {
+                        //当前文件已经不在vnode的映射中
+                        log.info("delete file {} in {}", meta.getFileName(), disk);
+                        SocketReqMsg msg = new SocketReqMsg("", 0)
+                                .put("fileName", Json.encode(new String[]{meta.getFileName()}))
+                                .put("lun", disk);
+                        RequestResponseServerHandler.deleteFile(DefaultPayload.create(msg.toBytes()))
+                                .subscribe();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("", e);
+        }
     }
 
     private void deleteMq(byte[] key) {
@@ -513,5 +665,39 @@ public class CacheMove implements Runnable {
 
     public static boolean isEnableCacheOrderFlush(StoragePool cachePool) {
         return cachePool.getVnodePrefix().startsWith("cache") && CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).isEnableOrderedFlush();
+    }
+
+    /**
+     * 判断是否开启分层下刷
+     * @param cachePool
+     * @return
+     */
+    public static boolean isEnableCacheAccessTimeFlush(StoragePool cachePool) {
+        return cachePool.getVnodePrefix().startsWith("cache") && CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).isEnableAccessTimeFlush();
+    }
+
+    public static int getLowFrequencyAccessDays(StoragePool cachePool) {
+        return CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).getLowFrequencyAccessDays();
+    }
+
+    public static String getEnableLayeringStamp(StoragePool cachePool) {
+        return CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).getEnableLayeringStamp();
+    }
+
+
+
+    public enum ScanType {
+        BY_UPLOAD_TIME(ROCKS_CACHE_ORDERED_KEY),
+        BY_ACCESS_TIME(ROCKS_CACHE_ACCESS_KEY),
+        DEFAULT(ROCKS_FILE_META_PREFIX);
+        private final String prefix;
+
+        ScanType(String prefix) {
+            this.prefix = prefix;
+        }
+
+        public String getPrefix() {
+            return this.prefix;
+        }
     }
 }

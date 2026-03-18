@@ -17,11 +17,10 @@ import static com.macrosan.ec.rebuild.RebuildCache.REBUILD_CACHE_SCHEDULER;
  **/
 @Log4j2
 public class RebuildRateLimiter {
-    public static final Map<String, RateLimiter> limiters = new ConcurrentHashMap<>();
     private static final RebuildRateLimiter INSTANCE = new RebuildRateLimiter();
     private static double rate = 8000.0;
     private static final double MAX_RATE = 10000.0;
-
+    public static RateLimiter metaLimiter = RateLimiter.create(rate);
     static {
         REBUILD_CACHE_SCHEDULER.schedulePeriodically(() -> {
             try {
@@ -45,12 +44,12 @@ public class RebuildRateLimiter {
     }
 
     private static void adjustRate() {
-        limiters.forEach((k, v) -> v.setRate(rate));
+        metaLimiter.setRate(rate);
         log.info("adjust rebuild meat rate: {}", rate);
     }
 
-    public boolean tryAcquire(String disk) {
-        return limiters.computeIfAbsent(disk, k -> RateLimiter.create(rate)).tryAcquire();
+    public boolean tryAcquire() {
+        return metaLimiter.tryAcquire();
     }
 
 }

@@ -1,8 +1,11 @@
 package com.macrosan.utils.store;
 
+import com.macrosan.httpserver.MsHttpRequest;
+import com.macrosan.utils.codec.UrlEncoder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.lang3.StringUtils;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -10,6 +13,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.TreeSet;
+
+import static com.macrosan.constants.ServerConstants.*;
+import static com.macrosan.constants.ServerConstants.EQUAL;
 
 @Slf4j
 @Data
@@ -181,17 +187,25 @@ public class AWSV2Auth {
      * * 子资
      *
      * @param resourcesMap 查询参数
+     * @param request
      * @return 处理后查询参数字符串
      */
-    private static String getResources(TreeMap<String, String> resourcesMap) {
+    private static String getResources(TreeMap<String, String> resourcesMap, MsHttpRequest request) {
         StringBuilder resources = new StringBuilder();
         if (resourcesMap != null && !resourcesMap.isEmpty()) {
-            for (Map.Entry<String, String> entrySet : resourcesMap.entrySet()) {
-                String key = entrySet.getKey();
-                String value = entrySet.getValue();
-                resources.append(key).append("=").append(value).append("&");
+            for (Map.Entry<String, String> entry : resourcesMap.entrySet()) {
+                if (SIG_INCLUDE_PARAM_LIST.contains(entry.getKey().hashCode())){
+//                    resources.append(key).append("=").append(value).append("&");
+                    if (NO_ENCODE_PARAM_LIST.contains(entry.getKey().hashCode())) {
+                        resources.append(StringUtils.isBlank(entry.getValue()) ? entry.getKey() : entry.getKey() + EQUAL + entry.getValue());
+                    } else {
+                        resources.append(StringUtils.isBlank(entry.getValue()) ? entry.getKey() : entry.getKey() + EQUAL + UrlEncoder.encode(entry.getValue(), request.getCodec()));
+                    }
+                }
             }
-            resources.deleteCharAt(resources.lastIndexOf("&"));
+            if (!"".equals(resources.toString())){
+                resources.deleteCharAt(resources.lastIndexOf("&"));
+            }
         }
         return new String(resources);
     }
@@ -224,7 +238,7 @@ public class AWSV2Auth {
         return new String(sb);
     }
 
-    public static String getCanonicalizedResources(String bucketName, String objectName, TreeMap<String, String> resources, Boolean isV2) {
+    public static String getCanonicalizedResources(String bucketName, String objectName, TreeMap<String, String> resources, Boolean isV2, MsHttpRequest request) {
         StringBuilder sb = new StringBuilder();
         sb.append("/");
         //判断桶名称是否存
@@ -239,7 +253,11 @@ public class AWSV2Auth {
             }
             //添加子资源参
             if (Objects.nonNull(resources) && !resources.isEmpty()) {
-                sb.append("?").append(getResources(resources));
+                String resources1 = getResources(resources, request);
+                if (StringUtils.isNotBlank(resources1)){
+                    sb.append("?").append(resources1);
+                }
+
             }
         }
         return new String(sb);

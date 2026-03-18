@@ -473,7 +473,9 @@ public class ComponentScanner {
                                                 // 格式不支持
                                                 || !ComponentUtils.isSupportFormat(lifeMeta.key, componentTask.getStrategy().type)
                                                 // 上一次任务执行时已经处理过
-                                                || Objects.equals(metaDataList.get(i).var1, beginPrefix)) {
+                                                || Objects.equals(metaDataList.get(i).var1, beginPrefix)
+                                                // 已经压缩过
+                                                || ComponentUtils.hasCompressed(lifeMeta, componentTask.getStrategy().getType())) {
                                             continue;
                                         }
                                         int index = ThreadLocalRandom.current().nextInt(objProcessors.length);

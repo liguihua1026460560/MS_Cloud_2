@@ -324,6 +324,17 @@ public class Inode {
             }
             return holeFileList;
         }
+
+        public InodeData clone() {
+            return new InodeData()
+                    .setSize(size)
+                    .setFileName(fileName)
+                    .setStorage(storage)
+                    .setOffset(offset)
+                    .setEtag(etag)
+                    .setChunkNum(chunkNum)
+                    .setSize0(size0);
+        }
     }
 
     public Inode setAtime(long atime) {
@@ -387,7 +398,7 @@ public class Inode {
         }
         metaData.setStartIndex(0L);
         metaData.setEndIndex(inode.size - 1);
-        metaData.setPartUploadId("inode");
+        metaData.setPartUploadId("inode" + inode.getNodeId());
         metaData.setStorage(inode.getStorage());
         Map<String, String> sysMetaMap = Json.decodeValue(metaData.sysMetaData, new TypeReference<Map<String, String>>() {
         });

@@ -33,10 +33,13 @@ public class CompoundReply extends RpcReply {
         buf.setInt(offset + 4, tag.length);
         buf.setBytes(offset + 8, tag);
         offset += 8 + (tag.length + 3) / 4 * 4;
+        int countOffset = offset;
         buf.setInt(offset, replies.size());
         offset += 4;
+        int i = 0;
         for (RpcReply rpcReply : replies) {
             CompoundReply compoundReply = (CompoundReply) rpcReply;
+            i++;
             if (compoundReply.status != 0) {
                 if (NFSV4.Opcode.NFS4PROC_LOCK.opcode == compoundReply.opt
                         && NFS4ERR_DENIED == compoundReply.status) {
@@ -56,6 +59,7 @@ public class CompoundReply extends RpcReply {
             }
             offset += rpcReply.writeStruct(buf, offset);
         }
+        buf.setInt(countOffset, i);
         return offset - start;
     }
 

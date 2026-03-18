@@ -559,6 +559,7 @@
 2933=IntervalNotEmpty/Interval cannot be empty./400
 2934=DeleteSourceConflict/Delete source conflict./400
 2935=ImageSizeTooLarge/The image size too large./400
+2936=NotSupportedComponentParam/The component param is not supported./400
 
 2707=RoleNotExists/The requested role does not exist./404
 2708=RoleExisted/Role already exists./400
@@ -611,6 +612,8 @@
 
 3201=InvalidCacheWaterMarkConfig/The config param is invalid./400
 3202=NoSuchCachePool/The cache pool is not exit./404
+
+3301=CompressServerError/Compress server error./500
 
 3901=NoSuchDir/The dir is not exit./404
 3902=QuotaIsSetting/The dir is setting quota info./400

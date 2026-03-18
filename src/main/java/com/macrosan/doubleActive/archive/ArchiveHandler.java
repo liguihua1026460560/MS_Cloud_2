@@ -138,7 +138,7 @@ public class ArchiveHandler {
                                             }
                                             record.headers.put(ARCHIVE_SYNC_REC_MARK, "1");
                                             String analyzerKey = BACK_ANALYZER_MAP.get(syncRequest.backupKey);
-                                            if (StringUtils.isBlank(analyzerKey)){
+                                            if (StringUtils.isBlank(analyzerKey)) {
                                                 return Mono.just(false);
                                             }
                                             record.headers.put(ARCHIVE_ANALYZER_KEY, analyzerKey);
@@ -414,7 +414,8 @@ public class ArchiveHandler {
             AtomicInteger count = new AtomicInteger();
             UnicastProcessor<String> bucketVnodeProcessor = UnicastProcessor.create(Queues.<String>unboundedMultiproducer().get());
             Map<String, String> finalTagMap = tagMap;
-            log.info("--------------------{} begin archive list Object  -------------{}----------{}--------{}------{}", bucketName + "_" + bucketVnode, endStamp, version, filterType, beginPrefix);
+            log.info("cluster {} --------------------{} begin archive list Object  -------------{}----------{}--------{}------{}", clusterIndex, bucketName + "_" + bucketVnode, endStamp, version,
+                    filterType, beginPrefix);
             bucketVnodeProcessor
                     .publishOn(SCAN_SCHEDULER)
                     .flatMap(recordPrefix ->
@@ -454,7 +455,8 @@ public class ArchiveHandler {
                                 .put("stamp", stampMarker)
                                 .put("retryTimes", "0")
                                 .put("beginPrefix", recordPrefix)
-                                .put("showUsermeta", "1");
+                                .put("showUsermeta", "1")
+                                .put("syncHis", "1");
                         metaPool.mapToNodeInfo(bucketVnode)
                                 .publishOn(SCAN_SCHEDULER)
                                 .flatMap(infoList -> {

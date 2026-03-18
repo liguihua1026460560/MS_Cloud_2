@@ -716,9 +716,24 @@ public class HeartBeatChecker {
             if (EXTRA_INDEX_IPS_ENTIRE_MAP.containsKey(clusterIndex)) {
                 continue;
             }
+            String[] availIps;
+            List<String> ipList = new ArrayList<>();
+            for (String ip : ips) {
+                if (!TIMEOUT_RECHECK_IP_SET.contains(ip)) {
+                    ipList.add(ip);
+                }
+            }
+
+            // 所有节点在双倍时间都没能恢复, 访问第一个节点发送请求
+            if (ipList.size() == 0) {
+                ipList.add(ips[0]);
+            }
+
+            //遍历目标站点ip
+            availIps = ipList.toArray(new String[0]);
             PoolingRequest poolingRequest = new PoolingRequest(HttpMethod.GET, clusterIndex, "?clusterstatus", getClient());
             poolingRequest.setAuthString(INNER_AUTH);
-            Disposable subscribe = poolingRequest.requestHeartBeat(HEARTBEAT_INTERVAL_SECONDS * 1000, unitCount)
+            Disposable subscribe = poolingRequest.requestHeartBeat(availIps, HEARTBEAT_INTERVAL_SECONDS * 1000, unitCount)
                     .subscribe(request -> {
                         AtomicBoolean hasExc = new AtomicBoolean(false);
 //                        request.setTimeout(HEARTBEAT_INTERVAL_SECONDS * 1000 / INDEX_SNUM_MAP.get(clusterIndex));
@@ -738,7 +753,12 @@ public class HeartBeatChecker {
                                 return;
                             }
                             if (e instanceof TimeoutException) {
-                                TIMEOUT_RECHECK_IP_SET.add(request.getHost());
+                                String finalIp = request.getHost();
+                                int idx = finalIp.lastIndexOf(":");
+                                if (idx != -1) {
+                                    finalIp = finalIp.substring(0, idx);
+                                }
+                                TIMEOUT_RECHECK_IP_SET.add(finalIp);
                             }
                             log.error("heartbeat request error, {}, {}, requestId:{}", e.getClass().getTypeName(), e.getMessage(), requestId);
                             if (poolingRequest.needRetry()) {
@@ -2182,6 +2202,9 @@ public class HeartBeatChecker {
                 String prefix = "64";
                 if ("ipv4".equals(ethType)) {
                     String res = SshClientUtils.exec("cat /etc/sysconfig/network-scripts/ifcfg-" + ethName + " |grep PREFIX");
+                    if (StringUtils.isBlank(res)) {
+                        continue;
+                    }
                     prefix = res.split("=")[1];
                 }
                 if (status == 1) {
@@ -2343,24 +2366,19 @@ public class HeartBeatChecker {
             if (CHECK_TIME_OUT_IPS.compareAndSet(false, true)) {
                 HashSet<String> set = new HashSet<>(TIMEOUT_RECHECK_IP_SET);
                 for (String ip : set) {
-                    String finalIp = ip;
-                    int idx = finalIp.lastIndexOf(58);
-                    if (idx != -1) {
-                        finalIp = finalIp.substring(0, idx);
-                    }
                     // 防止有旧Ip在集合中无法清除
                     Set<String> allIps = INDEX_IPS_ENTIRE_MAP.values()
                             .stream()
                             .flatMap(Arrays::stream)
                             .collect(Collectors.toSet());
-                    if (!allIps.contains(finalIp)) {
+                    if (!allIps.contains(ip)) {
                         log.info("recheck remove old ip {}", ip);
                         TIMEOUT_RECHECK_IP_SET.remove(ip);
                         continue;
                     }
-                    HttpClientRequest request = getClient().request(HttpMethod.GET, DA_PORT, finalIp, "?clusterstatus");
-                    request.setTimeout(HEARTBEAT_INTERVAL_SECONDS * 1000 * 2)
-                            .setHost(finalIp + ":" + DA_PORT)
+                    HttpClientRequest request = getClient().request(HttpMethod.GET, DA_PORT, ip, "?clusterstatus");
+                    request.setTimeout(HEARTBEAT_INTERVAL_SECONDS * 1000 * 2 / unitCount)
+                            .setHost(ip + ":" + DA_PORT)
                             .putHeader("test", CURRENT_IP)
                             .putHeader("request_index", String.valueOf(LOCAL_CLUSTER_INDEX))
                             .exceptionHandler(e -> {
@@ -2375,7 +2393,7 @@ public class HeartBeatChecker {
                 }
             }
         } finally {
-            CHECK_TIME_OUT_IPS.compareAndSet(false, true);
+            CHECK_TIME_OUT_IPS.compareAndSet(true, false);
         }
     }
 

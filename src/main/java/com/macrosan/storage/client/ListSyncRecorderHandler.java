@@ -2,6 +2,7 @@ package com.macrosan.storage.client;
 
 import com.macrosan.doubleActive.SyncRecordLimiter;
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.filesystem.async.FSUnsyncRecordHandler;
 import com.macrosan.message.jsonmsg.UnSynchronizedRecord;
 import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.functional.Tuple3;
@@ -21,7 +22,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static com.macrosan.constants.ServerConstants.CONTENT_LENGTH;
 import static com.macrosan.constants.ServerConstants.RECORD_ORIGIN_UPLOADID;
 import static com.macrosan.constants.SysConstants.DATASYNC_BAND_WIDTH_QUOTA;
 import static com.macrosan.constants.SysConstants.DATASYNC_THROUGHPUT_QUOTA;
@@ -41,6 +41,7 @@ public class ListSyncRecorderHandler extends AbstractListClient<Tuple2<String, U
     public MonoProcessor<List<UnSynchronizedRecord>> recordProcessor = MonoProcessor.create();
 
     public static final long MAX_COUNT = 1000;
+    public static final long FS_MAX_COUNT = 100;
 
     /**
      * 返回的记录条数，并非最终结果的条数（已在处理的记录会从list结果剔除）
@@ -129,140 +130,151 @@ public class ListSyncRecorderHandler extends AbstractListClient<Tuple2<String, U
 
             count = linkedList.size();
             for (Counter counter : linkedList) {
-                //该条记录已在处理中，跳过
                 UnSynchronizedRecord record = counter.t.var2;
-                String uploadId = getOringinUploadId(record);
-                String type = getRecordType(record);
-                synchronized (recordSet) {
-
-                    if (StringUtils.isNotEmpty(uploadId)) {
-                        record.headers.put(RECORD_ORIGIN_UPLOADID, uploadId);
+                if (record.isFSUnsyncRecord()) {
+                    // 文件的同步要求相同的文件操作要保证前后顺序且串行
+                    String fsRecordMapKey = FSUnsyncRecordHandler.getFSRecordMapKey(record);
+                    synchronized (recordSet) {
                         if (recordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(record.recordKey)) {
                             continue;
                         }
-                        if (skipMutual(type, record)) {
-                            continue;
-                        }
-                        if (syncPartLimiter.get() && PART_SYNCING_AMOUNT.get() > DEFAULT_PART_MAX_COUNT) {
-                            continue;
-                        }
-
-                        // initPart消息单独处理，防止compete消息记录在前面导致同uploadId的initpart消息获取不到
-                        if (initUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
-                            continue;
-                        }
-                        if (record.type() == UnSynchronizedRecord.Type.ERROR_INIT_PART_UPLOAD) {
-                            if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)
-                                    || uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
-                                continue;
-                            }
-                            initUploadRecordSet.get(record.bucket).add(uploadId);
-                        } else if (record.type() == UnSynchronizedRecord.Type.ERROR_PART_UPLOAD) {
-                            if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
-                                continue;
-                            }
-                            if ("appendObject".equals(uploadId)) {
-                                if (uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
-                                    continue;
-                                }
-                            }
-                            uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).add(uploadId);
-                            uploadCountSet.computeIfAbsent(record.bucket + uploadId, v -> new AtomicLong()).incrementAndGet();
-                        } else if (record.type() == UnSynchronizedRecord.Type.ERROR_COMPLETE_PART) {
-                            if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)
-                                    || uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
-                                continue;
-                            }
-                            mergeUploadRecordSet.get(record.bucket).add(uploadId);
-                        }
-                        PART_SYNCING_AMOUNT.incrementAndGet();
                         recordSet.get(record.bucket).add(record.rocksKey());
-                        String checkRecordKey = record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId;
-                        checkRecordMap.computeIfAbsent(checkRecordKey, v -> new ConcurrentHashMap<>()).put(record.recordKey, new Tuple2<>(System.currentTimeMillis(), record));
-                    } else {
-                        if (recordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(record.recordKey)) {
-                            continue;
-                        }
-                        if (skipMutual(type, record)) {
-                            continue;
-                        }
-                        String checkRecordKey = record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId;
-                        String checkRecordKey2 = record.object + File.separator + type + File.separator + record.versionId;
-                        boolean skip = false;
-                        if (recordTypeSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(checkRecordKey2)) {
-                            if (recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(checkRecordKey2)) {
-                                if (checkRecordStatus(record)) {
+                        checkRecordMap.computeIfAbsent(fsRecordMapKey, v -> new ConcurrentHashMap<>()).put(record.recordKey, new Tuple2<>(System.currentTimeMillis(), record));
+                    }
+                } else {
+                    String uploadId = getOringinUploadId(record);
+                    String type = getRecordType(record);
+                    synchronized (recordSet) {
+
+                        if (StringUtils.isNotEmpty(uploadId)) {
+                            record.headers.put(RECORD_ORIGIN_UPLOADID, uploadId);
+                            if (recordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(record.recordKey)) {
+                                continue;
+                            }
+                            if (skipMutual(type, record)) {
+                                continue;
+                            }
+                            if (syncPartLimiter.get() && PART_SYNCING_AMOUNT.get() > DEFAULT_PART_MAX_COUNT) {
+                                continue;
+                            }
+
+                            // initPart消息单独处理，防止compete消息记录在前面导致同uploadId的initpart消息获取不到
+                            if (initUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
+                                continue;
+                            }
+                            if (record.type() == UnSynchronizedRecord.Type.ERROR_INIT_PART_UPLOAD) {
+                                if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)
+                                        || uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
                                     continue;
                                 }
-                                // 本次扫描list到过同名对象record0，且record0是预提交记录或者是其他站点转发来的，
-                                if (checkRecordMap.containsKey(checkRecordKey)) {
-                                    boolean hasFirmRecord = false;
-                                    for (Tuple2<Long, UnSynchronizedRecord> value : checkRecordMap.get(checkRecordKey).values()) {
-                                        UnSynchronizedRecord oldRecord = value.var2;
-                                        if (oldRecord.syncStamp.compareTo(record.syncStamp) < 0) {
-                                            if (recordList.remove(oldRecord)) {
-                                                oldRecord.headers.put("del_same", "1");
-                                                recordList.add(oldRecord);
-                                                hasFirmRecord = true;
-                                            }
-                                        } else {
-                                            if (recordList.remove(oldRecord)) {
-                                                // 本轮扫描存在syncStamp大的oldRecord，因为是预提交记录，所以本轮暂不处理。
-                                                recordSet.get(oldRecord.bucket).add(oldRecord.recordKey);
-                                                checkRecordMap.get(checkRecordKey).remove(oldRecord.recordKey);
-                                                hasFirmRecord = true;
+                                initUploadRecordSet.get(record.bucket).add(uploadId);
+                            } else if (record.type() == UnSynchronizedRecord.Type.ERROR_PART_UPLOAD) {
+                                if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
+                                    continue;
+                                }
+                                if ("appendObject".equals(uploadId)) {
+                                    if (uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
+                                        continue;
+                                    }
+                                }
+                                uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).add(uploadId);
+                                uploadCountSet.computeIfAbsent(record.bucket + uploadId, v -> new AtomicLong()).incrementAndGet();
+                            } else if (record.type() == UnSynchronizedRecord.Type.ERROR_COMPLETE_PART) {
+                                if (mergeUploadRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)
+                                        || uploadIdRecordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(uploadId)) {
+                                    continue;
+                                }
+                                mergeUploadRecordSet.get(record.bucket).add(uploadId);
+                            }
+                            PART_SYNCING_AMOUNT.incrementAndGet();
+                            recordSet.get(record.bucket).add(record.rocksKey());
+                            String checkRecordKey = record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId;
+                            checkRecordMap.computeIfAbsent(checkRecordKey, v -> new ConcurrentHashMap<>()).put(record.recordKey, new Tuple2<>(System.currentTimeMillis(), record));
+                        } else {
+                            if (recordSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(record.recordKey)) {
+                                continue;
+                            }
+                            if (skipMutual(type, record)) {
+                                continue;
+                            }
+                            String checkRecordKey = record.index + File.separator + record.bucket + File.separator + record.object + File.separator + type + File.separator + record.versionId;
+                            String checkRecordKey2 = record.object + File.separator + type + File.separator + record.versionId;
+                            boolean skip = false;
+                            if (recordTypeSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(checkRecordKey2)) {
+                                if (recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).contains(checkRecordKey2)) {
+                                    if (checkRecordStatus(record)) {
+                                        continue;
+                                    }
+                                    // 本次扫描list到过同名对象record0，且record0是预提交记录或者是其他站点转发来的，
+                                    if (checkRecordMap.containsKey(checkRecordKey)) {
+                                        boolean hasFirmRecord = false;
+                                        for (Tuple2<Long, UnSynchronizedRecord> value : checkRecordMap.get(checkRecordKey).values()) {
+                                            UnSynchronizedRecord oldRecord = value.var2;
+                                            if (oldRecord.syncStamp.compareTo(record.syncStamp) < 0) {
+                                                if (recordList.remove(oldRecord)) {
+                                                    oldRecord.headers.put("del_same", "1");
+                                                    recordList.add(oldRecord);
+                                                    hasFirmRecord = true;
+                                                }
+                                            } else {
+                                                if (recordList.remove(oldRecord)) {
+                                                    // 本轮扫描存在syncStamp大的oldRecord，因为是预提交记录，所以本轮暂不处理。
+                                                    recordSet.get(oldRecord.bucket).add(oldRecord.recordKey);
+                                                    checkRecordMap.get(checkRecordKey).remove(oldRecord.recordKey);
+                                                    hasFirmRecord = true;
+                                                }
                                             }
                                         }
+                                        if (hasFirmRecord) {
+                                            recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).remove(checkRecordKey2);
+                                        }
                                     }
-                                    if (hasFirmRecord) {
-                                        recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).remove(checkRecordKey2);
+                                } else {
+                                    // 本次扫描list到过同名对象record0，且record0不是预提交记录也不是其他站点转发来的
+                                    if (checkRecordMap.containsKey(checkRecordKey)) {
+                                        for (Tuple2<Long, UnSynchronizedRecord> value : checkRecordMap.get(checkRecordKey).values()) {
+                                            UnSynchronizedRecord oldRecord = value.var2;
+                                            // 对同名对象的相同类型差异记录进行判断，删除syncStamp小的差异
+                                            if (oldRecord.syncStamp.compareTo(record.syncStamp) < 0) {
+                                                if (checkRecordStatus(record)) {
+                                                    skip = true;
+                                                    break;
+                                                }
+                                                if (recordList.remove(oldRecord)) {
+                                                    // 可能是以前的扫描没处理完，本轮recordList并不会有该oldRecord
+                                                    oldRecord.headers.put("del_same", "1");
+                                                    recordList.add(oldRecord);
+                                                }
+                                            } else {
+                                                record.headers.put("del_same", "1");
+                                            }
+                                        }
                                     }
                                 }
                             } else {
-                                // 本次扫描list到过同名对象record0，且record0不是预提交记录也不是其他站点转发来的
-                                if (checkRecordMap.containsKey(checkRecordKey)) {
-                                    for (Tuple2<Long, UnSynchronizedRecord> value : checkRecordMap.get(checkRecordKey).values()) {
-                                        UnSynchronizedRecord oldRecord = value.var2;
-                                        // 对同名对象的相同类型差异记录进行判断，删除syncStamp小的差异
-                                        if (oldRecord.syncStamp.compareTo(record.syncStamp) < 0) {
-                                            if (checkRecordStatus(record)) {
-                                                skip = true;
-                                                break;
-                                            }
-                                            if (recordList.remove(oldRecord)) {
-                                                // 可能是以前的扫描没处理完，本轮recordList并不会有该oldRecord
-                                                oldRecord.headers.put("del_same", "1");
-                                                recordList.add(oldRecord);
-                                            }
-                                        } else {
-                                            record.headers.put("del_same", "1");
-                                        }
-                                    }
+                                if (checkRecordStatus(record)) {
+                                    recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).add(checkRecordKey2);
                                 }
                             }
-                        } else {
-                            if (checkRecordStatus(record)) {
-                                recordCommitSet.computeIfAbsent(record.bucket, v -> new ConcurrentHashSet<>()).add(checkRecordKey2);
+
+                            if (skip) {
+                                continue;
                             }
+
+                            recordSet.get(record.bucket).add(record.recordKey);
+                            recordTypeSet.get(record.bucket).add(checkRecordKey2);
+                            checkRecordMap.computeIfAbsent(checkRecordKey, v -> new ConcurrentHashMap<>()).put(record.recordKey, new Tuple2<>(System.currentTimeMillis(), record));
                         }
 
-                        if (skip) {
-                            continue;
-                        }
-
-                        recordSet.get(record.bucket).add(record.recordKey);
-                        recordTypeSet.get(record.bucket).add(checkRecordKey2);
-                        checkRecordMap.computeIfAbsent(checkRecordKey, v -> new ConcurrentHashMap<>()).put(record.recordKey, new Tuple2<>(System.currentTimeMillis(), record));
                     }
-
-                    TOTAL_SYNCING_AMOUNT.incrementAndGet();
-                    long dataSize = Long.parseLong(record.headers.getOrDefault(CONTENT_LENGTH, "0")) / 1024;
-                    TOTAL_SYNCING_SIZE.addAndGet(dataSize);
                 }
+
+                TOTAL_SYNCING_AMOUNT.incrementAndGet();
+                long dataSize = getDataSizeFromRecord(record);
+                TOTAL_SYNCING_SIZE.addAndGet(dataSize);
                 recordList.add(record);
 
                 boolean breakLoop = false;
-                long dataSize = Long.parseLong(record.headers.getOrDefault(CONTENT_LENGTH, "0")) / 1024;
                 // 异构复制和moss的异步复制做区分限流，因为硬件的性能不同
                 if (hasExtraLimiter(record.index, DATASYNC_THROUGHPUT_QUOTA)) {
                     SyncRecordLimiter extraCountLimiter = getExtraLimiter(record.index, DATASYNC_THROUGHPUT_QUOTA);

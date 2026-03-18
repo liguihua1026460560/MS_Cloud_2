@@ -2,13 +2,17 @@ package com.macrosan.filesystem.utils;
 
 import com.google.common.base.Utf8;
 import com.macrosan.filesystem.nfs.NFSException;
+import com.macrosan.filesystem.nfs.NFSV4;
 import com.macrosan.filesystem.nfs.RpcCallHeader;
 import com.macrosan.filesystem.nfs.SunRpcHeader;
 import com.macrosan.filesystem.nfs.api.NFS4Proc;
 import com.macrosan.filesystem.nfs.api.NSMProc;
 import com.macrosan.filesystem.nfs.auth.AuthUnix;
+import com.macrosan.filesystem.nfs.call.v4.CBSequenceCall;
 import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
+import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
+import com.macrosan.filesystem.nfs.types.CBInfo;
 import com.macrosan.filesystem.nfs.types.CompoundContext;
 import com.macrosan.filesystem.nfs.types.NFS4Session;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
@@ -17,6 +21,7 @@ import lombok.extern.log4j.Log4j2;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
@@ -253,7 +258,7 @@ public class Nfs4Utils {
     }
 
     public static boolean checkOpenMode(boolean isWrite, int access, int stateIdType) {
-        switch (stateIdType){
+        switch (stateIdType) {
             case NFS4_OPEN_STID:
             case NFS4_LOCK_STID:
                 if (isWrite) {
@@ -263,7 +268,7 @@ public class Nfs4Utils {
                         checkShare(OPEN_SHARE_ACCESS_WRITE, access) ||
                         checkShare(OPEN_SHARE_ACCESS_BOTH, access);
             case NFS4_DELEG_STID:
-                return isWrite && (access  == OPEN_DELEGATE_READ);
+                return !(isWrite && (access == OPEN_DELEGATE_READ));
             default:
                 //bad_stateId
                 return false;
@@ -305,6 +310,27 @@ public class Nfs4Utils {
         compoundCall.setTagContent(new byte[0]);
         //todo
         compoundCall.setCallbackIdent(0);
+        CBSequenceCall cbSequenceCall = new CBSequenceCall();
+        cbSequenceCall.opt = NFSV4.CBOpcode.NFS4PROC_CB_SEQUENCE.opcode;
+        cbSequenceCall.sessionId = session.getSessionId();
+        cbSequenceCall.seqId = session.cbSeqId.incrementAndGet();
+        cbSequenceCall.slotId = 0;
+        cbSequenceCall.highSlotId = 0;
+        cbSequenceCall.isCache = false;
+        //todo
+        cbSequenceCall.referringCallList = 0;
+        compoundCall.callList.add(cbSequenceCall);
         return compoundCall;
     }
+
+    public synchronized static CompoundCall sendCB(NFS4Session session, List<CompoundCall> cbCallList, int mainOpt) {
+        CompoundCall compoundCall = buildCBCall(session);
+        compoundCall.callList.addAll(cbCallList);
+        compoundCall.setCount(compoundCall.callList.size());
+        session.nfsHandler.write(compoundCall);
+        NFSHandler.CBInfoMap.put(compoundCall.callHeader.header.id, new CBInfo(2, session.cbProgram, 1, mainOpt));
+        return compoundCall;
+    }
+
+//    public static CompoundCall buildNotifyLock()
 }

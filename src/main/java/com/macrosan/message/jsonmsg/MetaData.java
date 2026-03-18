@@ -156,6 +156,10 @@ public class MetaData implements Cloneable, SnapshotAware<MetaData> {
     @Cutting
     public long aggSize;
 
+    @JsonAttribute
+    @Cutting
+    public String lastAccessStamp;
+
     public boolean latestMetaIsViewable(String mark) {
         return isViewable(mark) && (getWeakUnView() == null || !getWeakUnView().contains(mark));
     }

@@ -1,6 +1,8 @@
 package com.macrosan.filesystem.ftp;
 
 import com.macrosan.constants.ServerConstants;
+import com.macrosan.filesystem.FsConstants;
+import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.ftp.handler.DataTransferHandler;
 import com.macrosan.filesystem.ftp.handler.ControlHandler;
 import com.macrosan.utils.cache.ClassUtils;
@@ -23,24 +25,33 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.macrosan.constants.SysConstants.CERT_CRT;
-import static com.macrosan.constants.SysConstants.PRIVATE_PEM;
+import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MAX_PORT;
 import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MIN_PORT;
 
 @Log4j2
 public class FTP {
     public static boolean ftpDebug = false;
-    static int ftpControllerPort = 21;
-    static int ftpsControllerPort = 990;
+    public static int ftpControllerPort = 21;
+    public static int ftpsControllerPort = 990;
     static Vertx vertx;
+    static DeploymentOptions options;
 
+    static {
+        /* 从redis中读取端口设置 */
+        try {
+            ftpControllerPort = FsUtils.getFsPort(FsConstants.FSConfig.FTP_CONTROL_PORT, ftpControllerPort);
+            ftpsControllerPort = FsUtils.getFsPort(FsConstants.FSConfig.FTPS_CONTROL_PORT, ftpsControllerPort);
+        } catch (Exception e) {
+            log.error("Failed to obtain FTP settings, default settings applied.", e);
+        }
+    }
 
     public static void start() {
         initProc();
         initDataTransfer();
-
-        DeploymentOptions options = new DeploymentOptions()
+        options = new DeploymentOptions()
                 .setInstances(ServerConstants.PROC_NUM);
         vertx = Vertx.vertx(new VertxOptions()
                 .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
@@ -52,6 +63,24 @@ public class FTP {
         log.info("start ftp data service in {}->{}", FTP_DATA_MIN_PORT, FTP_DATA_MAX_PORT);
     }
 
+    public static void restart() {
+        vertx.close(ar -> {
+            if (ar.succeeded()) {
+                vertx = Vertx.vertx(new VertxOptions()
+                        .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
+                        .setPreferNativeTransport(true));
+
+                vertx.rxDeployVerticle(FTPVerticle.class.getName(), options).subscribe();
+                log.info("restart ftp control service in {}", ftpControllerPort);
+                log.info("restart ftps control service in {}", ftpsControllerPort);
+                log.info("restart ftp data service in {}->{}", FTP_DATA_MIN_PORT, FTP_DATA_MAX_PORT);
+            } else {
+                log.error("restart ftp control service in {} failed", ftpControllerPort);
+                log.error("restart ftps control service in {} failed", ftpsControllerPort);
+                log.error("restart ftp data service in {}->{} failed", FTP_DATA_MIN_PORT, FTP_DATA_MAX_PORT);
+            }
+        });
+    }
 
     public static class FTPVerticle extends AbstractVerticle {
         @Override

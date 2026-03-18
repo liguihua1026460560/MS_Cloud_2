@@ -79,6 +79,7 @@ public class RemoveObjectMetaTaskRunner extends AbstractRemoveTaskRunner<Tuple2<
 
                     if (canTryEnd(metaData.key)) {
                         if (!scanner.isEnd()) {
+                            log.info("current key is {}, try end", metaData.key);
                             scanner.tryEnd();
                         }
                         return Mono.just(true);

@@ -37,7 +37,7 @@ public class LockV4Call extends CompoundCall {
             int ownerLen = buf.getInt(offset);
             owner = new byte[ownerLen];
             buf.getBytes(offset + 4, owner);
-            offset += (ownerLen + 3) / 4 * 4;
+            offset += (ownerLen + 3) / 4 * 4 + 4;
         } else {
             stateId.readStruct(buf, offset + 28);
             lockSeqId = buf.getInt(offset + 44);

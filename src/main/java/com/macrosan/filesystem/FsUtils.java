@@ -1,6 +1,7 @@
 package com.macrosan.filesystem;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache;
 import com.macrosan.ec.*;
 import com.macrosan.ec.server.ErasureServer;
@@ -52,8 +53,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
-import static com.macrosan.constants.SysConstants.ES_ON;
-import static com.macrosan.constants.SysConstants.ROCKS_CHUNK_FILE_KEY;
+import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.ECUtils.publishEcError;
 import static com.macrosan.ec.Utils.DEFAULT_META_HASH;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
@@ -478,7 +478,7 @@ public class FsUtils {
         return listObject(bucket, prefix, marker, maxSize, "*", -1);
     }
 
-    public static Mono<Boolean> setFsDelMark(Inode inode, List<Tuple3<String, String, String>> nodeList, String versionNum, boolean needDeleteInode, AtomicBoolean isFsDelMark) {
+    public static Mono<Boolean> setFsDelMark(Inode inode, List<Tuple3<String, String, String>> nodeList, String[] versionNum, boolean needDeleteInode, AtomicBoolean isFsDelMark) {
         return ErasureClient.getFsMetaVerUnlimited(inode.getBucket(), inode.getObjName(), inode.getVersionId(), nodeList, null, null, null, inode.getXAttrMap().get(QUOTA_KEY))
                 .zipWith(MsObjVersionUtils.getObjVersionIdReactive(inode.getBucket()))
                 .flatMap(tuple2 -> {
@@ -502,14 +502,20 @@ public class FsUtils {
                     // 将 stamp 从创建时间改成最后一次修改时间 MTime
                     meta.stamp = String.valueOf(inode.getMtime() * 1000L + inode.getMtimensec() / 1_000_000L);
                     if (meta.isAvailable() && meta.inode == inode.getNodeId()) {
-                        return ErasureClient
-                                .setDelMark(new DelMarkParams(inode.getBucket(), inode.getObjName(), inode.getVersionId(), meta, nodeList, tuple2.getT2(), versionNum)
-                                        .type(ERROR_DEL_INODE_META)
-                                        .needDeleteInode(needDeleteInode)
-                                        .updateQuotaKeyStr(inode.getXAttrMap().get(QUOTA_KEY))
-                                        .fileCookie(meta.cookie)
-                                        .nodeId(meta.inode))
-                                .map(r -> r > 0);
+                        return BucketSyncSwitchCache.isSyncSwitchOffMono(inode.getBucket())
+                                .flatMap(isSync -> Mono.just(VersionUtil.getVersionNumMaybeUpdate(isSync, inode.getNodeId())))
+                                .flatMap(newVersionNum -> {
+                                    //处理getFsMetaVerUnlimited 恢复流程之后后，versionNum比较小的情况，需再次获取最新的versionNum,记录下用于硬链接的更新
+                                    versionNum[0] = newVersionNum;
+                                    return ErasureClient
+                                            .setDelMark(new DelMarkParams(inode.getBucket(), inode.getObjName(), inode.getVersionId(), meta, nodeList, tuple2.getT2(), newVersionNum)
+                                                    .type(ERROR_DEL_INODE_META)
+                                                    .needDeleteInode(needDeleteInode)
+                                                    .updateQuotaKeyStr(inode.getXAttrMap().get(QUOTA_KEY))
+                                                    .fileCookie(meta.cookie)
+                                                    .nodeId(meta.inode))
+                                            .map(r -> r > 0);
+                                });
                     } else {
                         if (meta.deleteMarker || meta.deleteMark || (meta.isAvailable() && meta.inode != inode.getNodeId())) {
                             isFsDelMark.set(true);
@@ -1032,7 +1038,9 @@ public class FsUtils {
                     return deleteChunkFile0(dataPool, bucket, new String[]{f}, needCheck0);
                 }, 24)
                 .collectList()
-                .map(l -> true);
+                .map(l -> true)
+                .timeout(Duration.ofSeconds(20), Mono.just(false))
+                .onErrorResume(e -> Mono.just(false));
     }
 
     /**
@@ -1102,7 +1110,7 @@ public class FsUtils {
                                     return tuple.var1;
                                 });
                     }
-                })
+                }, 16)
                 .collectList()
                 .map(l -> true);
     }
@@ -1194,7 +1202,7 @@ public class FsUtils {
                     return Flux.fromArray(chunkFiles)
                             .flatMap(fileName -> {
                                 return deleteChunkMeta(fileName, bucket);
-                            })
+                            }, 16)
                             .collectList()
                             .flatMap(l -> deleteChunkMeta0(chunkFileName, bucket));
                 });
@@ -1445,14 +1453,14 @@ public class FsUtils {
         AtomicLong lastSize = new AtomicLong(last);
         int defaultSize = pool0.getPackageSize() * pool0.getK();
         byte[] buf = new byte[defaultSize];
-        streamController.subscribe(r -> {
-            holeSize.onNext(lastSize.get());
-        });
+        streamController.subscribe(holeSize::onNext);
         UnicastProcessor<byte[]> resFlux = UnicastProcessor.create(Queues.<byte[]>unboundedMultiproducer().get());
 
         holeSize.subscribe(size -> {
-            if (size > 0) {
-                long cur = Math.min(size, defaultSize);
+            long nowSize = lastSize.get();
+            if (nowSize > 0) {
+                long cur = Math.min(nowSize, defaultSize);
+                lastSize.addAndGet(-cur);
                 if (cur == defaultSize) {
                     resFlux.onNext(buf);
                 } else {
@@ -1461,12 +1469,38 @@ public class FsUtils {
                 for (int i = 1; i < pool0.getK(); i++) {
                     resFlux.onNext(EMPTY_BYTE);
                 }
-                lastSize.addAndGet(-cur);
             } else {
                 resFlux.onComplete();
+                holeSize.onComplete();
             }
         });
 
         return resFlux;
+    }
+
+    /**
+     * 从redis表2获取端口号
+     *
+     * @param portName 端口的名称
+     * @param defaultPort 端口的默认值
+     **/
+    public static int getFsPort(String portName, int defaultPort) {
+        int port = defaultPort;
+
+        try {
+            if (StringUtils.isBlank(portName)) {
+                return port;
+            }
+
+            String portValue = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).get(portName);
+            if (StringUtils.isNotBlank(portValue)) {
+                port = Integer.parseInt(portValue);
+            }
+
+        } catch (Exception e) {
+            log.error("get port value error, name: {}, ", portName, e);
+        }
+
+        return port;
     }
 }

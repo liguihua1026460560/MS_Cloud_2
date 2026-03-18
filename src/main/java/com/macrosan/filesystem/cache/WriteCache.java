@@ -117,44 +117,21 @@ public class WriteCache {
         });
     }
 
-    public Mono<Inode> cifsWrite(long offset, byte[] bytes, Inode inode, int flag) {
-        // 根据文件大小决定写入数据池还是缓存池
-        StorageOperate dataOperate = new StorageOperate(DATA, inode.getObjName(), bytes.length);
-        StoragePool dataPool = StoragePoolFactory.getStoragePool(dataOperate, inode.getBucket());
-        Encoder encoder = dataPool.getEncoder(bytes.length);
-        encoder.put(bytes);
-        Digest digest = new Md5Digest();
-        digest.update(bytes);
-        String md5 = Hex.encodeHexString(digest.digest());
-        return FSQuotaUtils.addQuotaDirInfo(inode, System.currentTimeMillis(), true)
-                .flatMap(i -> {
-                    if (i.getLinkN() == CAP_QUOTA_EXCCED_INODE.getLinkN()) {
-                        throw new NFSException(NFS3ERR_DQUOT, "can not write ,because of exceed quota.bucket:" + bucket + ",objName:" + inode.getObjName() + ",nodeId:" + inode.getNodeId());
-                    }
-                    return putObj(encoder, inode, offset, bytes.length, md5, 1, dataPool);
-                });
-    }
-
     public Mono<Boolean> nfsWrite(long offset, byte[] bytes, Inode inode, int flag) {
         long key = offset / MAX_TRUNK_CACHE_SIZE;
         boolean canWrite = cacheData.get(key) != null;
-        return FSQuotaUtils.addQuotaDirInfo(inode, System.currentTimeMillis(), true)
-                .flatMap(i -> {
-                    if (i.getLinkN() == CAP_QUOTA_EXCCED_INODE.getLinkN()) {
-                        throw new NFSException(NFS3ERR_DQUOT, "can not write ,because of exceed quota.bucket:" + bucket + ",objName:" + inode.getObjName() + ",nodeId:" + inode.getNodeId());
-                    }
-                    if (flag != 0 || (AVAILABLE_CACHE_NUM.get() <= 0 && !canWrite)) {//同步写直接进行put
-                        try {
-                            return directWrite(offset, bytes, inode);
-                        } finally {
-                            if (CIFS.cifsDebug) {
-                                log.info("【write num】write num:{},flag:{},can write:{}", writeNum.get(), flag, canWrite);
-                            }
-                            writeNum.decrementAndGet();
-                        }
-                    }
-                    return nfsWriteCache(bytes, inode, offset);
-                });
+        if (flag != 0 || (AVAILABLE_CACHE_NUM.get() <= 0 && !canWrite)) {
+            //同步写直接进行put
+            try {
+                return directWrite(offset, bytes, inode);
+            } finally {
+                if (CIFS.cifsDebug) {
+                    log.info("【write num】write num:{},flag:{},can write:{}", writeNum.get(), flag, canWrite);
+                }
+                writeNum.decrementAndGet();
+            }
+        }
+        return nfsWriteCache(bytes, inode, offset);
     }
 
     private Mono<Boolean> directWrite(long offset, byte[] bytes, Inode inode) {

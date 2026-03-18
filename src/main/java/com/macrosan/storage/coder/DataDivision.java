@@ -207,7 +207,7 @@ public class DataDivision {
 
     private Mono<Boolean> putPart(int partN, List<UnicastProcessor<Payload>> publisher, List<Tuple3<String, String, String>> nodeList) {
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, nodeList);
-        List<Integer> errorChunksList = new LinkedList<>();
+        Set<Integer> errorChunksList = new HashSet<>();
         MonoProcessor<Boolean> res = MonoProcessor.create();
 
         int[] requestNum = new int[nodeList.size()];
@@ -243,7 +243,7 @@ public class DataDivision {
                         SocketReqMsg errorMsg = this.errorMsg.copy()
                                 .put("partNum", partInfos[partN].partNum)
                                 .put("endIndex", String.valueOf(partInfos[partN].partSize - 1))
-                                .put("errorChunksList", Json.encode(errorChunksList))
+                                .put("errorChunksList", Json.encode(new ArrayList<>(errorChunksList)))
                                 .put("fileName", partInfos[partN].fileName);
                         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(storagePool.getVnodePrefix());
                         errorMsg.put("poolQueueTag", poolQueueTag);
