@@ -161,6 +161,10 @@ public class CacheSmallObjectStrategy extends SelectorStrategy {
         ErasureServer.DISK_SCHEDULER.schedule(this::check, 30, TimeUnit.SECONDS);
     }
 
+    public long getBoundary() {
+        return boundary;
+    }
+
     private void existCacheMigrate() {
         RedisCommands<String, String> command = RedisConnPool.getInstance().getCommand(REDIS_MIGING_V_INDEX);
         ScanIterator<String> iterator = ScanIterator.scan(command, new ScanArgs().match("running_*"));

@@ -2,27 +2,35 @@ package com.macrosan.filesystem.nfs.types;
 
 
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.ec.ErasureClient;
 import com.macrosan.filesystem.FsConstants;
+import com.macrosan.filesystem.quota.FSQuotaRealService;
+import com.macrosan.filesystem.utils.FSQuotaUtils;
+import com.macrosan.message.jsonmsg.BucketInfo;
+import com.macrosan.message.jsonmsg.DirInfo;
+import com.macrosan.message.jsonmsg.FSQuotaConfig;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import io.netty.buffer.ByteBuf;
 import lombok.ToString;
+import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static com.macrosan.constants.SysConstants.REDIS_BUCKETINFO_INDEX;
-import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
+import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.FSID_BUCKET;
 import static com.macrosan.filesystem.nfs.api.NFS4Proc.ROOT_INODE;
 import static com.macrosan.filesystem.nfs.call.v4.SetAttrV4Call.NFS4_SET_TO_CLIENT_TIME;
 import static com.macrosan.filesystem.nfs.call.v4.SetAttrV4Call.NFS4_SET_TO_SERVER_TIME;
-import static com.macrosan.storage.strategy.StorageStrategy.POOL_STRATEGY_MAP;
+import static com.macrosan.filesystem.quota.FSQuotaConstants.FS_DIR_QUOTA;
 
-
+@Log4j2
 @ToString
 public class FAttr4 {
     public static final int supportedAttrs = 1 << 0;
@@ -231,6 +239,10 @@ public class FAttr4 {
     public int[] supportAttr;
     public long totalBytes;
     public long freeBytes;
+    public long availFreeBytes;
+    public Map<Integer, Map<Integer, Object>> maskAttrMap = new HashMap<>();
+    public List<Boolean> verifyRes = new ArrayList<>();
+
 
     public FAttr4(Inode inode, long fsid, int[] mask, int minorVersion) {
         this.inode = inode;
@@ -240,37 +252,87 @@ public class FAttr4 {
         this.minorVersion = minorVersion;
         objAttr = new ObjAttr();
         mapToMask();
-        setSpaceTotal();
     }
 
-    public void setSpaceTotal() {
+    public Mono<Boolean> setSpaceTotal() {
         if (mask.length > 1 && ((mask[1] & spaceAvail) != 0 || (mask[1] & spaceTotal) != 0 || (mask[1] & spaceFree) != 0)) {
-            List<StoragePool> storagePoolList;
             if (inode != null) {
-                storagePoolList = StoragePoolFactory.getAvailableStorages(inode.getBucket());
+                return FSQuotaUtils.findFinalMinFsQuotaConfig(inode.getBucket(), inode.getNodeId())
+                        .flatMap(tuple -> {
+                            FSQuotaConfig config = tuple.getT1();
+                            long inodeId = tuple.getT2();
+                            if (inodeId == 1L) {
+                                return ErasureClient.reduceBucketInfo(inode.getBucket())
+                                        .filter(BucketInfo::isAvailable)
+                                        .map(BucketInfo::getBucketStorage)
+                                        .doOnError(e -> log.error("get bucket used capacity error", e))
+                                        .defaultIfEmpty("0")
+                                        .flatMap(usedCapacityStr -> {
+                                            long usedCapacity = Long.parseLong(usedCapacityStr);
+                                            long hard = config.getCapacityHardQuota() != 0 ? config.getCapacityHardQuota() : -1;
+                                            long totalSize = (hard > 0) ? Math.max(hard, usedCapacity) : 0;
+                                            long availableSize = Math.max(0, totalSize - usedCapacity);
+
+                                            this.totalBytes = totalSize;
+                                            this.freeBytes = availableSize;
+                                            this.availFreeBytes = this.freeBytes;
+
+                                            return Mono.just(true);
+                                        });
+                            }
+
+                            return FSQuotaRealService.getFsQuotaInfo(inode.getBucket(), inodeId, FS_DIR_QUOTA, 0)
+                                    .flatMap(dirInfo -> {
+                                        if (DirInfo.isErrorInfo(dirInfo)) {
+                                            return Mono.empty();
+                                        } else {
+                                            long usedCapacity = Long.parseLong(dirInfo.getUsedCap());
+                                            long hard = config.getCapacityHardQuota() != 0 ? config.getCapacityHardQuota() : -1;
+                                            long totalSize = (hard > 0) ? Math.max(hard, usedCapacity) : 0;
+                                            long availableSize = Math.max(0, totalSize - usedCapacity);
+
+                                            this.totalBytes = totalSize;
+                                            this.freeBytes = availableSize;
+                                            this.availFreeBytes = this.freeBytes;
+                                        }
+
+                                        return Mono.just(true);
+                                    });
+
+                        })
+                        // 只有当目录以及其任意祖先目录都不存在配额时才会进这里
+                        .switchIfEmpty(Mono.defer(() -> {
+                            List<StoragePool> storagePoolList = StoragePoolFactory.getAvailableStoragesWithCachePool(inode.getBucket());
+                            for (StoragePool pool : storagePoolList) {
+                                int km = pool.getM() + pool.getK();
+                                int k = pool.getK();
+
+                                this.totalBytes += (pool.getCache().totalSize + pool.getCache().firstPartCapacity) / km * k;
+                                this.freeBytes += (pool.getCache().totalSize + pool.getCache().firstPartCapacity - pool.getCache().size - pool.getCache().firstPartUsedSize) / km * k;
+                            }
+                            this.availFreeBytes = this.freeBytes;
+                            return Mono.just(true);
+                        }));
             } else {
-                // todo /目录挂载显示容量
-                Map<String, String> fsidToBucket = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).hgetall(FSID_BUCKET);
-                Set<String> dataPoolSet = new HashSet<>();
-                fsidToBucket.values().stream()
-                        .map(bucket -> RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hgetall(bucket))
-                        .filter(bucketInfo -> StringUtils.isNotBlank(bucketInfo.get("nfs")) && bucketInfo.get("nfs").equals("1"))
-                        .map(bucketInfo -> bucketInfo.get("storage_strategy"))
-                        .map(storageStrategy -> POOL_STRATEGY_MAP.get(storageStrategy) != null ? POOL_STRATEGY_MAP.get(storageStrategy).dataPool : new HashSet<String>())
-                        .forEach(dataPoolSet::addAll);
-                storagePoolList = StoragePoolFactory.getAvailableStorages(dataPoolSet);
-//                totalBytes = 0xffffffffff000000L;
-//                freeBytes = totalBytes;
-
+                Set<StoragePool> dataPoolSet = new HashSet<>();
+                return RedisConnPool.getInstance().getReactive(REDIS_SYSINFO_INDEX).hgetall(FSID_BUCKET)
+                        .flatMap(fsidToBucket -> Flux.fromIterable(fsidToBucket.values()).concatMap(bucket -> RedisConnPool.getInstance().getReactive(REDIS_BUCKETINFO_INDEX).hgetall(bucket))
+                                .filter(bucketInfo -> StringUtils.isNotBlank(bucketInfo.get("nfs")) && bucketInfo.get("nfs").equals("1"))
+                                .flatMap(bucketInfo -> Mono.just(StoragePoolFactory.getAvailableStoragesWithCachePool(bucketInfo.get("bucket_name"))))
+                                .doOnNext(dataPoolSet::addAll)
+                                .collectList().map(v -> {
+                                    for (StoragePool pool : dataPoolSet) {
+                                        int km = pool.getM() + pool.getK();
+                                        int k = pool.getK();
+                                        this.totalBytes += (pool.getCache().totalSize + pool.getCache().firstPartCapacity) / km * k;
+                                        this.freeBytes += (pool.getCache().totalSize + pool.getCache().firstPartCapacity - pool.getCache().size - pool.getCache().firstPartUsedSize) / km * k;
+                                    }
+                                    this.availFreeBytes = this.freeBytes;
+                                    return true;
+                                }));
             }
-            for (StoragePool pool : storagePoolList) {
-                int km = pool.getM() + pool.getK();
-                int k = pool.getK();
-                totalBytes += pool.getCache().totalSize / km * k;
-                freeBytes += (pool.getCache().totalSize - pool.getCache().size) / km * k;
-            }
-
         }
+        return Mono.just(true);
     }
 
     public FAttr4(int[] mask, int minorVersion) {
@@ -296,15 +358,16 @@ public class FAttr4 {
     public void readStruct(ByteBuf buf, int offset) {
         int[] finalOffset = new int[]{offset};
         for (int i = 0; i < mask.length; i++) {
+            Map<Integer, Object> attrMap = maskAttrMap.computeIfAbsent(i, k -> new HashMap<>());
             switch (i) {
                 case 0:
-                    getMask(Mask1.class, mask[0]).forEach(mask1 -> readMask1(buf, finalOffset, mask1.mask, objAttr));
+                    getMask(Mask1.class, mask[0]).forEach(mask1 -> readMask1(buf, finalOffset, mask1.mask, objAttr, attrMap, verifyRes));
                     break;
                 case 1:
-                    getMask(Mask2.class, mask[1]).forEach(mask2 -> readMask2(buf, finalOffset, mask2.mask, objAttr));
+                    getMask(Mask2.class, mask[1]).forEach(mask2 -> readMask2(buf, finalOffset, mask2.mask, objAttr, attrMap, verifyRes));
                     break;
                 case 2:
-                    getMask(Mask3.class, mask[2]).forEach(mask3 -> readMask3(buf, finalOffset, mask3.mask, objAttr));
+                    getMask(Mask3.class, mask[2]).forEach(mask3 -> readMask3(buf, finalOffset, mask3.mask, objAttr, attrMap, verifyRes));
                     break;
             }
         }
@@ -327,8 +390,9 @@ public class FAttr4 {
         return finalOffset[0] - start;
     }
 
-    public static void readMask1(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr) {
+    public static void readMask1(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr, Map<Integer, Object> extraAttrMap, List<Boolean> verifyRes) {
         int offset = finalOffset[0];
+        int res = 0;
         switch (mask) {
             case size:
                 long size = buf.getLong(offset);
@@ -336,10 +400,76 @@ public class FAttr4 {
                 attr.size = size;
                 offset += 8;
                 break;
-            // r w
-//            case archive:
-            case acl:
+            case type:
+                int type0 = buf.getInt(offset);
+                extraAttrMap.put(type, type0);
                 offset += 4;
+                break;
+            case expireType:
+            case uniqueHandle:
+            case nameAttr:
+            case acl:
+            case caseInSensitive:
+            case chownRestricted:
+            case aclSupport:
+                res = buf.getInt(offset);
+                verifyRes.add(res == 0);
+                offset += 4;
+                break;
+            case change:
+                long change0 = buf.getLong(offset);
+                extraAttrMap.put(change, change0);
+                offset += 8;
+                break;
+            case linkSupport:
+            case symlinkSupport:
+            case homogeneous:
+            case canSetTime:
+            case casePreserving:
+                res = buf.getInt(offset);
+                verifyRes.add(res == 1);
+                offset += 4;
+                break;
+            case fsId:
+                long majorId = buf.getLong(offset);
+                long minorId = buf.getLong(offset + 8);
+                verifyRes.add(majorId == 0 && minorId == 0);
+                offset += 16;
+                break;
+            case leaseTime:
+                int leaseTime0 = buf.getInt(offset);
+                verifyRes.add(leaseTime0 == NFS4_LEASE_TIME);
+                offset += 4;
+                break;
+            case filesAvail:
+            case filesFree:
+            case filesTotal:
+                long filesTotal0 = buf.getLong(offset);
+                verifyRes.add(filesTotal0 == Long.MAX_VALUE);
+                offset += 8;
+                break;
+            case fsLocations:
+                int pathname0 = buf.getInt(offset);
+                int serverPathname0 = buf.getInt(offset + 4);
+                verifyRes.add(pathname0 == 0 && serverPathname0 == 0);
+                offset += 8;
+                break;
+            case maxFileSize:
+                long maxFileSize0 = buf.getLong(offset);
+                verifyRes.add(maxFileSize0 == MAX_UPLOAD_TOTAL_SIZE);
+                offset += 8;
+                break;
+            case maxLink:
+            case maxName:
+                res = buf.getInt(offset);
+                verifyRes.add(res == 255);
+                offset += 4;
+                break;
+            case maxRead:
+            case maxWrite:
+                long maxWrite0 = buf.getLong(offset);
+                verifyRes.add(maxWrite0 == 1048576);
+                offset += 8;
                 break;
             //r w
 //            case hidden:
@@ -348,13 +478,23 @@ public class FAttr4 {
         finalOffset[0] = offset;
     }
 
-    public static void readMask2(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr) {
+    public static void readMask2(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr, Map<Integer, Object> extraAttrMap, List<Boolean> verifyRes) {
         int offset = finalOffset[0];
+        int res = 0;
         switch (mask) {
             case mode:
                 int mode = buf.getInt(offset);
                 attr.hasMode = 1;
                 attr.mode = mode;
+                offset += 4;
+                break;
+            case noTrunc:
+                res = buf.getInt(offset);
+                verifyRes.add(res == 1);
+                break;
+            case numLinks:
+                int numLink0 = buf.getInt(offset);
+                extraAttrMap.put(numLinks, numLink0);
                 offset += 4;
                 break;
             case owner:
@@ -375,6 +515,32 @@ public class FAttr4 {
                 attr.hasGid = 1;
                 attr.gid = Integer.parseInt(new String(group));
                 break;
+            case rawDev:
+                int majorDev = buf.getInt(offset);
+                int minorDev = buf.getInt(offset + 4);
+                extraAttrMap.put(rawDev, new int[]{majorDev, minorDev});
+                offset += 8;
+                break;
+            case spaceAvail:
+                long spaceAvail0 = buf.getLong(offset);
+                extraAttrMap.put(spaceAvail, spaceAvail0);
+                offset += 8;
+                break;
+            case spaceFree:
+                long spaceFree0 = buf.getLong(offset);
+                extraAttrMap.put(spaceFree, spaceFree0);
+                offset += 8;
+                break;
+            case spaceTotal:
+                long spaceTotal0 = buf.getLong(offset);
+                extraAttrMap.put(spaceTotal, spaceTotal0);
+                offset += 8;
+                break;
+            case spaceUsed:
+                long spaceUsed0 = buf.getLong(offset);
+                extraAttrMap.put(spaceUsed, spaceUsed0);
+                offset += 8;
+                break;
             // r w
 //            case system:
             case timeAccessSet:
@@ -391,6 +557,29 @@ public class FAttr4 {
                         offset += 12;
                         break;
                 }
+                break;
+            case timeAccess:
+                attr.hasAtime = 1;
+                attr.atime = (int) buf.getLong(offset);
+                attr.atimeNano = buf.getInt(offset + 8);
+                offset += 12;
+                break;
+            case timeDelta:
+                //seconds,nSeconds
+                long seconds = buf.getLong(offset);
+                int nSeconds = buf.getInt(offset + 8);
+                verifyRes.add(seconds == 0 && nSeconds == 1000000);
+                offset += 12;
+                break;
+            case timeMetaData:
+                attr.ctime = (int) buf.getLong(offset);
+                attr.ctimeNano = buf.getInt(offset + 8);
+                offset += 12;
+                break;
+            case timeModify:
+                attr.mtime = (int) buf.getLong(offset);
+                attr.mtimeNano = buf.getInt(offset + 8);
+                offset += 12;
                 break;
             //r w
 //            case timeBackup:
@@ -410,7 +599,14 @@ public class FAttr4 {
                         break;
                 }
                 break;
+            case mountedOnFileId:
+                long mountedOnFileId0 = buf.getLong(offset);
+                extraAttrMap.put(mountedOnFileId, mountedOnFileId0);
+                offset += 8;
+                break;
             case fsLayoutType:
+                int fsLayoutType0 = buf.getInt(offset);
+                verifyRes.add(fsLayoutType0 == 0);
                 offset += 4;
                 break;
         }
@@ -418,7 +614,7 @@ public class FAttr4 {
 
     }
 
-    public static void readMask3(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr) {
+    public static void readMask3(ByteBuf buf, int[] finalOffset, int mask, ObjAttr attr, Map<Integer, Object> extraAttrMap, List<Boolean> verifyRes) {
         int offset = finalOffset[0];
         switch (mask) {
             //pnfs
@@ -458,29 +654,7 @@ public class FAttr4 {
             case type:
                 int type = 2;
                 if (inode != null) {
-                    switch (inode.getMode() & FsConstants.S_IFMT) {
-                        case FsConstants.S_IFDIR:
-                            type = FAttr3.fType.NF_DIR.type;
-                            break;
-                        case FsConstants.S_IFLNK:
-                            type = FAttr3.fType.NF_LINK.type;
-                            break;
-                        case S_IFREG:
-                            type = FAttr3.fType.NF_REG.type;
-                            break;
-                        case FsConstants.S_IFBLK:
-                            type = FAttr3.fType.NF_BLK.type;
-                            break;
-                        case FsConstants.S_IFCHR:
-                            type = FAttr3.fType.NF_CHR.type;
-                            break;
-                        case FsConstants.S_IFFIFO:
-                            type = FAttr3.fType.NF_FIFO.type;
-                            break;
-                        default:
-                            type = FAttr3.fType.NF_BAD.type;
-                            break;
-                    }
+                    type = getType(inode);
                 }
                 buf.setInt(offset, type);
                 offset += 4;
@@ -548,17 +722,17 @@ public class FAttr4 {
             //fileAvail=fileFree+创建对象中当前未被open数
             //文件句柄可用数
             case filesAvail:
-                buf.setLong(offset, 1149756);
+                buf.setLong(offset, Long.MAX_VALUE);
                 offset += 8;
                 break;
             //文件句柄还未创建数
             case filesFree:
-                buf.setLong(offset, 1149756);
+                buf.setLong(offset, Long.MAX_VALUE);
                 offset += 8;
                 break;
             //文件句柄总可使用数
             case filesTotal:
-                buf.setLong(offset, 1310720);
+                buf.setLong(offset, Long.MAX_VALUE);
                 offset += 8;
                 break;
             case fsLocations:
@@ -569,7 +743,7 @@ public class FAttr4 {
                 offset += 8;
                 break;
             case maxFileSize:
-                buf.setLong(offset, 2199023251456L);
+                buf.setLong(offset, MAX_UPLOAD_TOTAL_SIZE);
                 offset += 8;
                 break;
             case maxLink:
@@ -579,7 +753,7 @@ public class FAttr4 {
                 break;
             case maxRead:
             case maxWrite:
-                buf.setLong(offset, 1048576);
+                buf.setLong(offset, (1048576));
                 offset += 8;
                 break;
 
@@ -631,7 +805,6 @@ public class FAttr4 {
                 offset += 8;
                 break;
             case spaceTotal:
-                //TODO 返回存储池空间大小
                 buf.setLong(offset, this.totalBytes);
                 offset += 8;
                 break;
@@ -671,7 +844,7 @@ public class FAttr4 {
                 offset += 12;
                 break;
             case mountedOnFileId:
-                long fileId = inode == null ? ROOT_INODE.getNodeId() : inode.getNodeId();
+                long fileId = inode == null ? ROOT_INODE.getNodeId() : fsid;
                 buf.setLong(offset, fileId);
                 offset += 8;
                 break;
@@ -738,6 +911,64 @@ public class FAttr4 {
     public static <T extends Mask> List<T> getMask(Class<T> clazz, int mask) {
         return Arrays.stream(clazz.getEnumConstants()).filter(value -> (value.getMask() & mask) != 0)
                 .collect(Collectors.toList());
+    }
+
+    public static int getType(Inode inode) {
+        switch (inode.getMode() & FsConstants.S_IFMT) {
+            case FsConstants.S_IFDIR:
+                return FAttr3.fType.NF_DIR.type;
+            case FsConstants.S_IFLNK:
+                return FAttr3.fType.NF_LINK.type;
+            case FsConstants.S_IFREG:
+                return FAttr3.fType.NF_REG.type;
+            case FsConstants.S_IFBLK:
+                return FAttr3.fType.NF_BLK.type;
+            case FsConstants.S_IFCHR:
+                return FAttr3.fType.NF_CHR.type;
+            case FsConstants.S_IFFIFO:
+                return FAttr3.fType.NF_FIFO.type;
+            default:
+                return FAttr3.fType.NF_BAD.type;
+        }
+    }
+
+    public static boolean verifyAttr(int maskIndex, int mask, Object value, Inode inode, int fsid, FAttr4 fAttr4, boolean same) {
+        if (maskIndex == 0){
+            switch (mask){
+                case type:
+                    return getType(inode) == (int) value;
+                case change:
+                    return inode.getCtime() == (long) value;
+                default:
+                    return same;
+            }
+
+        }else if (maskIndex == 1){
+            switch (mask){
+                case numLinks:
+                    return inode.getLinkN() == (int) value;
+                case rawDev:
+                    int[] dev = (int[]) value;
+                    return inode.getMajorDev() == dev[0] && inode.getMajorDev() == dev[1];
+                case spaceAvail:
+                    return fAttr4.freeBytes == (long) value;
+                case spaceFree:
+                    return fAttr4.freeBytes == (long) value;
+                case spaceTotal:
+                    return fAttr4.totalBytes == (long) value;
+                case spaceUsed:
+                    long spaceUsed = 0;
+                    if (inode != null && (inode.getMode() & S_IFMT) != S_IFLNK) {
+                        spaceUsed = inode.getSize() % 4096 == 0 ? inode.getSize() : (inode.getSize() / 4096 + 1) * 4096;
+                    }
+                    return spaceUsed == (long) value;
+                case mountedOnFileId:
+                    return fsid == (int) value;
+                default:
+                    return same;
+            }
+        }
+        return same;
     }
 
 

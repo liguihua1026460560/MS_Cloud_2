@@ -19,7 +19,7 @@ import com.macrosan.filesystem.nfs.call.rquota.GetQuotaCall;
 import com.macrosan.filesystem.nfs.call.rquota.SetQuotaCall;
 import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
 import com.macrosan.filesystem.nfs.reply.*;
-import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
+import com.macrosan.filesystem.nfs.reply.v4.*;
 import com.macrosan.filesystem.nfs.types.CBInfo;
 import com.macrosan.filesystem.quota.nfs.NFSRQuotaProc;
 import com.macrosan.filesystem.utils.RunNumUtils;
@@ -36,6 +36,7 @@ import io.vertx.reactivex.core.datagram.DatagramSocket;
 import io.vertx.reactivex.core.net.NetSocket;
 import io.vertx.reactivex.core.net.SocketAddress;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 import reactor.core.Fuseable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
@@ -55,11 +56,14 @@ import static com.macrosan.filesystem.FsConstants.NFSACLOpCode.*;
 import static com.macrosan.filesystem.FsConstants.NFSQuotaOpCode.NFSQUOTAPROC_GETQUOTA;
 import static com.macrosan.filesystem.FsConstants.NFSQuotaOpCode.NFSQUOTAPROC_SETQUOTA;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_I0;
+import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3_OK;
+import static com.macrosan.filesystem.cifs.handler.SMBHandler.localIpDebug;
 import static com.macrosan.filesystem.nfs.NFSV3.Opcode.*;
 import static com.macrosan.filesystem.nfs.NFSV4.CBOpcode.NFS4PROC_CB_COMPOUND;
 import static com.macrosan.filesystem.nfs.NFSV4.CBOpcode.NFS4PROC_CB_NULL;
-import static com.macrosan.filesystem.nfs.NFSV4.Opcode.NFS4PROC_COMPOUND;
-import static com.macrosan.filesystem.nfs.NFSV4.Opcode.NFS4PROC_NULL;
+import static com.macrosan.filesystem.nfs.NFSV4.Opcode.*;
+import static com.macrosan.filesystem.nfs.NFSV4.Opcode.NFS4PROC_REMOVE;
+import static com.macrosan.filesystem.nfs.api.NSMProc.isLocalIp;
 import static com.macrosan.utils.quota.StatisticsRecorder.addFileStatisticRecord;
 import static com.macrosan.utils.quota.StatisticsRecorder.getRequestType;
 
@@ -71,10 +75,13 @@ public class NFSHandler extends RpcHandler {
     public static long SCAN_DURATION = 60_000L;
     public static long CLEAR_DURATION = 600_000L;
     public static Map<Integer, CBInfo> CBInfoMap = new ConcurrentHashMap<>();
+    public static Map<String, Integer> localIpMap = new ConcurrentHashMap<>();
+    public static Map<String, Long> newIpMap = new ConcurrentHashMap<>();
     static MsExecutor executor = new MsExecutor(1, 1, new MsThreadFactory("NFSHandlerClear-"));
 
     static {
         executor.submit(NFSHandler::tryClearCache);
+        executor.submit(NFSHandler::tryClearLocalIp);
     }
 
     public DatagramSocket udpSocket;
@@ -109,6 +116,40 @@ public class NFSHandler extends RpcHandler {
             log.error("tryClearCache error: ", e);
         } finally {
             executor.schedule(NFSHandler::tryClearCache, SCAN_DURATION, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private static void tryClearLocalIp() {
+        try {
+            for (String localIp : localIpMap.keySet()) {
+                if (!isLocalIp(localIp)) {
+                    localIpMap.computeIfPresent(localIp, (ip, flag) -> {
+                        if (flag < 5) {
+                            return flag + 1;
+                        } else {
+                            if (localIpDebug) {
+                                log.info("clear nfs LocalIp : {}", ip);
+                            }
+                            return null;
+                        }
+                    });
+                } else {
+                    localIpMap.put(localIp, 0);
+                }
+            }
+            for (String newIp : newIpMap.keySet()) {
+                Long time = newIpMap.getOrDefault(newIp, 0L);
+                if (System.nanoTime() - time > 20_000_000_000L || !localIpMap.containsKey(newIp)) {
+                    if (localIpDebug) {
+                        log.info("clear nfs newIp : {}", newIp);
+                    }
+                    newIpMap.remove(newIp);
+                }
+            }
+        } catch (Exception e) {
+            log.error("clear nfs LocalIp error, ", e);
+        } finally {
+            executor.schedule(NFSHandler::tryClearLocalIp, 2_000, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -274,7 +315,11 @@ public class NFSHandler extends RpcHandler {
                                 return Mono.just(reply);
                             }
                         } else if (e instanceof NFSException && ((NFSException) e).nfsError) {
-                            log.info("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                            if (((NFSException) e).getMessage().startsWith("The fsid")) {
+                                NFSBucketInfo.logFsidInfo(opcode, ((NFSException) e).getMessage());
+                            } else {
+                                log.info("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                            }
                             return mapOpcodeToReply(callHeader, opcode, ((NFSException) e).getErrCode(), proc);
                         } else {
                             if (isOptNeedReleaseLock(opcode)) {
@@ -338,7 +383,11 @@ public class NFSHandler extends RpcHandler {
         } catch (Exception e) {
             if (e instanceof NFSException && ((NFSException) e).nfsError) {
                 if (((NFSException) e).getErrCode() == FsConstants.NfsErrorNo.NFS3ERR_STALE) {
-                    log.error("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                    if (((NFSException) e).getMessage().startsWith("The fsid")) {
+                        NFSBucketInfo.logFsidError(opcode, ((NFSException) e).getMessage());
+                    } else {
+                        log.error("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                    }
                 } else {
                     log.error("NFS PROCESS error.opt:{}, ", opcode, e);
                 }
@@ -665,6 +714,7 @@ public class NFSHandler extends RpcHandler {
         if (index >= compoundCall.getCount()) {
             return Mono.just((RpcReply) compoundReply).zipWith(Mono.just(maxBufSize));
         }
+        AtomicLong startTime = new AtomicLong(DateChecker.getCurrentTime());
         int opt = buf.getInt(offset);
         NFSV4.Opcode opcode = NFSV4.values[opt];
         NFSV4.OptInfo proc = NFSV4.v4Opt[opt];
@@ -690,8 +740,25 @@ public class NFSHandler extends RpcHandler {
         return res.timeout(Duration.ofSeconds(NFS_TIME_OUT))
                 .onErrorResume(e -> {
                     if (e instanceof TimeoutException) {
-                        if (opt == NFSV4.Opcode.NFS4PROC_RENAME.opcode && reqHeader.optCompleted) {
+                        if (opt == NFS4PROC_RENAME.opcode && reqHeader.optCompleted) {
                             releaseLock(reqHeader);
+                        }
+                        if (opcode.equals(NFS4PROC_RENAME) && (!reqHeader.optCompleted || reqHeader.repeat)) {
+                            log.info("NFS rename running {} , optCompleted {}, repeat {}", callHeader.getHeader().id, reqHeader.optCompleted, reqHeader.repeat);
+                            ReNameV4Reply reNameReply = new ReNameV4Reply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
+                            reNameReply.opt = NFS4PROC_RENAME.opcode;
+                            reNameReply.status = FsConstants.NfsErrorNo.NFS3ERR_JUKEBOX;
+                            return Mono.just(reNameReply);
+                        }
+                        if (opcode.equals(NFS4PROC_REMOVE)) {
+                            //压力大时服务端删除数据块超时默认返回成功
+                            RemoveV4Reply reply = new RemoveV4Reply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
+                            reply.opt = NFS4PROC_REMOVE.opcode;
+                            if (NFS.nfsDebug) {
+                                log.info("NFS PROCESS error.opt:{},bucket:{},msg:{}", opcode, reqHeader.bucket, e.getMessage());
+                            }
+                            reply.status = FsConstants.NfsErrorNo.NFS3_OK;
+                            return Mono.just(reply);
                         }
                         log.error("NFS PROCESS timeout opt:{}", opcode);
                     } else if (e instanceof NFSException && ((NFSException) e).nfsError) {
@@ -709,7 +776,11 @@ public class NFSHandler extends RpcHandler {
                     errorReply.opt = opt;
                     errorReply.status = NFS3ERR_I0;
                     return Mono.just(errorReply);
-                }).flatMap(reply -> {
+                })
+                .doOnNext(rpcReply -> {
+                    recordTrafficStatistics(rpcReply, startTime, reqHeader, opcode);
+                })
+                .flatMap(reply -> {
                     CompoundReply oneReply = (CompoundReply) reply;
                     int index0 = index + 1;
                     if (oneReply.status != 0) {
@@ -878,5 +949,41 @@ public class NFSHandler extends RpcHandler {
     public void write(CompoundCall call) {
         ByteBuf buf = callToBuf(call, 4096);
         this.socket.write(Buffer.buffer(buf));
+    }
+
+    private void recordTrafficStatistics(RpcReply nfs4Reply, AtomicLong startTime, ReqInfo reqHeader, NFSV4.Opcode opcode) {
+        if (opcode.opcode != NFSV4.Opcode.NFS4PROC_WRITE.opcode
+                && opcode.opcode != NFSV4.Opcode.NFS4PROC_READ.opcode) {
+            return;
+        }
+
+        long executionTime = DateChecker.getCurrentTime() - startTime.get();
+        HttpMethod httpMethod = HttpMethod.OTHER;
+        long size = 0;
+        boolean success = false;
+
+        String bucket = reqHeader.bucket;
+        if (nfs4Reply != null && StringUtils.isNotEmpty(bucket)) {
+            Map<String, String> bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
+            if (bucketInfo != null) {
+                String accountId = bucketInfo.get("user_id");
+                if (!StringUtils.isEmpty(bucket) && !StringUtils.isEmpty(accountId)) {
+                    success = ((CompoundReply) nfs4Reply).status == NFS3_OK;
+                    if (opcode.opcode == NFSV4.Opcode.NFS4PROC_WRITE.opcode) {
+                        WriteV4Reply writeReply = (WriteV4Reply) nfs4Reply;
+                        size = writeReply.count;
+                        httpMethod = HttpMethod.PUT;
+                    } else {
+                        ReadV4Reply readReply = (ReadV4Reply) nfs4Reply;
+                        size = readReply.readLen;
+                        httpMethod = HttpMethod.GET;
+                    }
+
+                    StatisticsRecorder.RequestType requestType = getRequestType(httpMethod);
+
+                    addFileStatisticRecord(accountId, bucket, httpMethod, -1, requestType, success, executionTime, size);
+                }
+            }
+        }
     }
 }

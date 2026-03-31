@@ -110,6 +110,10 @@ public class ACLUtils {
     }
 
     public static void init() {
+        init(true);
+    }
+
+    public static void init(boolean mainStart) {
         try {
             //keys出全是数字的key，但不能全为0
             ScanArgs scanArgs = new ScanArgs().match("[0-9]*").limit(10);
@@ -117,10 +121,12 @@ public class ACLUtils {
             keyScanCursor.setCursor("0");
             KeyScanCursor<String> res;
             int count = 0;
-            uidToS3ID.clear();
-            gidToS3ID.clear();
-            s3IDToGids.clear();
-            userInfo.clear();
+            if (mainStart) {
+                uidToS3ID.clear();
+                gidToS3ID.clear();
+                s3IDToGids.clear();
+                userInfo.clear();
+            }
             do {
                 res = pool.getCommand(REDIS_USERINFO_INDEX).scan(keyScanCursor, scanArgs);
                 List<String> userKeys = res.getKeys();
@@ -244,7 +250,7 @@ public class ACLUtils {
                     .publishOn(FS_ACL_SCHEDULER)
                     .flatMap(i -> updateAllFsIdentity(action))
                     .timeout(Duration.ofSeconds(35))
-                    .doOnError(e->{
+                    .doOnError(e -> {
                         log.error("update all fs identity error ", e);
                     })
                     .subscribe();
@@ -645,10 +651,10 @@ public class ACLUtils {
     }
 
     /**
-     * @param opt 请求的操作
-     * @param identity 请求的身份(若访问旧版本数据可能经过权限提升)
+     * @param opt          请求的操作
+     * @param identity     请求的身份(若访问旧版本数据可能经过权限提升)
      * @param isIdtPromote 请求的身份是否经过了权限提升
-     * @param srcHeader 请求头
+     * @param srcHeader    请求头
      **/
     public static RpcCallHeader createNfsHeader(int opt, FSIdentity identity, boolean isIdtPromote, RpcCallHeader srcHeader) {
         RpcCallHeader reqHeader = new RpcCallHeader(null);
@@ -1780,6 +1786,10 @@ public class ACLUtils {
                     return true;
                 }
             } else {
+                //特定账户格式：everyOne
+                if ("S-1-1-0".equals(sid)){
+                    return true;
+                }
                 return false;
             }
         } catch (Exception e) {

@@ -9,6 +9,9 @@ import com.macrosan.database.rocksdb.batch.BatchRocksDB;
 import com.macrosan.ec.ECUtils;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.Utils;
+import com.macrosan.filesystem.cache.Node;
+import com.macrosan.filesystem.utils.FsTierUtils;
+import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.rabbitmq.ObjectPublisher;
@@ -18,7 +21,6 @@ import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.client.ClientTemplate;
 import com.macrosan.storage.coder.Encoder;
 import com.macrosan.storage.crypto.CryptoUtils;
-import com.macrosan.storage.strategy.StorageStrategy;
 import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.functional.Tuple3;
 import com.macrosan.utils.msutils.MsException;
@@ -28,10 +30,12 @@ import io.rsocket.Payload;
 import io.rsocket.util.DefaultPayload;
 import io.vertx.core.impl.ConcurrentHashSet;
 import io.vertx.core.json.Json;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.rocksdb.RocksIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
@@ -47,25 +51,29 @@ import java.util.stream.Collectors;
 
 import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
 import static com.macrosan.constants.ServerConstants.*;
-import static com.macrosan.constants.SysConstants.REDIS_BUCKETINFO_INDEX;
-import static com.macrosan.constants.SysConstants.ROCKS_DEDUPLICATE_KEY;
+import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.ECUtils.publishEcError;
 import static com.macrosan.ec.Utils.getVersionMetaDataKey;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
+import static com.macrosan.filesystem.utils.FsTierUtils.FS_TIER_DEBUG;
+import static com.macrosan.filesystem.utils.FsTierUtils.getBackStoreKey;
+import static com.macrosan.message.jsonmsg.ChunkFile.ERROR_CHUNK;
+import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
+import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.storage.StorageOperate.PoolType.CACHE;
-import static com.macrosan.storage.move.CacheFlushConfigRefresher.isStrategyEnableAccessTimeFlush;
+import static com.macrosan.storage.StoragePoolFactory.getStrategyNameByDataPrefix;
 import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
+import static com.macrosan.storage.move.CacheMove.needDeleteDataInDataPool;
 import static com.macrosan.storage.strategy.StorageStrategy.BUCKET_STRATEGY_NAME_MAP;
-import static com.macrosan.storage.strategy.StorageStrategy.POOL_STRATEGY_MAP;
 
 /**
- *@program: MS_Cloud
- *@description: 记录开启分层后数据池中被访问的对象并迁移回缓存池
- *@author: niechengxing
- *@create: 2026-02-28 10:16
+ * @program: MS_Cloud
+ * @description: 记录开启分层后数据池中被访问的对象并迁移回缓存池
+ * @author: niechengxing
+ * @create: 2026-02-28 10:16
  */
 public class BackStoreAccessedData {
     private static final Logger log = LoggerFactory.getLogger(BackStoreAccessedData.class);
@@ -86,6 +94,7 @@ public class BackStoreAccessedData {
 
     /**
      * 记录需要回迁的对象
+     *
      * @param bucket
      * @param objName
      * @param versionId
@@ -99,7 +108,7 @@ public class BackStoreAccessedData {
      */
     public static void flush() {
         try {
-            Map<String , Long> tmp = new HashMap<>();
+            Map<String, Long> tmp = new HashMap<>();
             for (Map.Entry<String, Long> entry : needBackStoreData.entrySet()) {
                 tmp.put(entry.getKey(), entry.getValue());
                 needBackStoreData.remove(entry.getKey());
@@ -171,6 +180,7 @@ public class BackStoreAccessedData {
 //                    log.debug("back store bucket:{}, object:{}, versionId:{} success", bucket, object, versionId);
                     }, e -> {
                         log.error("", e);
+                        res.onNext(1);
                     }, () -> {
                         res.onNext(1);
                     });
@@ -181,11 +191,11 @@ public class BackStoreAccessedData {
                         String key = new String(iterator.key());
                         int sp = key.indexOf("_");
                         String realKey = key.substring(1);
-                        String stamp =new String(iterator.value());
+                        String stamp = new String(iterator.value());
 
                         String bucket = realKey.substring(0, realKey.indexOf("/"));
                         //根据bucket获取存储策略，确认是否开启数据分层
-                        if (!isStrategyEnableAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucket))) {
+                        if (!isEnableCacheAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucket))) {
                             w.delete(iterator.key());
                             if (processing.contains(realKey)) {
                                 processing.remove(realKey);
@@ -202,12 +212,13 @@ public class BackStoreAccessedData {
                     processor.onComplete();
                 }
             }).flatMap(r -> res).flatMap(r -> {
+                processing.clear();
                 log.debug("backStore wait delete taskKey");
                 return BatchRocksDB.customizeOperateData(Utils.getMqRocksKey(), (db, w, request) -> {
-                        for (String key : deleteKeys) {
-                            log.debug("delete taskKey:{}", key);
-                            w.delete(key.getBytes());
-                        }
+                    for (String key : deleteKeys) {
+                        log.debug("delete taskKey:{}", key);
+                        w.delete(key.getBytes());
+                    }
                 });
             }).doOnError(e -> {
                 processor.onComplete();
@@ -228,17 +239,7 @@ public class BackStoreAccessedData {
         //不在同一个盘，如果回迁过程保持fileName不变，后续删除数据池上的旧数据应该也不会出现因为fileName相同导致的将新数据误删的情况
         //所以这里可以使用缓存池下刷的逻辑去进行重新存储
         //1.获取当前策略下的缓存池，根据桶获取当前策略
-        StorageOperate dataOperate = new StorageOperate(CACHE, object, Long.MAX_VALUE);//直接获取一个策略内的缓存池
-        StoragePool cachePool = StoragePoolFactory.getStoragePool(dataOperate, bucket);
-        String newPoolType = cachePool.getVnodePrefix();
-        String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucket);
-        StorageStrategy storageStrategy = POOL_STRATEGY_MAP.get(strategy);
-        String dataStr = storageStrategy.redisMap.get("data");
-        String cacheStr = storageStrategy.redisMap.get("cache");
-        List<String> storageList = new ArrayList<>(Arrays.asList(Json.decodeValue(dataStr, String[].class)));//获取到当前存储策略下关联的数据池
-        List<String> cacheStorageList = new ArrayList<>(Arrays.asList(Json.decodeValue(cacheStr, String[].class)));//缓存池
 
-        storageList.addAll(cacheStorageList);
         boolean[] isDup = new boolean[2];
         StoragePool metaStoragePool = StoragePoolFactory.getMetaStoragePool(bucket);
         Tuple2<String, String> bucketVnodeIdTuple = metaStoragePool.getBucketVnodeIdTuple(bucket, object);
@@ -269,14 +270,20 @@ public class BackStoreAccessedData {
                     if (metaData.equals(MetaData.ERROR_META)) {
                         throw new MsException(UNKNOWN_ERROR, "Get Object Meta Data fail");
                     }
+                    if (metaData.inode > 0) {
+                        return fsBackStore(bucket, metaData, stamp);
+                    }
 
-                    if (metaData.equals(MetaData.NOT_FOUND_META) || metaData.deleteMark || metaData.deleteMarker || newPoolType.equals(metaData.storage) || !storageList.contains(metaData.storage) || metaData.partInfos != null) {//如果对象已经迁移到了另一个策略中，则该对象不再进行重新存储处理//分段对象不处理
+                    if (metaData.equals(MetaData.NOT_FOUND_META) || metaData.deleteMark || metaData.deleteMarker || metaData.storage.startsWith("cache") || metaData.partInfos != null) {//如果对象已经迁移到了另一个策略中，则该对象不再进行重新存储处理//分段对象不处理
                         return Mono.just(true);
                     } else {
                         Map<String, String> sysMetaMap = Json.decodeValue(metaData.sysMetaData, new TypeReference<Map<String, String>>() {
                         });
                         String md5 = sysMetaMap.get(ETAG);
                         StoragePool oldPool = StoragePoolFactory.getStoragePool(metaData);
+                        StorageOperate dataOperate = new StorageOperate(CACHE, object, Long.MAX_VALUE);//直接获取与数据池同一个策略内的缓存池
+                        StoragePool cachePool = StoragePoolFactory.getStoragePool(dataOperate, oldPool);
+                        String newPoolType = cachePool.getVnodePrefix();
                         return StoragePoolFactory.getDeduplicateByBucketName(bucket)
                                 .doOnNext(enableDedup -> isDup[0] = enableDedup)
 //                                .doOnNext(enableDedup -> {
@@ -350,57 +357,63 @@ public class BackStoreAccessedData {
                                                             //删除数据池上旧的数据
                                                             .flatMap(b2 -> {
                                                                 if (b2) {
-                                                                    log.debug("delete file {} {}", Arrays.toString(delFileName.toArray(new String[0])), metaData.versionNum);
-                                                                    boolean deDup = false;
-                                                                    Set<String> allFile = new HashSet<>();
-                                                                    for (String name : delFileName) {
-                                                                        if (name.startsWith(ROCKS_DEDUPLICATE_KEY)) {
-                                                                            deDup = true;
-                                                                            break;
+                                                                    //获取当前数据池所在策略名
+                                                                    String strategy = getStrategyNameByDataPrefix(oldPool.getVnodePrefix());
+                                                                    if (needDeleteDataInDataPool(strategy)) {//这里默认不判断是否删源，直接默认保留数据池上的旧数据, delData默认为false
+                                                                        log.debug("delete file {} {}", Arrays.toString(delFileName.toArray(new String[0])), metaData.versionNum);
+                                                                        boolean deDup = false;
+                                                                        Set<String> allFile = new HashSet<>();
+                                                                        for (String name : delFileName) {
+                                                                            if (name.startsWith(ROCKS_DEDUPLICATE_KEY)) {
+                                                                                deDup = true;
+                                                                                break;
+                                                                            }
                                                                         }
-                                                                    }
-                                                                    for (String files : delFileName) {
-                                                                        if (!files.startsWith(ROCKS_DEDUPLICATE_KEY)) {
-                                                                            allFile.add(files);
+                                                                        for (String files : delFileName) {
+                                                                            if (!files.startsWith(ROCKS_DEDUPLICATE_KEY)) {
+                                                                                allFile.add(files);
+                                                                            }
                                                                         }
-                                                                    }
-                                                                    String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(oldPool.getVnodePrefix());
-                                                                    if (deDup) {
-                                                                        return ErasureClient.deleteDedupObjectFile(metaStoragePool, delFileName.toArray(new String[0]), null, false)
-                                                                                .flatMap(b1 -> {
-                                                                                    if (b1 && !allFile.isEmpty()) {
-                                                                                        return ErasureClient.restoreDeleteObjectFile(oldPool, allFile.toArray(new String[0]), null)
-                                                                                                .flatMap(r -> {
-                                                                                                    if (!r) {//返false表示有文件在被读取无法进行删除
-                                                                                                        SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                                                                                                .put("fileName", Json.encode(allFile.toArray(new String[0])))
-                                                                                                                .put("storage", oldPool.getVnodePrefix())
-                                                                                                                .put("poolQueueTag", poolQueueTag);
-                                                                                                        ObjectPublisher.basicPublish(CURRENT_IP, errorMsg, ERROR_RESTORE_DELETE_OBJECT_FILE);
-                                                                                                    }
-                                                                                                    return Mono.just(true);
-                                                                                                });
+                                                                        String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(oldPool.getVnodePrefix());
+                                                                        if (deDup) {
+                                                                            return ErasureClient.deleteDedupObjectFile(metaStoragePool, delFileName.toArray(new String[0]), null, false)
+                                                                                    .flatMap(b1 -> {
+                                                                                        if (b1 && !allFile.isEmpty()) {
+                                                                                            return ErasureClient.restoreDeleteObjectFile(oldPool, allFile.toArray(new String[0]), null)
+                                                                                                    .flatMap(r -> {
+                                                                                                        if (!r) {//返false表示有文件在被读取无法进行删除
+                                                                                                            SocketReqMsg errorMsg = new SocketReqMsg("", 0)
+                                                                                                                    .put("fileName", Json.encode(allFile.toArray(new String[0])))
+                                                                                                                    .put("storage", oldPool.getVnodePrefix())
+                                                                                                                    .put("poolQueueTag", poolQueueTag);
+                                                                                                            ObjectPublisher.basicPublish(CURRENT_IP, errorMsg, ERROR_RESTORE_DELETE_OBJECT_FILE);
+                                                                                                        }
+                                                                                                        return Mono.just(true);
+                                                                                                    });
+                                                                                        }
+                                                                                        return Mono.just(b1);
+                                                                                    });
+                                                                        }
+                                                                        return ErasureClient.restoreDeleteObjectFile(oldPool, delFileName.toArray(new String[0]), null)
+                                                                                .flatMap(r -> {
+                                                                                    if (!r) {//返false表示有文件在被读取无法进行删除
+                                                                                        SocketReqMsg errorMsg = new SocketReqMsg("", 0)
+                                                                                                .put("fileName", Json.encode(delFileName.toArray(new String[0])))
+                                                                                                .put("storage", oldPool.getVnodePrefix())
+                                                                                                .put("poolQueueTag",
+                                                                                                        poolQueueTag);
+                                                                                        ObjectPublisher.basicPublish(CURRENT_IP, errorMsg, ERROR_RESTORE_DELETE_OBJECT_FILE);
                                                                                     }
-                                                                                    return Mono.just(b1);
+                                                                                    return Mono.just(true);
+                                                                                })
+                                                                                .doOnNext(b1 -> {
+                                                                                    if (b1) {
+                                                                                        log.debug("back store object to {} success, bucket:{}, object:{}, versionId:{}", newPoolType, bucket, object, versionId);
+                                                                                    }
                                                                                 });
+                                                                    } else {
+                                                                        return Mono.just(true);
                                                                     }
-                                                                    return ErasureClient.restoreDeleteObjectFile(oldPool, delFileName.toArray(new String[0]), null)
-                                                                            .flatMap(r -> {
-                                                                                if (!r) {//返false表示有文件在被读取无法进行删除
-                                                                                    SocketReqMsg errorMsg = new SocketReqMsg("", 0)
-                                                                                            .put("fileName", Json.encode(delFileName.toArray(new String[0])))
-                                                                                            .put("storage", oldPool.getVnodePrefix())
-                                                                                            .put("poolQueueTag",
-                                                                                                    poolQueueTag);
-                                                                                    ObjectPublisher.basicPublish(CURRENT_IP, errorMsg, ERROR_RESTORE_DELETE_OBJECT_FILE);
-                                                                                }
-                                                                                return Mono.just(true);
-                                                                            })
-                                                                            .doOnNext(b1 -> {
-                                                                                if ( b1) {
-                                                                                    log.debug("back store object to {} success, bucket:{}, object:{}, versionId:{}", newPoolType, bucket, object, versionId);
-                                                                                }
-                                                                            });
                                                                 } else {
                                                                     log.error("update meta storage error {} {} {} {}", metaData.bucket, metaData.key, metaData.versionId, metaData.storage);
                                                                     return Mono.just(false);
@@ -419,8 +432,96 @@ public class BackStoreAccessedData {
     }
 
 
+    public static Mono<Boolean> fsBackStore(String bucket, MetaData metaData, String stamp) {
+
+        //处理文件的多段数据情况
+        Node node = Node.getInstance();
+        if (node == null) {
+            return Mono.just(false);
+        }
+        if (FS_TIER_DEBUG) {
+            log.info("fsBackStore {} {} {} {}", bucket, metaData.key, metaData.inode, stamp);
+        }
+        return node.getInode(bucket, metaData.inode)
+                .flatMap(inode -> {
+                    if (inode.getLinkN() == ERROR_INODE.getLinkN()) {
+                        return Mono.just(false);
+                    }
+                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                        return Mono.just(true);
+                    }
+                    return fsBackStore(bucket, inode.getInodeData(), node, stamp, metaData.inode, 0L);
+                })
+                .timeout(Duration.ofSeconds(59))
+                .onErrorResume(e -> {
+                    log.info("fsBackStore error {} {} {} {}", bucket, metaData.key, metaData.inode, stamp, e);
+                    return Mono.just(false);
+                });
+
+    }
+
+    public static Mono<Boolean> fsBackStore(String bucket, List<Inode.InodeData> inodeDataList, Node node, String stamp, long nodeId, long curOffset) {
+        List<Mono<Boolean>> chunkRes = new LinkedList<>();
+        for (Inode.InodeData inodeData : inodeDataList) {
+            Mono<Boolean> recordRes = null;
+            if (inodeData.fileName.startsWith(ROCKS_CHUNK_FILE_KEY)) {
+                long finalCurOffset = curOffset;
+                if (FS_TIER_DEBUG) {
+                    log.info("fsBackStore {} {} {} {}", bucket, inodeData.fileName, nodeId, stamp);
+                }
+                recordRes = Mono.just(true)
+                        .flatMap(b -> node.getChunk(inodeData.getFileName()))
+                        .flatMap(chunkFile -> {
+                            if (chunkFile.getSize() == ERROR_CHUNK.getSize()) {
+                                return Mono.just(false);
+                            }
+
+                            return fsBackStore(bucket, chunkFile.getChunkList(), node, stamp, nodeId, finalCurOffset);
+                        });
+            } else if (inodeData.storage.startsWith("data")) {
+                //超过256k的数据块暂不进行回迁
+                if (inodeData.getSize() > 262144L) {
+                    return Mono.just(true);
+                }
+                recordRes = recordTask(bucket, inodeData.getFileName().replace("/split/", ""), inodeData.storage, stamp, nodeId, curOffset, inodeData.getSize());
+            } else if (inodeData.storage.startsWith("cache")) {
+                //如果数据已经在缓存池上了就不进行回迁处理了
+                recordRes = Mono.just(true);
+            }
+            if (recordRes != null) {
+                chunkRes.add(recordRes);
+            }
+            curOffset += inodeData.getSize();
+        }
+        if (chunkRes.isEmpty()) {
+            return Mono.just(true);
+        } else {
+            return Flux.merge(Flux.fromStream(chunkRes.stream()), 1, 1)
+                    .collectList()
+                    .map(l -> l.stream().anyMatch(t -> t));
+        }
+    }
+
+
+    public static Mono<Boolean> recordTask(String bucket, String fileName, String storage, String stamp, long nodeId, long fileOffSet, long fileSize) {
+        String requestId = RandomStringUtils.randomAlphanumeric(32);
+        String taskKey = getBackStoreKey(storage, nodeId, bucket, requestId);
+        String value = FsTierUtils.buildTierRecordValue(fileName, fileOffSet, fileSize, stamp);
+        BatchRocksDB.RequestConsumer consumer = (db, writeBatch, request) -> {
+            byte[] oldValue = writeBatch.getFromBatchAndDB(db, taskKey.getBytes());
+            if (oldValue == null) {
+                writeBatch.put(taskKey.getBytes(), value.getBytes());
+            }
+        };
+        return BatchRocksDB.customizeOperateData(Utils.getMqRocksKey(), taskKey.hashCode(), consumer)
+                .doOnError(e -> log.error("", e))
+                .onErrorReturn(false);
+    }
+
+
     /**
      * 回迁保持fileName不变
+     *
      * @param metaData
      * @param fileName
      * @param cachePool
@@ -487,12 +588,13 @@ public class BackStoreAccessedData {
                             .put("lun", t.var2)
                             .put("vnode", t.var3)
                             .put("compression", cachePool.getCompression())
-                            .put("metaKey", metaKey);
+                            .put("metaKey", metaKey)
+                            .put("dataPool", oldPool.getVnodePrefix());
 
                     if (isEnableCacheAccessTimeFlush(cachePool)) {
                         msg.put("lastAccessStamp", stamp);//将对象的get访问时间作为缓存池中该数据的访问记录
                     }
-                            //这里需要补充上传文件需要的属性参数，比如增加访问记录属性并在缓存盘上条件访问记录
+                    //这里需要补充上传文件需要的属性参数，比如增加访问记录属性并在缓存盘上条件访问记录
 
                     CryptoUtils.putCryptoInfoToMsg(metaData.getCrypto(), secretKey.get(), msg);//这里使用重新生成的secretKey进行加密，生成的代码在上面
 

@@ -75,6 +75,10 @@ public class NFS4Lock extends Lock {
         return offset == nfs4Lock.offset && length == nfs4Lock.length && stateOwner.equals(nfs4Lock.stateOwner) && fh2.ino == nfs4Lock.fh2.ino;
     }
 
+    public NFS4Lock clone(){
+        return new NFS4Lock(lockType,stateOwner,offset,length,node,clientId,sessionId,fh2,optType,clientLock,clientUnLock,minorVersion);
+    }
+
     @Override
     public int hashCode() {
         return Objects.hash(stateOwner, offset, length);
@@ -82,7 +86,20 @@ public class NFS4Lock extends Lock {
 
     @Override
     public boolean needKeep() {
-        return node.equals(ServerConfig.getInstance().getHostUuid()) && clientControl.hasClient(clientId);
+        if (!node.equals(ServerConfig.getInstance().getHostUuid())){
+            return false;
+        }
+        NFS4Client client = clientControl.getClient0(clientId);
+        if (client == null){
+            return false;
+        }
+        if (client.getMinorVersion() >= 1 && client.getSession0(sessionId) == null){
+            return false;
+        }
+        if (client.getLocalAddress() == null || !Objects.equals(0, NFSHandler.localIpMap.get(client.getLocalAddress()))){
+            return false;
+        }
+        return true;
     }
 
 

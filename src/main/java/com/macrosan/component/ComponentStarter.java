@@ -78,7 +78,6 @@ public class ComponentStarter {
             SUPPORT_VIDEO_FORMAT.add(value.name());
         }
         SUPPORT_DICOM_FORMAT.add("dcm");
-        SUPPORT_DICOM_FORMAT.add("dcmx");
     }
 
     public static final Set<String> AVAIL_MEDIA_SERVER_IP_SET = new ConcurrentHashSet<>();

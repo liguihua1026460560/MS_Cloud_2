@@ -49,7 +49,7 @@ public class CopyObjectFileRebuilder {
         return rebuildingCopySourceFileNames.contains(fileName);
     }
 
-    public Mono<Boolean> rebuildCopyObjFile(StoragePool pool, String metaKey, String lun, String errorIndex, String fileName, String endIndex, String fileSize, String crypto, String secretKey, List<Tuple3<String, String, String>> nodeList, String flushStamp, String lastAccessStamp, int retry) {
+    public Mono<Boolean> rebuildCopyObjFile(StoragePool pool, String metaKey, String lun, String errorIndex, String fileName, String endIndex, String fileSize, String crypto, String secretKey, List<Tuple3<String, String, String>> nodeList, String flushStamp, String lastAccessStamp, String fileOffset, int retry) {
         return putCopyObjFileMeta(lun, fileName, metaKey)
                 .flatMap(b -> {
                     if (b) {
@@ -67,7 +67,7 @@ public class CopyObjectFileRebuilder {
                                         return Mono.just(true);
                                     }
                                     // fileMeta写入失败，说明没有前缀相同的FileMeta，则进行数据块重构
-                                    return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp);
+                                    return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, fileOffset);
                                 }).doFinally(s -> rebuildCopyObjFileLock.remove(lockKey));
 
                     } else {
@@ -76,7 +76,7 @@ public class CopyObjectFileRebuilder {
                             return Mono.just(false);
                         }
                         log.debug("filename:{} get rebuild copy obj lock fail, retry {}", fileName, retry);
-                        return Mono.delay(Duration.ofMillis(200L * (retry * 10L))).flatMap(wait -> rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, retry + 1));
+                        return Mono.delay(Duration.ofMillis(200L * (retry * 10L))).flatMap(wait -> rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, fileOffset, retry + 1));
                     }
                 });
     }

@@ -357,7 +357,9 @@ public class PartService extends BaseService {
         }
         final String contentLength = request.getHeader(CONTENT_LENGTH);
         final String decodeLength = request.getHeader(X_AMZ_DECODED_CONTENT_LENGTH);
-        partUploadCheck(numStr, uploadId, contentLength, decodeLength, flag);
+        if (!request.headers().contains(IS_SYNCING)) {
+            partUploadCheck(numStr, uploadId, contentLength, decodeLength, flag);
+        }
 
         final boolean isChunked = flag;
         String contentMD5 = request.getHeader(CONTENT_MD5);

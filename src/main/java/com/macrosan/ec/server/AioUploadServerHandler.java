@@ -17,7 +17,6 @@ import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.storage.crypto.rootKey.RootSecretKeyUtils;
 import com.macrosan.utils.cache.ByteArrayPool;
 import com.macrosan.utils.functional.Tuple2;
-
 import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.msutils.checksum.ChecksumProvider;
 import com.macrosan.utils.ratelimiter.RecoverLimiter;
@@ -48,9 +47,9 @@ import static com.macrosan.database.rocksdb.MossMergeOperator.SPACE_LEN;
 import static com.macrosan.database.rocksdb.MossMergeOperator.SPACE_SIZE;
 import static com.macrosan.database.rocksdb.batch.BatchRocksDB.*;
 import static com.macrosan.ec.Utils.*;
-import static com.macrosan.ec.server.ErasureServer.*;
+import static com.macrosan.ec.server.ErasureServer.CONTINUE_PAYLOAD;
+import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.fs.BlockDevice.*;
-import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 
 @Log4j2
 public class AioUploadServerHandler implements RequestChannalHandler {
@@ -120,6 +119,8 @@ public class AioUploadServerHandler implements RequestChannalHandler {
     // 替换掉旧的fileMeta，overwrite为true时生效
     protected boolean replace = false;
 
+    protected String dataPool;//回迁后记录数据来源于哪个数据池
+
 
     Payload ERROR_PAYLOAD;
     Payload SUCCESS_PAYLOAD;
@@ -181,9 +182,11 @@ public class AioUploadServerHandler implements RequestChannalHandler {
                 .setLun(lun)
                 .setFlushStamp(msg.get("flushStamp"));
 
-        log.debug("lastAccessStamp:{}", msg.get("lastAccessStamp"));
         if (StringUtils.isNotEmpty(msg.get("lastAccessStamp"))) {
             fileMeta.setLastAccessStamp(msg.get("lastAccessStamp"));//这里同时要在设置fileMeta时在缓存盘设置一个访问记录
+        }
+        if (StringUtils.isNotEmpty(msg.get("dataPool"))) {
+            dataPool = msg.get("dataPool");
         }
 
         if (msg.getDataMap().containsKey("fileOffset")) {
@@ -514,8 +517,12 @@ public class AioUploadServerHandler implements RequestChannalHandler {
                                     }
                                     if (StringUtils.isNotEmpty(fileMeta.getLastAccessStamp())) {//put时同步增加访问记录
                                         StoragePool pool = StoragePoolFactory.getStoragePoolByDisk(lun);
-                                        if (pool != null && isEnableCacheAccessTimeFlush(pool)) {
-                                            writeBatch.put(getAccessTimeKey(fileMeta.getLastAccessStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                                        if (pool != null && pool.getVnodePrefix().startsWith("cache")) {
+                                            if (StringUtils.isNotEmpty(dataPool)) {
+                                                writeBatch.put(getAccessTimeKey(fileMeta.getLastAccessStamp(), fileMeta.getFileName()).getBytes(), dataPool.getBytes());//数据池回迁到缓存池的数据记录数据池vnode前缀
+                                            } else {
+                                                writeBatch.put(getAccessTimeKey(fileMeta.getLastAccessStamp(), fileMeta.getFileName()).getBytes(), ZERO_BYTES);
+                                            }
                                         }
                                     }
                                 } catch (RocksDBException e) {

@@ -310,8 +310,8 @@ public class PutErrorHandler {
                                 //额外判断inode>0时的chunk
                                 return bucketPool.mapToNodeInfo(bucketVnode)
                                         .flatMap(bucketNodeList -> {
-                                            if (StringUtils.isNotBlank(quotaDirList)){
-                                                return ErasureClient.getObjectMetaVersionFsQuotaRecover(bucket, object, versionId, bucketNodeList, null, snapshotMark, null, quotaDirList,false);
+                                            if (StringUtils.isNotBlank(quotaDirList)) {
+                                                return ErasureClient.getObjectMetaVersionFsQuotaRecover(bucket, object, versionId, bucketNodeList, null, snapshotMark, null, quotaDirList, false);
                                             }
                                             return ErasureClient.getObjectMetaVersion(bucket, object, versionId, bucketNodeList, null, snapshotMark, null);
                                         })
@@ -431,6 +431,7 @@ public class PutErrorHandler {
         String secretKey = reqMsg.get("secretKey");
         String flushStamp = reqMsg.get("flushStamp");
         String lastAccessStamp = reqMsg.get("lastAccessStamp");
+        String fileOffset = reqMsg.get("fileOffset");
         //获取原始数据字节流，放入ecEncodeHanlder进行encode，生成dataFluxes，dataFluxes包含k+m个数据流
         Encoder ecEncodeHandler = storagePool.getEncoder();
         UnicastProcessor<Long> streamController = UnicastProcessor.create(Queues.<Long>unboundedMultiproducer().get());
@@ -464,6 +465,9 @@ public class PutErrorHandler {
                             }
                             if (StringUtils.isNotEmpty(lastAccessStamp)) {
                                 msg.put("lastAccessStamp", lastAccessStamp);
+                            }
+                            if (StringUtils.isNotEmpty(fileOffset)) {
+                                msg.put("fileOffset", fileOffset);
                             }
                             return msg;
                         }
@@ -533,12 +537,12 @@ public class PutErrorHandler {
      * 注意：由于使用getObjectMeta此时消费掉生产端ERROR_PUT_OBJECT_META_QUEUE中的消息后，还会向消费端ERROR_PUT_OBJECT_META_QUEUE中publish一次。
      */
     @HandleErrorFunction(ERROR_PUT_OBJECT_META)
-    public static Mono<Boolean> recoverMeta(MetaData value, String snapshotLink) {
+    public static Mono<Boolean> recoverMeta(MetaData value, String snapshotLink, String vnode) {
         String bucketName = value.bucket;
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucketName);
         String bucketVnode = "";
         try {
-            bucketVnode = storagePool.getBucketVnodeId(bucketName, value.key);
+            bucketVnode = StringUtils.isNotBlank(vnode) ? vnode : storagePool.getBucketVnodeId(bucketName, value.key);
         } catch (Exception e) {
             log.error("recoverMeta error", e);
             if (e.getMessage() != null && e.getMessage().contains("no such bucket name")) {
@@ -555,7 +559,7 @@ public class PutErrorHandler {
         return storagePool.mapToNodeInfo(bucketVnode)
                 .flatMap(nodeList -> {
                     if (StringUtils.isNotBlank(fsQuotaStr[0])) {
-                        return ErasureClient.getObjectMetaVersionFsQuotaRecover(value.bucket, value.key, value.versionId, nodeList, null, value.snapshotMark, snapshotLink, fsQuotaStr[0],false);
+                        return ErasureClient.getObjectMetaVersionFsQuotaRecover(value.bucket, value.key, value.versionId, nodeList, null, value.snapshotMark, snapshotLink, fsQuotaStr[0], false);
                     }
                     return ErasureClient.getObjectMetaVersion(value.bucket, value.key, value.versionId, nodeList, null, value.snapshotMark, snapshotLink);
                 })
@@ -775,7 +779,7 @@ public class PutErrorHandler {
     }
 
     @HandleErrorFunction(value = ERROR_UPDATE_FILE_ACCESS_TIME, timeout = 0L)
-    public static Mono<Boolean> recoverUpdateFileAccessTime(String fileName, String stamp, String lun, List<Integer> errorChunksList,String storage, String poolQueueTag) {
+    public static Mono<Boolean> recoverUpdateFileAccessTime(String fileName, String stamp, String lun, List<Integer> errorChunksList, String storage, String poolQueueTag) {
         StoragePool storagePool = StoragePoolFactory.getStoragePool(storage, "");
 
         return storagePool.mapToNodeInfo(storagePool.getObjectVnodeId(fileName))

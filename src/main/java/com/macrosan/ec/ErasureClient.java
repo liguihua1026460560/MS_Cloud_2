@@ -81,13 +81,14 @@ import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.archive.ArchiveAnalyzer.ARCHIVE_ANALYZER_KEY;
 import static com.macrosan.ec.ECUtils.*;
+import static com.macrosan.ec.Utils.getAccessTimeKey;
+import static com.macrosan.ec.Utils.getVnode;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
-import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_UPDATE_FILE_ACCESS_TIME;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.ERROR_PAYLOAD;
-import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.NOT_FOUND;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SUCCESS;
+import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.filesystem.FsConstants.S_IFDIR;
 import static com.macrosan.filesystem.FsConstants.S_IFMT;
 import static com.macrosan.filesystem.cifs.call.smb2.NotifyCall.FILE_NOTIFY_CHANGE_DIR_NAME;
@@ -663,8 +664,10 @@ public class ErasureClient {
                 .setBucket(bucket)
                 .setKey(object)
                 .setDeleteMark(true)
+                .setDiscard(true)
                 .setVersionId(versionId)
                 .setVersionNum(VersionUtil.getLastVersionNum(""))
+                .setShardingStamp(VersionUtil.getLastVersionNum(""))
                 .setStamp(String.valueOf(System.currentTimeMillis()))
                 .setSnapshotMark(currentSnapshotMark);
 
@@ -698,16 +701,6 @@ public class ErasureClient {
                 GET_OBJECT_META, NOT_FOUND_META, ERROR_META, deleteMark,
                 MetaData::getVersionNum, comparator, repairFunction, nodeList, request, currentSnapshotMark, snapshotLink);
     }
-
-//    public static Mono<BucketInfo> getBucketInfo(String bucket) {
-//        StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
-//        return storagePool.mapToNodeInfo(storagePool.getBucketVnodeId(bucket))
-//                .flatMap(nodeList -> ECUtils.getRocksKey(storagePool, BucketInfo.getBucketKey(nodeList.get(0).var3, bucket)
-//                        , BucketInfo.class, GET_BUCKET_INFO, NOT_FOUND_BUCKET_INFO, ERROR_BUCKET_INFO
-//                        , null, BucketInfo::getVersionNum, Comparator.comparingLong(info -> Long.parseLong(info.getBucketStorage())),
-//                        (a, b, c, d) -> Mono.just(1), nodeList, null))
-//                .flatMap(tuple -> Mono.just(tuple.var1));
-//    }
 
     public static Flux<BucketInfo> getBucketInfoFlux(String bucket) {
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
@@ -968,6 +961,16 @@ public class ErasureClient {
 
     }
 
+    public static Mono<String> getAccessRecord(String key, MetaData metaData) {
+        StoragePool pool = StoragePoolFactory.getStoragePool(metaData);
+        String vnode = getVnode(metaData.fileName);
+        return pool.mapToNodeInfo(vnode)
+                .flatMap(nodeList -> getAccessRecordRes(pool, key, String.class, GET_ACCESS_RECORD, "not found", "error", nodeList, null))
+                .flatMap(tuple -> Mono.just(tuple.var1))
+                .map(res -> res.startsWith("data") ? res : "error");
+
+
+    }
 
     public static Mono<Integer> updateMetaDataAcl(String key, MetaData metaData, List<Tuple3<String, String, String>> nodeList,
                                                   MsHttpRequest request, Tuple2<PayloadMetaType, MetaData>[] res) {
@@ -1351,7 +1354,16 @@ public class ErasureClient {
                                     }
                                     StoragePool storagePool = StoragePoolFactory.getStoragePool(lastMeta[0]);
                                     StoragePool metaStoragePool = StoragePoolFactory.getMetaStoragePool(metaData.bucket);
-                                    Disposable subscribe = ErasureClient.deleteObjectFile(storagePool, overWriteFiles.toArray(new String[0]), request)
+                                    boolean needDelFileInData = storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(lastMeta[0].getLastAccessStamp());
+                                    Disposable subscribe = Mono.just(needDelFileInData)
+                                            .flatMap(b0 -> {
+                                                if (b0) {//需要先删数据池上的数据
+                                                    return deleteObjectFileWithData(lastMeta[0], overWriteFiles.toArray(new String[0]), request);
+                                                } else {
+                                                    return Mono.just(b0);
+                                                }
+                                            })
+                                            .flatMap(b1 -> ErasureClient.deleteObjectFile(storagePool, overWriteFiles.toArray(new String[0]), request))
                                             .flatMap(a -> deleteDedupObjectFile(metaStoragePool, dupFiles.toArray(new String[0]), request, false))
                                             .subscribe(s -> {
                                             }, e -> log.error("delete overwrite data error!", e));
@@ -1387,7 +1399,16 @@ public class ErasureClient {
                                                 if (hasLink) {
                                                     return Node.getInstance().updateInodeLinkN(lastInode[0].getNodeId(), lastInode[0].getBucket(), 0);
                                                 } else {
-                                                    return ErasureClient.deleteObjectFile(storagePool, overWriteFiles.toArray(new String[0]), request)
+                                                    boolean needDelFileInData = storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(lastMeta[0].getLastAccessStamp());
+                                                    return Mono.just(needDelFileInData)
+                                                            .flatMap(b0 -> {
+                                                                if (b0) {
+                                                                    return deleteObjectFileWithData(lastMeta[0], overWriteFiles.toArray(new String[0]), request);
+                                                                } else {
+                                                                    return Mono.just(b0);
+                                                                }
+                                                            })
+                                                            .flatMap(b1 -> ErasureClient.deleteObjectFile(storagePool, overWriteFiles.toArray(new String[0]), request))
                                                             .flatMap(b0 -> Node.getInstance().getInodeAndUpdateCache(lastInode[0].getBucket(), lastInode[0].getNodeId()));
                                                 }
                                             })
@@ -1765,6 +1786,7 @@ public class ErasureClient {
                     .setStamp(params.pendingMark == null ? String.valueOf(System.currentTimeMillis()) : params.pendingMark.stamp)
                     .setVersionId(params.versionId);
             metaData.setSnapshotMark(params.pendingMark == null ? params.snapshotMark : params.pendingMark.getSnapshotMark());
+            metaData.setLastAccessStamp(params.pendingMark == null ? params.lastAccessStamp : params.pendingMark.lastAccessStamp);
         }
 
         if (ERROR_DELETE_OBJECT_ALL_META.equals(params.type)) {
@@ -1835,7 +1857,7 @@ public class ErasureClient {
                         if (!overwrite.isEmpty()) {
                             Flux<Boolean> overwriteRes = Flux.empty();
                             for (String s : overwrite) {
-                                String[] split = s.split("=", 2);
+                                String[] split = s.split("=", 3);
                                 String storage = split[0];
                                 String fileName = split[1];
                                 if (fileName.startsWith(ROCKS_AGGREGATION_META_PREFIX)) {
@@ -1843,8 +1865,19 @@ public class ErasureClient {
                                     overwriteRes = overwriteRes.mergeWith(metaStoragePool.mapToNodeInfo(Utils.getVnode(fileName))
                                             .flatMap(nodeList -> AggregateFileClient.freeAggregationSpace(fileName, nodeList)));
                                 } else {
+                                    String lastAccessStamp = split[2];
                                     StoragePool storagePool1 = StoragePoolFactory.getStoragePool(storage, metaData.bucket);
-                                    overwriteRes = overwriteRes.mergeWith(ErasureClient.deleteObjectFile(storagePool1, new String[]{fileName}, null));
+                                    boolean needDelFileInData = storagePool1.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(lastAccessStamp);
+                                    overwriteRes = overwriteRes.mergeWith(
+                                            Mono.just(needDelFileInData).flatMap(
+                                                    b0 -> {
+                                                        if (b0) {
+                                                            return deleteObjectFileWithData(new MetaData().setFileName(fileName).setBucket(metaData.bucket).setStorage(storage).setLastAccessStamp(lastAccessStamp), new String[]{fileName}, null);
+                                                        } else {
+                                                            return Mono.just(b0);
+                                                        }
+                                                    }
+                                            ).flatMap(b1 -> ErasureClient.deleteObjectFile(storagePool1, new String[]{fileName}, null)));
                                 }
                             }
                             overwriteRes.defaultIfEmpty(false).collectList().subscribe();
@@ -2137,6 +2170,27 @@ public class ErasureClient {
                 });
     }
 
+    public static Mono<Boolean> lifecycleDeleteFileWithData(MetaData metaData, String[] fileNames,
+                                                            MsHttpRequest request) {
+        String accessTimeKey = getAccessTimeKey(metaData.getLastAccessStamp(), metaData.getFileName());
+        //获取访问记录中保存的数据池前缀
+        //从各节点获取访问记录保存的数据池前缀
+        return ErasureClient.getAccessRecord(accessTimeKey, metaData)
+                .flatMap(res -> {
+                    if ("not found".equals(res) || "error".equals(res)) {
+                        return Mono.just(true);
+                    } else {
+                        StoragePool dataPool = StoragePoolFactory.getStoragePool(res, "");
+                        //如果访问记录中存在dataPool前缀，说明对应数据池中存在数据块
+                        if (dataPool != null) {
+                            return ErasureClient.lifecycleDeleteFile(dataPool, fileNames, request);
+                        } else {
+                            return Mono.just(true);
+                        }
+                    }
+                });
+    }
+
     /**
      * 生命周期专用删除对象，QoS限制
      */
@@ -2232,7 +2286,7 @@ public class ErasureClient {
                                             return tuple.var1;
                                         }))
                                 .collectList()
-                                .map(list -> list.get(0));
+                                .map(list -> list.isEmpty() || list.get(0));
                     } else {
                         return Mono.just(false);
                     }
@@ -2389,11 +2443,44 @@ public class ErasureClient {
                 .map(l -> true);
     }
 
+    public static Mono<Boolean> deleteObjectFileWithData(MetaData metaData, String[] fileNames,
+                                                         MsHttpRequest request) {
+        String accessTimeKey = getAccessTimeKey(metaData.getLastAccessStamp(), metaData.getFileName());
+        //从各节点获取访问记录保存的数据池前缀
+        return ErasureClient.getAccessRecord(accessTimeKey, metaData)
+                .flatMap(res -> {
+                    if ("not found".equals(res) || "error".equals(res)) {
+                        return Mono.just(true);
+                    } else {
+                        StoragePool dataPool = StoragePoolFactory.getStoragePool(res, "");
+                        log.debug("deleteObjectFileWithData dataPool: {} ---fileName:{}", dataPool, fileNames);
+                        //如果访问记录中存在dataPool前缀，说明对应数据池中存在数据块
+                        if (dataPool != null) {
+                            return ErasureClient.deleteObjectFile(dataPool, fileNames, request);
+                        } else {
+                            return Mono.just(true);
+                        }
+                    }
+                });
+    }
+
+    public static Tuple2<Mono<Boolean>, Disposable> deleteObjectFile(StoragePool storagePool, String fileName,
+                                                                     List<Tuple3<String, String, String>> curList) {
+        if (DelFileRunner.tryRun(storagePool.getVnodePrefix())) {
+            Tuple2<Mono<Boolean>, Disposable> res = deleteObjectFile0(storagePool, fileName, curList);
+            res.var1 = res.var1.doFinally(s -> DelFileRunner.endRun(storagePool.getVnodePrefix()));
+            return res;
+        } else {
+            DelFileRunner.addTask(storagePool.getVnodePrefix(), fileName);
+            return new Tuple2<>(Mono.just(true), DelFileRunner.EMPTY_DISPOSE);
+        }
+    }
+
     /**
      * 删除对象。
      */
-    public static Tuple2<Mono<Boolean>, Disposable> deleteObjectFile(StoragePool storagePool, String fileName,
-                                                                     List<Tuple3<String, String, String>> curList) {
+    public static Tuple2<Mono<Boolean>, Disposable> deleteObjectFile0(StoragePool storagePool, String fileName,
+                                                                      List<Tuple3<String, String, String>> curList) {
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", Json.encode(Collections.singletonList(fileName)));
 
@@ -2408,7 +2495,10 @@ public class ErasureClient {
         MonoProcessor<Boolean> processor = MonoProcessor.create();
 
         Disposable subscribe = responseInfo.responses.subscribe(p -> {
-        }, e -> log.error("", e), () -> {
+        }, e -> {
+            log.error("", e);
+            processor.onNext(false);
+        }, () -> {
             //进行到删除文件时，用户一定会获得删除成功的响应。
             processor.onNext(true);
             if (responseInfo.successNum != storagePool.getK() + storagePool.getM()) {
@@ -3362,7 +3452,7 @@ public class ErasureClient {
                     if (StringUtils.isBlank(tempFileName)) {
                         StorageOperate operate = new StorageOperate(StorageOperate.PoolType.DATA, "", Long.MAX_VALUE);
                         StoragePool dataPool = StoragePoolFactory.getStoragePool(operate, sourceMeta.bucket);
-                        tempFileName = Utils.getPartFileName(dataPool, sourceMeta.bucket, sourceMeta.getKey(), sourceMeta.getPartUploadId(),String.valueOf(partInfo.getPartNum()),
+                        tempFileName = Utils.getPartFileName(dataPool, sourceMeta.bucket, sourceMeta.getKey(), sourceMeta.getPartUploadId(), String.valueOf(partInfo.getPartNum()),
                                 RequestBuilder.getRequestId());
                     }
                     List<Tuple3<String, String, String>> sourceNodeList = finalStoragePool.mapToNodeInfo(finalStoragePool.getObjectVnodeId(tempFileName)).block();
@@ -3470,7 +3560,7 @@ public class ErasureClient {
                                     },
                                     () -> {
                                         PartInfo partInfo0 = targetMeta.getPartInfos()[index.intValue()].setFileName(partName);
-                                        if (putBytesLen.get() != partInfo0.partSize){
+                                        if (putBytesLen.get() != partInfo0.partSize) {
                                             partRes.onNext(false);
                                             return;
                                         }

@@ -100,7 +100,11 @@ public class CacheFlushConfigRefresher {
                     Map<String, String> strategyConfig = command.hgetall(key);
 
                     if (strategyConfig != null && "true".equals(strategyConfig.get(ENABLE_ACCESS_FLUSH_KEY))) {
-                        strategyAccessFlush.put(key, new StrategyFlushConfig(strategyConfig));
+                        StrategyFlushConfig strategyFlushConfig = new StrategyFlushConfig(strategyConfig);
+                        if (!strategyFlushConfig.equals(strategyAccessFlush.get(key))) {
+                            strategyAccessFlush.put(key, strategyFlushConfig);
+                            log.info("{} Layered config change! {}", key, strategyFlushConfig);
+                        }
                     } else {
                         strategyAccessFlush.remove(key);
                     }
@@ -177,6 +181,10 @@ public class CacheFlushConfigRefresher {
         return configMap.getOrDefault(cache, DEFAULT_CONFIG);
     }
 
+    public StrategyFlushConfig getStrategyFlushConfig(String strategy) {
+        return strategyAccessFlush.getOrDefault(strategy, StrategyFlushConfig.DEFAULT_STRATEGY_CONFIG);
+    }
+
     public static class SingletonWrapper {
         private static final CacheFlushConfigRefresher INSTANCE = new CacheFlushConfigRefresher();
     }
@@ -192,6 +200,8 @@ public class CacheFlushConfigRefresher {
         int lowFrequencyAccessDays;
         boolean delDataWhenBackStore;
 
+        public static final StrategyFlushConfig DEFAULT_STRATEGY_CONFIG = new StrategyFlushConfig(false, String.valueOf(System.currentTimeMillis()), 30, false);
+
         public StrategyFlushConfig(boolean enableAccessTimeFlush, String enableLayeringStamp, int lowFrequencyAccessDays, boolean delDataWhenBackStore) {
             this.enableAccessTimeFlush = enableAccessTimeFlush;
             this.enableLayeringStamp = enableLayeringStamp;
@@ -203,7 +213,7 @@ public class CacheFlushConfigRefresher {
             this.enableAccessTimeFlush = Boolean.parseBoolean(map.get(ENABLE_ACCESS_FLUSH_KEY));
             this.enableLayeringStamp = map.getOrDefault(ENABLE_LAYERING_STAMP_KEY, String.valueOf(System.currentTimeMillis()));
             this.lowFrequencyAccessDays = Integer.parseInt(map.getOrDefault(LOW_FREQUENCY_ACCESS_DAYS_KEY, "30"));
-            this.delDataWhenBackStore = Boolean.parseBoolean(map.getOrDefault(DEL_DATA_WHEN_BACK_STORE_KEY, "true"));
+            this.delDataWhenBackStore = Boolean.parseBoolean(map.getOrDefault(DEL_DATA_WHEN_BACK_STORE_KEY, "false"));
         }
     }
 

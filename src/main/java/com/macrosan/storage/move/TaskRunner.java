@@ -53,8 +53,7 @@ import static com.macrosan.constants.ErrorNo.NO_SUCH_BUCKET;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.ECUtils.publishEcError;
-import static com.macrosan.ec.Utils.ZERO_STR;
-import static com.macrosan.ec.Utils.getDeduplicatMetaKey;
+import static com.macrosan.ec.Utils.*;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_PUT_OBJECT_FILE;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
@@ -378,7 +377,28 @@ public class TaskRunner {
                                         return fileSystemRunner.fileMove(taskKey, value, dataPool, isMoveData, bucekt, retryNum, vnode[0], metaData.getInode(), fileOffset[0], fileSize[0]);
                                     }
 
-                                    return aws3FileMove(taskKey, retryNum, value, dataPool, isMoveData, bucekt, res0, metaData, vnode[0], aggregate.get(), activeContainer)
+                                    //todo 该缓存池配置了分层之后，下刷时需要去数据池判断是否存在同fileName的数据，存在的话直接使用那个数据池，并且修改对象元数据即可，还要考虑对象在缓存池时被删除，数据池中回迁保留的旧数据也要删除
+
+                                    return Mono.just(StringUtils.isNotEmpty(metaData.getLastAccessStamp()))
+                                            .flatMap(b0 -> {
+                                                if (b0) {
+                                                    String accessTimeKey = getAccessTimeKey(metaData.getLastAccessStamp(), metaData.getFileName());
+                                                    //获取访问记录中保存的数据池前缀
+                                                    //从各节点获取访问记录保存的数据池前缀
+                                                    return ErasureClient.getAccessRecord(accessTimeKey, metaData)
+                                                            .flatMap(res -> {
+                                                                if ("not found".equals(res) || "error".equals(res)) {
+                                                                    return aws3FileMove(taskKey, retryNum, value, dataPool, isMoveData, bucekt, res0, metaData, vnode[0], aggregate.get(), activeContainer);
+                                                                } else {
+                                                                    dataPool[0] = StoragePoolFactory.getStoragePool(res, "");
+                                                                    //如果访问记录中存在dataPool前缀，说明对应数据池中存在数据块，进行对象元数据修改即可
+                                                                    return Mono.just(true).zipWith(Mono.just(res0));
+                                                                }
+                                                            });
+
+                                                }
+                                                return aws3FileMove(taskKey, retryNum, value, dataPool, isMoveData, bucekt, res0, metaData, vnode[0], aggregate.get(), activeContainer);
+                                            })
                                             .flatMap(tuple2 -> {
                                                 if (aggregate.get()) {
                                                     return Mono.just(true);

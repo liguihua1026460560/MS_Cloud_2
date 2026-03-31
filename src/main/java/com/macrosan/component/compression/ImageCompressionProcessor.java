@@ -225,9 +225,7 @@ public class ImageCompressionProcessor {
                 .flatMapMany(nodeList -> {
                     long start = 0;
                     long end = metaData.endIndex;
-                    long fileSize = metaData.endIndex + 1;
-
-                    return ECUtils.getObject(dataPool, metaData.fileName, false, start, end, fileSize,
+                    return ErasureClient.getObject(dataPool, metaData, start, end,
                             nodeList, streamController, null, null);
                 });
     }

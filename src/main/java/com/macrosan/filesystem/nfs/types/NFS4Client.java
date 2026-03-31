@@ -9,7 +9,6 @@ import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
 import com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock;
 import com.macrosan.message.jsonmsg.Inode;
-import com.macrosan.utils.functional.Tuple2;
 import io.vertx.reactivex.core.net.SocketAddress;
 import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Flux;
@@ -42,7 +41,7 @@ public class NFS4Client {
     private final Map<StateOwner.Owner, NFS4State> lockOwners = new ConcurrentHashMap<>();
     private final AtomicLong lastLeaseTime = new AtomicLong(System.currentTimeMillis());
     private final SocketAddress clientAddress;
-    //    private final SocketAddress localAddress;
+    private final SocketAddress localAddress;
     private final long leaseTime;
     private boolean reclaimCompleted;
     private final int minorVersion;
@@ -50,8 +49,8 @@ public class NFS4Client {
     private final NFS4ClientControl clientControl;
     //4.0 delegate回调使用
     public NFSHandler nfsHandler;
-
-    public NFS4Client(NFS4ClientControl clientControl, long clientId, int minorVersion, SocketAddress clientAddress,
+    public String localIp;
+    public NFS4Client(NFS4ClientControl clientControl, long clientId, int minorVersion, SocketAddress clientAddress,SocketAddress localAddress,
                       byte[] ownerId, byte[] verifier, Auth auth, long leaseTime, NFSHandler nfsHandler) {
 
         this.clientControl = clientControl;
@@ -61,11 +60,12 @@ public class NFS4Client {
         this.clientId = clientId;
 
         this.clientAddress = clientAddress;
-//        this.localAddress = localAddress;
+        this.localAddress = localAddress;
         this.leaseTime = leaseTime;
         this.minorVersion = minorVersion;
         reclaimCompleted = this.minorVersion == 0;
         this.nfsHandler = nfsHandler;
+        this.localIp = getLocalAddress();
     }
 
     public Auth getAuth() {
@@ -98,6 +98,14 @@ public class NFS4Client {
 
     public void confirmed() {
         confirmed.set(true);
+    }
+
+    public String getLocalAddress(){
+        return localAddress.host();
+    }
+
+    public String getClientAddress(){
+        return clientAddress.host();
     }
 
     //    public void setBucketName(String bucketName) {
@@ -268,6 +276,7 @@ public class NFS4Client {
     }
 
     public Mono<StateId> openDownGrade(CompoundContext context, NFS4Client client, StateId stateId, int shareAccess, int shareDeny, int seqId, CompoundReply reply) {
+        addLocalIp();
         AtomicReference<NFS4State> res = new AtomicReference<>();
         openStateIds.compute(context.currFh.ino, (k, v) -> {
             clientStates.compute(stateId, (state, openState) -> {
@@ -293,6 +302,7 @@ public class NFS4Client {
 
 
     public NFS4State openConfirm(CompoundContext context, StateId stateId, int seqId) {
+        addLocalIp();
         AtomicReference<NFS4State> res = new AtomicReference<>();
         clientStates.compute(stateId, (state, openState) -> {
             if (openState == null) {
@@ -309,6 +319,7 @@ public class NFS4Client {
 
 
     public NFS4State lockState(CompoundContext context, NFS4Client client, StateId stateId, byte[] owner, int lockSeqId, int seqId, boolean newOwner) {
+        addLocalIp();
         AtomicReference<NFS4State> res = new AtomicReference<>();
         clientStates.compute(stateId, (state, openState) -> {
             if (openState == null) {
@@ -535,6 +546,13 @@ public class NFS4Client {
             return v;
         });
         return res.get();
+    }
+
+    public void addLocalIp(){
+        if (!NFSHandler.localIpMap.containsKey(localIp)) {
+            NFSHandler.localIpMap.put(localIp, 0);
+            NFSHandler.newIpMap.put(localIp, System.nanoTime());
+        }
     }
 
 }

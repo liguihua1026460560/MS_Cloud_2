@@ -252,10 +252,7 @@ public class BucketSyncSwitchCache {
     }
 
     public static boolean isSwitchOn(String status) {
-        if (SWITCH_ON.equals(status) || SWITCH_SUSPEND.equals(status)) {
-            return true;
-        }
-        return false;
+        return SWITCH_ON.equals(status) || SWITCH_SUSPEND.equals(status);
     }
 
     public static boolean isSwitchOn(Map<String, String> bucketInfo) {

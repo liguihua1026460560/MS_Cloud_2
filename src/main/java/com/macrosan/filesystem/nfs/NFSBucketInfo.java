@@ -10,6 +10,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.macrosan.constants.AccountConstants.DEFAULT_USER_ID;
@@ -21,6 +22,21 @@ public class NFSBucketInfo {
     public static Map<Integer, FsInfo> fsToBucket = new ConcurrentHashMap<>();
     public static Map<String, Map<String, String>> bucketInfo = new ConcurrentHashMap<>();
     private static final RedisConnPool redisConnPool = RedisConnPool.getInstance();
+
+    // 日志限流：记录每个 fsid 的错误日志时间戳和计数
+    private static final Map<Integer, ErrorLogThrottle> errorLogThrottleMap = new ConcurrentHashMap<>();
+    private static final long LOG_THROTTLE_INTERVAL_MS = 60000;
+    // 打印间隔：立即、10分钟、30分钟、60分钟、120分钟，240分钟，之后每360分钟一次
+    private static final long[] LOG_INTERVALS_MINUTES = {10, 30, 60, 120, 240, 360};
+
+    @Data
+    private static class ErrorLogThrottle {
+        private long firstErrorTime = 0;  // 第一次错误的时间
+        private long lastLogTime = 0;  // 上次打印日志的时间
+        private int logCountIndex = 0;         // 用于计算下次间隔的索引
+        private AtomicLong errorCount = new AtomicLong(0); // 当前分钟内的错误次数
+        private AtomicLong totalErrorCount = new AtomicLong(0); // 总错误次数
+    }
 
     static {
         try {
@@ -230,4 +246,210 @@ public class NFSBucketInfo {
 
         return DEFAULT_USER_ID;
     }
+
+    /**
+     * 带限流的错误日志记录
+     * 打印策略：立即、10分钟、30分钟、60分钟、120分钟，240分钟，之后每360分钟一次
+     */
+    public static void logFsidError(NFSV3.Opcode opcode, String errorMsg) {
+        int fsid = parseFsidFromErrorMsg(errorMsg);
+        ErrorLogThrottle throttle = errorLogThrottleMap.computeIfAbsent(fsid, k -> new ErrorLogThrottle());
+
+        long currentTime = System.currentTimeMillis();
+        long totalCount = throttle.totalErrorCount.incrementAndGet();
+        long errorCount = throttle.errorCount.incrementAndGet();
+
+        // 第一次错误，立即打印
+        if (throttle.firstErrorTime == 0) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: {}", errorMsg);
+                return;
+            }
+            synchronized (throttle) {
+                if (throttle.firstErrorTime == 0) {
+                    throttle.firstErrorTime = currentTime;
+                    throttle.lastLogTime = currentTime;
+                    log.error("NFS PROCESS error.opt:{},{} (occurred {} times in last log, total {} times.",
+                            opcode, errorMsg, errorCount, totalCount);
+                    return;
+                }
+            }
+        }
+
+        // 计算从上次打印到现在经过了多少分钟
+        long minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+
+        // 计算下一次应该打印的间隔
+        int nextIntervalIndex = Math.min(throttle.logCountIndex, LOG_INTERVALS_MINUTES.length - 1);
+        long nextInterval = LOG_INTERVALS_MINUTES[nextIntervalIndex];
+
+        // 判断是否应该打印
+        if (minutesSinceLastLog >= nextInterval) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: {}", errorMsg);
+                return;
+            }
+            synchronized (throttle) {
+                // 双重检查
+                minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+                if (minutesSinceLastLog >= nextInterval) {
+                    log.error("NFS PROCESS error.opt:{},{} (occurred {} times in last log, total {} times.)",
+                            opcode, errorMsg, errorCount, totalCount);
+
+                    throttle.lastLogTime = currentTime;
+                    throttle.logCountIndex++;
+                    throttle.errorCount.set(0);
+                }
+            }
+        }
+    }
+
+    /**
+     * 带限流的错误日志记录
+     * 打印策略：立即、10分钟、30分钟、60分钟、120分钟，240分钟，之后每360分钟一次
+     */
+    public static void logFsidInfo(NFSV3.Opcode opcode, String errorMsg) {
+        int fsid = parseFsidFromErrorMsg(errorMsg);
+        ErrorLogThrottle throttle = errorLogThrottleMap.computeIfAbsent(fsid, k -> new ErrorLogThrottle());
+
+        long currentTime = System.currentTimeMillis();
+        long totalCount = throttle.totalErrorCount.incrementAndGet();
+        long errorCount = throttle.errorCount.incrementAndGet();
+
+        // 第一次错误，立即打印
+        if (throttle.firstErrorTime == 0) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: {}", errorMsg);
+                return;
+            }
+            synchronized (throttle) {
+                if (throttle.firstErrorTime == 0) {
+                    throttle.firstErrorTime = currentTime;
+                    throttle.lastLogTime = currentTime;
+                    log.info("NFS PROCESS error.opt:{},{} (occurred {} times in last log, total {} times.)",
+                            opcode, errorMsg, errorCount, totalCount);
+                    return;
+                }
+            }
+        }
+
+        // 计算从上次打印到现在经过了多少分钟
+        long minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+
+        // 计算下一次应该打印的间隔
+        // 根据已经打印的次数来决定
+        int nextIntervalIndex = Math.min(throttle.logCountIndex, LOG_INTERVALS_MINUTES.length - 1);
+        long nextInterval = LOG_INTERVALS_MINUTES[nextIntervalIndex];
+
+        // 判断是否应该打印
+        if (minutesSinceLastLog >= nextInterval) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: {}", errorMsg);
+                return;
+            }
+            synchronized (throttle) {
+                // 双重检查
+                minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+                if (minutesSinceLastLog >= nextInterval) {
+                    log.info("NFS PROCESS error.opt:{},{} (occurred {} times in last log, total {} times.)",
+                            opcode, errorMsg, errorCount, totalCount);
+
+                    throttle.lastLogTime = currentTime;
+                    throttle.logCountIndex++;
+                    throttle.errorCount.set(0);
+                }
+            }
+        }
+    }
+
+    /**
+     * 带限流的错误日志记录
+     * 打印策略：立即、10分钟、30分钟、60分钟、120分钟，240分钟，之后每360分钟一次
+     */
+    public static void logFsidInfo(int fsid, String bucket) {
+        ErrorLogThrottle throttle = errorLogThrottleMap.computeIfAbsent(fsid, k -> new ErrorLogThrottle());
+
+        long currentTime = System.currentTimeMillis();
+        long totalCount = throttle.totalErrorCount.incrementAndGet();
+        long errorCount = throttle.errorCount.incrementAndGet();
+
+        // 第一次错误，立即打印
+        if (throttle.firstErrorTime == 0) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: ");
+                return;
+            }
+            synchronized (throttle) {
+                if (throttle.firstErrorTime == 0) {
+                    throttle.firstErrorTime = currentTime;
+                    throttle.lastLogTime = currentTime;
+                    log.info("the fsid {} does not exits,or bucket:{} does not open NFS,or the client ip is not allow to access. (occurred {} times in last log, total {} times.)",
+                            fsid, bucket, errorCount, totalCount);
+                    return;
+                }
+            }
+        }
+
+        // 计算从上次打印到现在经过了多少分钟
+        long minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+
+        // 计算下一次应该打印的间隔
+        // 根据已经打印的次数来决定
+        int nextIntervalIndex = Math.min(throttle.logCountIndex, LOG_INTERVALS_MINUTES.length - 1);
+        long nextInterval = LOG_INTERVALS_MINUTES[nextIntervalIndex];
+
+        // 判断是否应该打印
+        if (minutesSinceLastLog >= nextInterval) {
+            if (fsid == -1) {
+                log.debug("Failed to parse fsid from error message: ");
+                return;
+            }
+            synchronized (throttle) {
+                // 双重检查
+                minutesSinceLastLog = (currentTime - throttle.lastLogTime) / LOG_THROTTLE_INTERVAL_MS;
+                if (minutesSinceLastLog >= nextInterval) {
+                    log.info("the fsid {} does not exits,or bucket:{} does not open NFS,or the client ip is not allow to access. (occurred {} times in last log, total {} times.)",
+                            fsid, bucket, errorCount, totalCount);
+
+                    throttle.lastLogTime = currentTime;
+                    throttle.logCountIndex++;
+                    throttle.errorCount.set(0);
+                }
+            }
+        }
+    }
+
+    /**
+     * 从错误消息中解析 fsid
+     * 支持格式: "The fsid 157 does not exist..."
+     *
+     * @param errorMsg 错误消息
+     * @return fsid，如果解析失败返回 -1
+     */
+    public static int parseFsidFromErrorMsg(String errorMsg) {
+        if (StringUtils.isBlank(errorMsg)) {
+            return -1;
+        }
+
+        try {
+            // 匹配 "The fsid XXX does not exist" 格式
+            int fsidIndex = errorMsg.indexOf("The fsid ");
+            if (fsidIndex == -1) {
+                return -1;
+            }
+
+            int startIndex = fsidIndex + "The fsid ".length();
+            int endIndex = errorMsg.indexOf(" ", startIndex);
+
+            if (endIndex == -1) {
+                return -1;
+            }
+
+            String fsidStr = errorMsg.substring(startIndex, endIndex);
+            return Integer.parseInt(fsidStr);
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
 }

@@ -824,63 +824,6 @@ public class MossHttpClient {
                             retryProcessor.onNext(tryNum.get());
                         }
                     }).handler(response -> {
-                        boolean respSuc = response.statusCode() == SUCCESS;
-                        if (respSuc) {
-                            response.handler(b -> {
-                                responseSummary.respBuffers.computeIfAbsent(response, k -> Buffer.buffer()).appendBuffer(b);
-                                if (isFirst.compareAndSet(true, false)) {
-                                    r.response()
-                                            .putHeader(CONTENT_TYPE, "application/xml")
-                                            .putHeader(TRANSFER_ENCODING, "chunked")
-                                            .putHeader(SERVER, "MOSS")
-                                            .putHeader(ACCESS_CONTROL_HEADERS, "*")
-                                            .putHeader(ACCESS_CONTROL_ORIGIN, "*")
-                                            .putHeader(DATE, nowToGMT())
-                                            .write(io.vertx.core.buffer.Buffer.buffer(xmlHeader));
-                                }
-
-                                r.response().write("\n");
-                            }).exceptionHandler(e -> {
-                                log.debug("response err, host {} response status {} respCount {} excCount {} reqsAmout {} auth {}",
-                                        request.getHost() + request.uri(), response.statusCode(), responseCount.get(), exceptionCount.get(), reqsAmount.get(), r.getHeader(AUTHORIZATION));
-                                exceptionCount.incrementAndGet();
-                                processor.onNext(new Tuple2<>(ip, null));
-                                if (responseCount.incrementAndGet() >= NODE_AMOUNT) {
-                                    //向各个节点分发的请求都有了返回或出错，如果此时并非所有节点都出错，则开始数据流的传输
-                                    if (exceptionCount.get() < NODE_AMOUNT && startResume.compareAndSet(false, true)) {
-                                        reqsAmount.set(NODE_AMOUNT - exceptionCount.get());
-                                        resumeR(r, reqsAmount.get() > 0);
-                                    }
-                                }
-                                retryProcessor.onComplete();
-                            }).endHandler(v -> {
-                                // A站点返回如404、500的响应，B站点可能可以正常。此时需要这个handler能够触发resume。
-                                exceptionCount.incrementAndGet();
-                                reqs.remove(ip);
-                                if (reqsAmount.decrementAndGet() > 0) {
-                                    if (startResume.get()) {
-                                        r.fetch(1L);
-                                    }
-                                }
-                                hasContinue.compareAndSet(true, false);
-                                // 本次请求走过了continueHandler, 会记两次responseCount，需要-1。
-                                if (singleContinue.get()) {
-                                    responseCount.decrementAndGet();
-                                }
-
-                                // 有可能一个请求走了continue和handler，就会开始resume，此时有可能另一个请求还没到continue
-                                if (responseCount.incrementAndGet() >= NODE_AMOUNT && !hasContinue.get() && startResume.compareAndSet(false, true)) {
-                                    reqsAmount.set(NODE_AMOUNT - exceptionCount.get());
-                                    resumeR(r, reqsAmount.get() > 0);
-                                }
-                                log.debug("get response1 {} {} response status {} respCount {} excCount {} reqsAmout {} auth {}", request.method().name(),
-                                        request.getHost() + request.uri(), response.statusCode(), responseCount.get(), exceptionCount.get(), reqsAmount.get(), r.getHeader(AUTHORIZATION));
-                                processor.onNext(new Tuple2<>(ip, response));
-                                retryProcessor.onComplete();
-                            });
-                            return;
-                        }
-
                         response.pause();
                         // A站点返回如404、500的响应，B站点可能可以正常。此时需要这个handler能够触发resume。
                         if (singleContinue.get()) {

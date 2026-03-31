@@ -8,6 +8,7 @@ import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.socketmsg.SocketDataMsg;
 import com.macrosan.message.socketmsg.SocketReqMsg;
+import com.macrosan.storage.StorageOperate;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.client.ClientTemplate;
@@ -33,6 +34,7 @@ import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
 import static com.macrosan.filesystem.cache.WriteCacheNode.putObj;
 import static com.macrosan.filesystem.utils.InodeUtils.isError;
 import static com.macrosan.message.jsonmsg.Inode.CAP_QUOTA_EXCCED_INODE;
+import static com.macrosan.storage.StorageOperate.PoolType.DATA;
 
 @Slf4j
 public class WriteCacheClient {
@@ -47,7 +49,7 @@ public class WriteCacheClient {
         SMB2FileId smb2FileId = new SMB2FileId()
                 .setPersistent(id)
                 .setVolatile_(0);
-        if (existCacheSet.remove(smb2FileId) && fileInfo.openInode != null) {
+        if (existCacheSet.remove(smb2FileId) && null != fileInfo && fileInfo.openInode != null) {
             Node.getInstance().flushWriteCache(fileInfo.openInode, 0, 0, 1).subscribe();
         }
     }
@@ -96,13 +98,15 @@ public class WriteCacheClient {
 
     private static Mono<Boolean> directWrite(long offset, byte[] bytes, Inode inode, boolean flushAll) {
         // 根据文件大小决定写入数据池还是缓存池
-        StoragePool dataPool = StoragePoolFactory.getStoragePool(inode.getStorage(), inode.getBucket());
+        StorageOperate dataOperate = new StorageOperate(DATA, inode.getObjName(), bytes.length);
+        StoragePool dataPool = StoragePoolFactory.getStoragePool(dataOperate, inode.getBucket());
         Encoder encoder = dataPool.getEncoder(bytes.length);
         encoder.put(bytes);
         Digest digest = new Md5Digest();
         digest.update(bytes);
         String md5 = Hex.encodeHexString(digest.digest());
-        return putObj(encoder, inode, offset, bytes.length, md5, 1, dataPool)
+        return (flushAll ? Node.getInstance().flushWriteCache(inode, 0, 0, 1) : Mono.just(true))
+                .flatMap(b -> putObj(encoder, inode, offset, bytes.length, md5, 1, dataPool))
                 .map(inode1 -> !isError(inode1))
                 .doOnNext(res -> {
                     if (flushAll && FLUSHING.compareAndSet(false, true)) {

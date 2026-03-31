@@ -276,6 +276,7 @@ public class InodeUtils {
         long id0 = SMB2FileId.getId();
         return smbCreate(reqHeader, dirInode, mode, cifsMode, obj, body, reply, compoundRequest, createOptions, id0, reqS3Id);
     }
+
     public static Mono<Inode> smbCreate(ReqInfo reqHeader, Inode dirInode, int mode, int cifsMode, String obj, CreateReply body, SMB2.SMB2Reply reply, CompoundRequest compoundRequest, int createOptions, long id0, String reqS3Id) {
         String tmpName = new String(obj);
         String name = obj.substring(obj.lastIndexOf("/") + 1);
@@ -781,7 +782,7 @@ public class InodeUtils {
                                         metaInode.getXAttrMap().put(QUOTA_KEY, Json.encode(updateQuotaDir));
                                     }
                                     if (inode1.getUid() > 0) {
-                                        addQuotaInfoToInode(metaInode,metaData.key);
+                                        addQuotaInfoToInode(metaInode, metaData.key);
                                     }
                                     metaData.tmpInodeStr = Json.encode(metaInode);
                                     isOverWrite[0] = true;
@@ -1047,5 +1048,20 @@ public class InodeUtils {
         } else {
             return Utils.getVersionMetaDataKey(bucketVnode, bucket, object, versionId, snapshotMark);
         }
+    }
+
+    /**
+     * 一天内保证能更新一次
+     *
+     * @param atime a
+     * @return res
+     */
+    public static boolean needUpdateAtime(long atime) {
+        if (atime <= 0) {
+            return false;
+        }
+        long now = System.currentTimeMillis() / 1000;
+
+        return now - atime > 24 * 60 * 60;
     }
 }

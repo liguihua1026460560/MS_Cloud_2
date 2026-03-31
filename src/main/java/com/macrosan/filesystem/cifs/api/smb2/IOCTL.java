@@ -7,6 +7,7 @@ import com.macrosan.filesystem.cifs.SMB2Header;
 import com.macrosan.filesystem.cifs.call.smb2.IOCTLCall;
 import com.macrosan.filesystem.cifs.call.smb2.NegprotCall;
 import com.macrosan.filesystem.cifs.reply.smb2.IOCTLReply;
+import com.macrosan.filesystem.cifs.rpc.pdu.call.RpcRequestCall;
 import com.macrosan.filesystem.cifs.types.NegprotInfo;
 import com.macrosan.filesystem.cifs.types.Session;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubCall;
@@ -14,9 +15,11 @@ import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.NetworkInterfaceInfo;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.NetworkInterfaceInfo.IPV4;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.NetworkInterfaceInfo.Interface;
+import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.RpcResponseSubReply;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.ObjectId1;
 import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubReply.ValidateNegotiateInfo;
 import com.macrosan.filesystem.cifs.types.smb2.SMB2FileId;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.RpcBindGenerator;
 import com.macrosan.utils.cache.ClassUtils;
 import com.macrosan.utils.functional.Function3;
 import com.macrosan.utils.msutils.MsException;
@@ -26,10 +29,12 @@ import lombok.extern.log4j.Log4j2;
 import oshi.SystemInfo;
 import oshi.hardware.NetworkIF;
 import reactor.core.publisher.Mono;
+import com.macrosan.database.redis.RedisConnPool;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 
+import static com.macrosan.filesystem.FsConstants.NTStatus.STATUS_FILE_CLOSED;
 import static com.macrosan.filesystem.cifs.SMB2.SMB2_OPCODE.SMB2_IOCTL;
 import static com.macrosan.filesystem.cifs.call.smb2.IOCTLCall.*;
 import static com.macrosan.filesystem.cifs.call.smb2.NegprotCall.SMB2_NEGOTIATE_SIGNING_ENABLED;
@@ -140,6 +145,34 @@ public class IOCTL {
     }
 
     private static final Pattern ethPattern = Pattern.compile("^eth[0-3]$");
+
+    private static final RedisConnPool redisConnPool = RedisConnPool.getInstance();
+
+    @IOCTLSubCall.Smb2IOCTL(value = FSCTL_PIPE_TRANSCEIVE)
+    public Mono<RpcResponseSubReply> pipeTransceive(SMB2Header header, Session session, IOCTLCall call) {
+        SMB2FileId.FileInfo fileInfo = call.getFileId().getFileInfo(header.getCompoundRequest());
+        if (fileInfo == null) {
+            return Mono.error(new MsException(STATUS_FILE_CLOSED, ""));
+        }
+        RpcResponseSubReply subReply = new RpcResponseSubReply();
+
+        IOCTLSubCall subCall = call.getSubCall();
+        if (!(subCall instanceof IOCTLSubCall.pipeTrans)) {
+            log.info("Unexpected subCall type");
+            return Mono.just(subReply);
+        }
+
+        IOCTLSubCall.pipeTrans pipeCall = (IOCTLSubCall.pipeTrans) subCall;
+        RpcRequestCall rpcRequestCall = pipeCall.rpcRequestCall;
+
+        byte[] responsePDU;
+
+        responsePDU = RpcBindGenerator.generateRequestPdu(rpcRequestCall,fileInfo);
+
+        subReply.setResponsePDU(responsePDU);
+
+        return Mono.just(subReply);
+    }
 
     @IOCTLSubCall.Smb2IOCTL(value = FSCTL_QUERY_NETWORK_INTERFACE_INFO)
     public Mono<NetworkInterfaceInfo> queryInterfaceInfo(SMB2Header header, Session session, IOCTLCall call) {

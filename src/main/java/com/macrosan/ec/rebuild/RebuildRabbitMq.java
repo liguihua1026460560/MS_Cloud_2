@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.error.ErrorFunctionCache.NODE_LIST_TYPE_REFERENCE;
 import static com.macrosan.ec.migrate.Migrate.ADD_NODE_SCHEDULER;
+import static com.macrosan.ec.rebuild.ReBuildTask.Type.OBJECT_FILE;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.CREATE_REBUILD_QUEUE;
 import static com.macrosan.rabbitmq.RabbitMqUtils.*;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
@@ -484,8 +485,9 @@ public class RebuildRabbitMq {
                 String crypto = task.map.get("crypto");
                 String secretKey = task.map.get("secretKey");
                 String lastAccessStamp = task.map.get("lastAccessStamp");
+                String fileOffset = task.map.get("fileOffset");
 
-                taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, task.map.get("timestamp"), lastAccessStamp)
+                taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, task.map.get("timestamp"), lastAccessStamp, fileOffset)
                         .doOnNext(b -> {
                             if (b) {
                                 RebuildSpeed.add(Long.parseLong(fileSize));
@@ -555,7 +557,14 @@ public class RebuildRabbitMq {
             }
         }).subscribe(b -> {
             if (!b) {
-                log.info("rebuild {} fail", message);
+                if (OBJECT_FILE.equals(task.type)) {
+                    log.info("rebuild {} fail", task);
+//                    ReBuildTask reBuildTask = new ReBuildTask(runningTask.task.type, runningTask.task.disk, runningTask.task.vnode, runningTask.task.diskLink, runningTask.task.pool, null, runningTask.task.map);//避免json解析失败
+                    RebuildDeadLetter.getInstance().publishRebuildTask(task);
+                    log.info("publish to dead letter queue {} about {}!", task.map.get("metaKey"), task.map.get("fileName"));
+                } else {
+                    log.info("rebuild {} fail", message);
+                }
             }
         }, e -> {
             log.error("rebuild {} fail ", message, e);

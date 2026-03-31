@@ -49,6 +49,9 @@ public class SysConstants {
     public static final String ROCKS_CACHE_ORDERED_KEY = "{";
     public static final String ROCKS_CACHE_ACCESS_KEY = "}";
 
+    //文件数据冷热分层key prefix
+    public static final String ROCKS_CACHE_BACK_STORE_KEY = "`";
+
     /*************socket通信端口***************/
     public static final int SOCKET_PORT1 = 11111;
     public static final int SOCKET_PORT2 = 11112;
@@ -572,6 +575,7 @@ public class SysConstants {
     public static final String MASTER_DNS_UUID = "masterDnsuuid";
 
     /************ 双活相关****************/
+    public static final String MSG_TYPE = "msg_type";
     public static final String MSG_TYPE_SITE_GET_REDIS_LOCK = "get_active_redis_lock";
     public static final String MSG_TYPE_SITE_CREATE_BUCKET = "active_create_bucket";
     public static final String MSG_TYPE_SITE_DELETE_BUCKET = "active_delete_bucket";
@@ -604,8 +608,19 @@ public class SysConstants {
     public static final String MSG_TYPE_SITE_PUT_BUCKET_TAG = "active_put_bucket_tags";
     public static final String MSG_TYPE_SITE_DEL_BUCKET_TAG = "active_del_bucket_tags";
     public static final String MSG_TYPE_SITE_ASSUME_ROLE = "active_assume_role";
-    public static final String MSG_TYPE_STIE_SET_AWS_SIGN = "active_set_aws_sign";
+    public static final String MSG_TYPE_SITE_SET_AWS_SIGN = "active_set_aws_sign";
     public static final String MSG_TYPE_SITE_DELETE_AWS_SIGN = "active_delete_aws_sign";
+    public static final String MSG_TYPE_PUT_FS_DIR_QUOTA_INFO = "active_put_fs_dir_quota_info";
+    public static final String MSG_TYPE_PUT_FS_USER_QUOTA_INFO = "active_put_fs_user_quota_info";
+    public static final String MSG_TYPE_PUT_FS_GROUP_QUOTA_INFO = "active_put_fs_group_quota_info";
+    public static final String MSG_TYPE_PUT_MULTi_FS_PERFORMANCE_QUOTA = "active_put_multi_fs_performance_quota";
+    public static final String MSG_TYPE_PUT_ADDRESS_PERFORMANCE_QUOTA = "active_put_address_performance_quota";
+    public static final String MSG_TYPE_DEL_FS_QUOTA_INFO = "active_del_fs_quota_info";
+    public static final String MSG_TYPE_SET_BUCKET_NFS = "active_set_bucket_nfs";
+    public static final String MSG_TYPE_SET_BUCKET_CIFS = "active_set_bucket_cifs";
+    public static final String MSG_TYPE_SET_BUCKET_FTP = "active_set_bucket_ftp";
+    public static final String MSG_TYPE_ADD_NFS_IP_WHITELISTS = "active_add_nfs_ip_whitelists";
+    public static final String MSG_TYPE_DEL_NFS_IP_WHITELISTS = "active_del_nfs_ip_whitelists";
     public static final String MSG_TYPE_SYNC_STS = "sync_sts";
     public static final String MSG_TYPE_SITE_SYNC = "active_sync";
     public static final String MASTER_CLUSTER = "master_cluster";
@@ -664,6 +679,17 @@ public class SysConstants {
     public static final String ACTION_SET_AWS_SIGN = "setAWSSign";
     public static final String ACTION_DELETE_AWS_SIGN = "deleteAWSSign";
     public static final String ACTION_ASSUME_ROLE = "assumeRole";
+    public static final String ACTION_PUT_FS_DIR_QUOTA_INFO = "putFsDirQuotaInfo";
+    public static final String ACTION_PUT_FS_USER_QUOTA_INFO = "putFsUserQuotaInfo";
+    public static final String ACTION_PUT_FS_GROUP_QUOTA_INFO = "putFsGroupQuotaInfo";
+    public static final String ACTION_DEL_FS_QUOTA_INFO = "delFsQuotaInfo";
+    public static final String ACTION_PUT_MULTI_FS_PERFORMANCE_QUOTA = "putMultiFsPerformanceQuota";
+    public static final String ACTION_PUT_ADDRESS_PERFORMANCE_QUOTA = "putAddressPerformanceQuota";
+    public static final String ACTION_ADD_NFS_IP_WHITELISTS = "addNfsIpWhitelists";
+    public static final String ACTION_DEL_NFS_IP_WHITELISTS = "delNfsIpWhitelists";
+    public static final String ACTION_SET_BUCKET_NFS = "setBucketNfs";
+    public static final String ACTION_SET_BUCKET_CIFS = "setBucketCifs";
+    public static final String ACTION_SET_BUCKET_FTP = "setBucketFtp";
     public static final String ACL_HEADER = "syncObjAcl";
     public static final String USER_METADATA_HEADER = "syncObjUserMetaData";
     public static final String COPY_SOURCE_KEY = "SyncSourceKey";
@@ -765,6 +791,21 @@ public class SysConstants {
      * 开启桶复制记录时间戳
      */
     public static final String BUCKET_SYNC_TIMESTAMP = "bucket_synchronization_timestamp";
+
+    /**
+     * 文件相关
+     */
+    public static final String NFS_ACL = "nfsAcl";
+    public static final String CIFS_ACL = "cifsAcl";
+    public static final String FTP_ACL = "ftpAcl";
+    public static final String FS_STATUS = "status";
+    public static final String FS_SQUASH = "squash";
+    public static final String ANON_UID = "anonUid";
+    public static final String ANON_GID = "anonGid";
+    public static final String GUEST = "guest";
+    public static final String CASE_SENSITIVE = "caseSensitive";
+    public static final String ANONYMOUS = "anonymous";
+    public static final String NFS_IP_WHITELISTS = "nfsIpWhitelists";
 
     /**
      * 桶清单

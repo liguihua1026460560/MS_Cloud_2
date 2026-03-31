@@ -1,6 +1,5 @@
 package com.macrosan.filesystem.utils;
 
-import com.google.common.base.Utf8;
 import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.filesystem.nfs.NFSV4;
 import com.macrosan.filesystem.nfs.RpcCallHeader;
@@ -12,16 +11,14 @@ import com.macrosan.filesystem.nfs.call.v4.CBSequenceCall;
 import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
-import com.macrosan.filesystem.nfs.types.CBInfo;
-import com.macrosan.filesystem.nfs.types.CompoundContext;
-import com.macrosan.filesystem.nfs.types.NFS4Session;
-import com.macrosan.filesystem.nfs.types.ObjAttr;
+import com.macrosan.filesystem.nfs.types.*;
 import com.macrosan.message.jsonmsg.Inode;
 import lombok.extern.log4j.Log4j2;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
@@ -40,21 +37,41 @@ public class Nfs4Utils {
         return objAttr.hasMtime == 0 && objAttr.hasAtime == 0 && objAttr.hasSize == 0 && objAttr.hasGid == 0 && objAttr.hasUid == 0;
     }
 
-    public static boolean checkAttrSame(ObjAttr objAttr, Inode inode) {
-        if (objAttr.hasMode != 0 && (inode.getMode() & 4095) != objAttr.mode) {
-            return true;
+    public static boolean checkAttrSame(ObjAttr objAttr, Inode inode, boolean same, FAttr4 fAttr, int fsid) {
+        addIfPresent(objAttr.hasMode, fAttr, (inode.getMode() & 4095) == objAttr.mode);
+        addIfPresent(objAttr.hasSize, fAttr, objAttr.size == inode.getSize());
+        addIfPresent(objAttr.hasAtime, fAttr, timeDiff(objAttr.atime, objAttr.atimeNano, inode.getAtime(), inode.getAtimensec()));
+        addIfPresent(objAttr.hasMtime, fAttr, timeDiff(objAttr.mtime, objAttr.mtimeNano, inode.getMtime(), inode.getMtimensec()));
+        addIfPresent(objAttr.hasCtime, fAttr, timeDiff(objAttr.ctime, objAttr.ctimeNano, inode.getCtime(), inode.getCtimensec()));
+        addIfPresent(objAttr.hasUid, fAttr, objAttr.uid == inode.getUid());
+        addIfPresent(objAttr.hasGid, fAttr, objAttr.gid == inode.getGid());
+
+        if (fAttr.verifyRes.stream().anyMatch(v -> v != same)) {
+            return same;
         }
-        if (objAttr.hasSize != 0 && objAttr.size != inode.getSize()) {
-            return true;
+        for (int maskIndex : fAttr.maskAttrMap.keySet()) {
+            Map<Integer, Object> attrMap = fAttr.maskAttrMap.get(maskIndex);
+            for (Map.Entry<Integer, Object> entry : attrMap.entrySet()) {
+                int key = entry.getKey();
+                Object value = entry.getValue();
+                if (FAttr4.verifyAttr(maskIndex, key, value, inode, fsid, fAttr, same) != same) {
+                    return same;
+                }
+            }
         }
-        if (objAttr.hasAtime != 0 && objAttr.atime != inode.getAtime()) {
-            return true;
-        }
-        if (objAttr.hasMtime != 0 && objAttr.mtime != inode.getMtime()) {
-            return true;
-        }
-        return false;
+        return !same;
     }
+
+    private static void addIfPresent(int flag, FAttr4 fAttr, boolean mismatch) {
+        if (flag != 0) {
+            fAttr.verifyRes.add(mismatch);
+        }
+    }
+
+    private static boolean timeDiff(long s1, long n1, long s2, long n2) {
+        return s1 == s2 && n1 == n2;
+    }
+
 
     public static void checkDir(Inode currInode) {
         if ((currInode.getMode() & S_IFMT) != S_IFDIR) {
@@ -82,7 +99,7 @@ public class Nfs4Utils {
 
     public static void checkDirAndName(Inode currInode, byte[] nameBytes) {
         checkDir(currInode);
-        checkName(nameBytes);
+//        checkName(nameBytes);
     }
 
     public static void checkDirAndNotDir(Inode currInode, Inode saveInode) {
@@ -112,23 +129,23 @@ public class Nfs4Utils {
     public static void checkDirAndNameAndSym(Inode currInode, byte[] nameBytes) {
         checkDir(currInode);
         checkSymlink(currInode);
-        checkName(nameBytes);
+//        checkName(nameBytes);
     }
 
-    public static void checkName(byte[] bytes) {
-        String name = new String(bytes, UTF8);
-        if (!Utf8.isWellFormed(bytes) || name.length() == 0) {
+    public static void checkName(byte[] name) {
+        String name0 = new String(name, UTF8);
+        if (name0.length() == 0) {
             throw new NFSException(NFS3ERR_INVAL, "checkName : name pattern illegal");
         }
-        if (name.indexOf('\0') != -1) {
+        if (name0.indexOf('\0') != -1) {
             throw new NFSException(NFS4ERR_BADNAME, "checkName : name pattern bad");
         }
 
-        if (name.length() > NFS_MAX_NAME_LENGTH) {
+        if (name.length > NFS_MAX_NAME_LENGTH) {
             throw new NFSException(NFS3ERR_NAMETOOLONG, "checkName : name too long");
         }
 
-        if (name.equals(".") || name.equals("..") || name.indexOf('/') != -1) {
+        if (name0.equals(".") || name0.equals("..") || name0.indexOf('/') != -1) {
             throw new NFSException(NFS4ERR_BADNAME, "checkName : name pattern  error");
         }
     }

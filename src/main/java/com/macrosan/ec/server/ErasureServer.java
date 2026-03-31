@@ -147,6 +147,7 @@ public class ErasureServer extends AbstractRSocket {
         PUT_DEDUPLICATE_META,
         GET_DEDUPLICATE_META,
         GET_FILEMETA,
+        GET_ACCESS_RECORD,
         UPDATE_DEDUPLICATE_META,
         DELONE_DEDUPLICATE_META,
         MARK_DELETE_OBJECT,
@@ -387,6 +388,8 @@ public class ErasureServer extends AbstractRSocket {
                                 case GET_DEDUPLICATE_META:
                                     return getRocksValue(payload, ERROR_DEDUP_META, NOT_FOUND_DEDUP_META);
                                 case GET_FILEMETA:
+                                    return getRocksValue(payload, "error", "not Found");
+                                case GET_ACCESS_RECORD:
                                     return getRocksValue(payload, "error", "not Found");
                                 case UPDATE_DEDUPLICATE_META:
                                     return updateDedupMeta(payload);
@@ -891,7 +894,11 @@ public class ErasureServer extends AbstractRSocket {
         String lastAccessStamp = msg.get("lastAccessStamp");
         long fileOffset = -1;
         if (msg.getDataMap().containsKey("fileOffset")) {
-            fileOffset = Long.parseLong(msg.get("fileOffset"));
+            try {
+                fileOffset = Long.parseLong(msg.get("fileOffset"));
+            } catch (Exception e) {
+                fileOffset = -1;
+            }
         }
         int vnodeIndex = fileName.indexOf("_");
         int dirIndex = fileName.indexOf(File.separator);

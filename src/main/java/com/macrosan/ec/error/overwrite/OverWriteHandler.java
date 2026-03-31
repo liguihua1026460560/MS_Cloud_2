@@ -23,6 +23,7 @@ import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.rocksdb.*;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.io.File;
 import java.time.Duration;
@@ -33,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static com.macrosan.database.rocksdb.MSRocksDB.READ_OPTIONS;
+import static com.macrosan.ec.ErasureClient.deleteObjectFileWithData;
 import static com.macrosan.ec.server.RequestResponseServerHandler.updateCapacityInfo;
 
 @Log4j2
@@ -537,7 +539,15 @@ public class OverWriteHandler {
                             return;
                         }
                         if (pool != null) {
-                            ErasureClient.deleteObjectFile(pool, fileArray, null).block();
+                            boolean needDelFileInData = pool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(oldMeta.getLastAccessStamp());
+                            Mono.just(needDelFileInData)
+                                    .flatMap(b0 -> {
+                                        if (b0) {
+                                            return deleteObjectFileWithData(oldMeta, fileArray, null);
+                                        } else {
+                                            return Mono.just(b0);
+                                        }
+                                    }).flatMap(b1 -> ErasureClient.deleteObjectFile(pool, fileArray, null)).block();
                         }
                     } else {
                         StoragePool metaPool = StoragePoolFactory.getMetaStoragePool(oldMeta.bucket);
@@ -547,7 +557,15 @@ public class OverWriteHandler {
                         if (!overWriteFiles.isEmpty()) {
                             String[] fileArrays = overWriteFiles.toArray(new String[0]);
                             if (pool != null) {
-                                ErasureClient.deleteObjectFile(pool, fileArrays, null).block();
+                                boolean needDelFileInData = pool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(oldMeta.getLastAccessStamp());
+                                Mono.just(needDelFileInData)
+                                        .flatMap(b0 -> {
+                                            if (b0) {
+                                                return deleteObjectFileWithData(oldMeta, fileArrays, null);
+                                            } else {
+                                                return Mono.just(b0);
+                                            }
+                                        }).flatMap(b1 -> ErasureClient.deleteObjectFile(pool, fileArrays, null)).block();
                             }
                         }
                     }

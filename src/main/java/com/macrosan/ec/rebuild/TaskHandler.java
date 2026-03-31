@@ -23,7 +23,7 @@ import static com.macrosan.ec.error.ErrorConstant.ECErrorType.RECOVER_DISK_FILE;
 @Log4j2
 public class TaskHandler {
     public static Mono<Boolean> rebuildObjMeta(String bucket, String object, String versionId, List<Tuple3<String, String, String>> nodeList, String snapshotMark) {
-        return PutErrorHandler.recoverMeta(new MetaData().setBucket(bucket).setKey(object).setVersionId(versionId).setSnapshotMark(snapshotMark), null).map(b -> true);
+        return PutErrorHandler.recoverMeta(new MetaData().setBucket(bucket).setKey(object).setVersionId(versionId).setSnapshotMark(snapshotMark), null, null).map(b -> true);
     }
 
     public static Mono<Boolean> rebuildInitPartUpload(String bucket, String object, String uploadId,
@@ -41,7 +41,7 @@ public class TaskHandler {
     }
 
     public static Mono<Boolean> rebuildObjFile(StoragePool storagePool, String metaKey, String lun, String errorIndex, String fileName, String endIndex, String fileSize, String crypto, String secretKey,
-                                               List<Tuple3<String, String, String>> nodeList, String flushStamp, String lastAccessStamp) {
+                                               List<Tuple3<String, String, String>> nodeList, String flushStamp, String lastAccessStamp, String fileOffset) {
         List<Integer> errorChunksList = Arrays.asList(Integer.parseInt(errorIndex));
         int i = Integer.parseInt(errorIndex);
         SocketReqMsg msg = new SocketReqMsg("", 0)
@@ -58,6 +58,9 @@ public class TaskHandler {
         }
         if (StringUtils.isNotEmpty(lastAccessStamp)) {
             msg.put("lastAccessStamp", lastAccessStamp);
+        }
+        if (StringUtils.isNotEmpty(fileOffset)) {
+            msg.put("fileOffset", fileOffset);
         }
         CryptoUtils.putCryptoInfoToMsg(crypto, secretKey, msg);
 

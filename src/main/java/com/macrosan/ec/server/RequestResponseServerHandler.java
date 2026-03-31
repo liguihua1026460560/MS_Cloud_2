@@ -745,7 +745,7 @@ public class RequestResponseServerHandler {
                         if (StringUtils.isNotEmpty(oldMeta.aggregationKey)) {
                             overwriteFiles.set(oldMeta.storage + "=" + oldMeta.aggregationKey);
                         } else {
-                            overwriteFiles.set(oldMeta.storage + "=" + oldMeta.fileName);
+                            overwriteFiles.set(oldMeta.storage + "=" + oldMeta.fileName + "=" + (StringUtils.isNotEmpty(oldMeta.lastAccessStamp) ? oldMeta.lastAccessStamp : ""));
                         }
                     }
                 }
@@ -2340,7 +2340,7 @@ public class RequestResponseServerHandler {
                             if (metaData.inode > 0) {
                                 capacity = 0;
                             }
-                            updateCapacityInfo(writeBatch, currentValue.getString("bucket"), currentValue.getString("key"), vnode, num, capacity);
+                            updateCapacityInfo(writeBatch, bucket, currentValue.getString("key"), vnode, num, capacity);
                             FSQuotaUtils.updateAllKeyCap(updateCapKeys[0], writeBatch, currentValue.getString("bucket"), vnode, num, capacity);
                         } else {
                             long capacity = 0;
@@ -2916,14 +2916,20 @@ public class RequestResponseServerHandler {
             //首先在当前缓存盘增加访问记录
             //修改增加LastAccessTime
 
+            byte[] valueByte = ZERO_BYTES;
             FileMeta fileMeta = Json.decodeValue(new String(oldValue), FileMeta.class);
             //获取旧的时间戳对应的访问记录key
             if (fileMeta.getLastAccessStamp() != null) {
                 String oldRecord = getAccessTimeKey(fileMeta.getLastAccessStamp(), fileName);
+                //获取访问记录中保存的数据池前缀
+                byte[] prefixByte = writeBatch.getFromBatchAndDB(db, oldRecord.getBytes());
+                if (prefixByte != null && new String(prefixByte).startsWith("data")) {
+                    valueByte = prefixByte;
+                }
                 writeBatch.delete(oldRecord.getBytes());
             }
 
-            writeBatch.put(accessRecord.getBytes(), ZERO_BYTES);
+            writeBatch.put(accessRecord.getBytes(), valueByte);
             fileMeta.setLastAccessStamp(stamp);
 
             writeBatch.put(FileMeta.getKey(fileName).getBytes(), Json.encode(fileMeta).getBytes());
@@ -5318,9 +5324,9 @@ public class RequestResponseServerHandler {
                     writeBatch.delete(Utils.getMetaDataKey(vnode, metaData.bucket, metaData.key, metaData.versionId, "0", metaData.snapshotMark).getBytes());
                 }
                 MetaData oldMeta = Json.decodeValue(new String(oldValue), MetaData.class);
-                if (oldMeta.discard) {
-                    return;
-                }
+//                if (oldMeta.discard) {
+//                    return;
+//                }
                 long capacity = 0;
                 if (oldMeta.snapshotMark == null || oldMeta.partUploadId == null) {
                     capacity = oldMeta.deleteMarker || oldMeta.deleteMark ? 0 : Utils.getObjectSize(oldMeta);
@@ -5336,7 +5342,9 @@ public class RequestResponseServerHandler {
                 writeBatch.delete(tuple3.var1.getBytes());
                 writeBatch.delete(tuple3.var2.getBytes());
                 writeBatch.delete(tuple3.var3.getBytes());
-                updateCapacityInfo(writeBatch, metaData.bucket, metaData.key, vnode, metaData.deleteMark ? 0 : objNum, metaData.deleteMark ? 0 : -capacity);
+                long finalObjNum = metaData.deleteMark && (oldMeta.deleteMark || oldMeta.deleteMarker) ? 0 : objNum;
+                long finalCapacity = metaData.deleteMark && (oldMeta.deleteMark || oldMeta.deleteMarker) ? 0 : -capacity;
+                updateCapacityInfo(writeBatch, metaData.bucket, metaData.key, vnode, finalObjNum, finalCapacity);
             }
         };
         int hashCode = getFinalHashCode(latestKey, metaData.snapshotMark != null);

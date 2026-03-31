@@ -34,6 +34,7 @@ import static com.macrosan.doubleActive.DataSynChecker.timeoutMinute;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.httpserver.MossHttpClient.INDEX_IPS_MAP;
 import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
+import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
 import static com.macrosan.rsocket.server.Rsocket.DA_RSOCKET_PORT;
 
 @Log4j2
@@ -68,72 +69,85 @@ public class FSUnsyncRecordHandler {
         }
         String ip = INDEX_IPS_MAP.get(clusterIndex)[currentIndex];
 
+        String oldInodeData = dataMap.get("oldInodeData");
+        //oldInodeData不为空，只是更新数据块的存储池，不需要复制
+        if (StringUtils.isNotBlank(oldInodeData)) {
+            return Mono.just(true);
+        }
+
         switch (opt) {
             case 1: {
                 // nfs3 write、commit都通过这里同步。
                 // 只有本地站点落盘（updateInode成功），这样的数据才认为需要同步给对端站点，否则属于缓存，本身也存在掉电丢失的可能，不需要同步。
                 // 因此可能存在落盘前的数据只能在一边站点读取到的现象
-                String oldInodeData = dataMap.get("oldInodeData");
-                //oldInodeData不为空，只是更新数据块的存储池，不需要复制
-                if (StringUtils.isNotBlank(oldInodeData)) {
-                    return Mono.just(true);
-                } else {
-                    Inode.InodeData inodeData = Json.decodeValue(dataMap.get("inodeData"), Inode.InodeData.class);
-                    Mono<Boolean> mono = getInode(bucket, nodeId)
-                            .flatMap(curInode -> {
-                                long fileOffset = Long.parseLong(dataMap.get("fileOffset"));
-                                if (!InodeDataCache.checkInodeData(inodeData.fileName, curInode)) {
-                                    log.info("fileName not match or file deleted, skip. {}, {}, {}", bucket, nodeId, Json.encode(record));
+                Inode.InodeData inodeData = Json.decodeValue(dataMap.get("inodeData"), Inode.InodeData.class);
+                Mono<Boolean> mono = getInode(bucket, nodeId)
+                        .flatMap(curInode -> {
+                            if (curInode.getLinkN() < 0) {
+                                if (curInode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                    log.info("file deleted, skip. {}, {}, {}", bucket, nodeId, Json.encode(record));
                                     return Mono.just(true);
+                                } else {
+                                    log.error("deal fs record err, {}, opt:{}, nodeId:{}, bucket:{}, linkN:{} {}", record.index, opt, nodeId, bucket, curInode.getLinkN(), dataMap);
+                                    return Mono.just(false);
                                 }
-                                dataMap.put("obj", curInode.getObjName());
-                                String storage = curInode.getInodeData().get(0).storage;
-                                // 如果后续要做背压，考虑用一个流订阅文件数据，根据offset和size来按顺序获取数据并推流
-                                return ReadObjClient.readObj(0, storage, bucket, inodeData.fileName, 0, inodeData.size, inodeData.size, false)
-//                                return ReadObjCache.readObj(curInode, fileOffset, inodeData.size)
-                                        .collectList()
-                                        .flatMap(list -> {
-                                            SocketDataMsg socketDataMsg = new SocketDataMsg();
+                            }
+                            long fileOffset = Long.parseLong(dataMap.get("fileOffset"));
+//                                return InodeDataCache.checkInodeData(inodeData.fileName, curInode, fileOffset)
+                            return InodeDataCache.searchInodeData(inodeData.fileName, curInode.getInodeData(), fileOffset, inodeData.size, inodeData.storage)
+                                    .flatMap(tuple3 -> {
+                                        if (tuple3.var2 == -1) {
+                                            log.info("fileName not match or file deleted, skip. {}, {}, {}", bucket, nodeId, Json.encode(record));
+                                            return Mono.just(true);
+                                        }
+                                        dataMap.put("obj", curInode.getObjName());
+                                        String storage = tuple3.var3;
+                                        // 如果后续要做背压，考虑用一个流订阅文件数据，根据offset和size来按顺序获取数据并推流
+                                        return ReadObjClient.readObj(0, storage, bucket, inodeData.fileName, 0, inodeData.size, inodeData.size, false)
+//                                            return ReadObjCache.readObj(curInode, fileOffset, inodeData.size)
+                                                .collectList()
+                                                .flatMap(list -> {
+                                                    SocketDataMsg socketDataMsg = new SocketDataMsg();
 
-                                            if (list.size() == 1) {
-                                                socketDataMsg.data = list.get(0).var2;
-                                            } else {
-                                                list.sort(Comparator.comparingInt(o -> o.var1));
-                                                int size = 0;
-                                                for (Tuple2<Integer, byte[]> t : list) {
-                                                    size += t.var2.length;
-                                                }
+                                                    if (list.size() == 1) {
+                                                        socketDataMsg.data = list.get(0).var2;
+                                                    } else {
+                                                        list.sort(Comparator.comparingInt(o -> o.var1));
+                                                        int size = 0;
+                                                        for (Tuple2<Integer, byte[]> t : list) {
+                                                            size += t.var2.length;
+                                                        }
 
-                                                socketDataMsg.data = new byte[size];
-                                                int index = 0;
-                                                for (Tuple2<Integer, byte[]> t : list) {
-                                                    System.arraycopy(t.var2, 0, socketDataMsg.data, index, t.var2.length);
-                                                    index += t.var2.length;
-                                                }
-                                            }
+                                                        socketDataMsg.data = new byte[size];
+                                                        int index = 0;
+                                                        for (Tuple2<Integer, byte[]> t : list) {
+                                                            System.arraycopy(t.var2, 0, socketDataMsg.data, index, t.var2.length);
+                                                            index += t.var2.length;
+                                                        }
+                                                    }
 
-                                            for (String key : dataMap.keySet()) {
-                                                socketDataMsg.put(key, dataMap.get(key));
-                                            }
+                                                    for (String key : dataMap.keySet()) {
+                                                        socketDataMsg.put(key, dataMap.get(key));
+                                                    }
 
-                                            if (isDebug) {
-                                                log.info("start send file data, {} {} {}" , nodeId, socketDataMsg.data.length, socketDataMsg.getObjMap());
-                                            }
-                                            if (socketDataMsg.data.length < CHUNK_SIZE) {
-                                                return sendFileAsyncResponse(opt, socketDataMsg, ip);
-                                            } else {
-                                                return sendFileAsyncChannel(opt, ip, dataMap, socketDataMsg.data);
-                                            }
+                                                    if (isDebug) {
+                                                        log.info("start send file data, {} {} {}", nodeId, socketDataMsg.data.length, socketDataMsg.getObjMap());
+                                                    }
+                                                    if (socketDataMsg.data.length < CHUNK_SIZE) {
+                                                        return sendFileAsyncResponse(opt, socketDataMsg, ip);
+                                                    } else {
+                                                        return sendFileAsyncChannel(opt, ip, dataMap, socketDataMsg.data);
+                                                    }
+                                                });
+                                    });
+                        });
+                return mono
+                        .timeout(Duration.ofMinutes(timeoutMinute))
+                        .onErrorResume(e -> {
+                            log.error("deal fs record err, {}, opt:{}, nodeId:{}, bucket:{}, {}", record.index, opt, nodeId, bucket, dataMap, e);
+                            return Mono.just(false);
+                        });
 
-                                        });
-                            });
-                    return mono
-                            .timeout(Duration.ofMinutes(timeoutMinute))
-                            .onErrorResume(e -> {
-                                log.error("deal fs record err, {}, opt:{}, nodeId:{}, bucket:{}, {}", record.index, opt, nodeId, bucket, dataMap, e);
-                                return Mono.just(false);
-                            });
-                }
             }
             case 50: {
                 Inode createInode = Json.decodeValue(dataMap.get("inode"), Inode.class);
@@ -187,16 +201,8 @@ public class FSUnsyncRecordHandler {
                     } else {
                         log.debug("sendFileAsyncResponse done, {} {} {}", ip, opt, msg.dataMap);
                     }
-                    switch (opt) {
-                        case 3:
-                            if (Inode.NOT_FOUND_INODE.getLinkN() == responseInfo.res[0].var2.getLinkN()) {
-                                // deleteInode时没有在对端找到找到相关inode，响应为ERROR
-                                res.onNext(true);
-                                return;
-                            }
-                            break;
-                        default:
-                            break;
+                    if (Inode.NOT_FOUND_INODE.getLinkN() == responseInfo.res[0].var2.getLinkN()) {
+                        log.info("inode not found. delete record. {} {} {}", ip, opt, msg.dataMap);
                     }
                     res.onNext(true);
                 } else {

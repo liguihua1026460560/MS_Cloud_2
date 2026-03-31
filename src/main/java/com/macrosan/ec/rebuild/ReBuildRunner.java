@@ -97,6 +97,7 @@ public class ReBuildRunner {
         task.map.put("fileKey", fileMeta.getKey());
         task.map.put("flushStamp", fileMeta.getFlushStamp());
         task.map.put("lastAccessStamp", fileMeta.getLastAccessStamp());
+        task.map.put("fileOffset", String.valueOf(fileMeta.getFileOffset()));
 
         if (CryptoUtils.checkCryptoEnable(fileMeta.getCrypto())) {
             task.map.put("crypto", fileMeta.getCrypto());

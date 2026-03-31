@@ -1,6 +1,7 @@
 package com.macrosan.filesystem.utils;
 
 import com.macrosan.constants.ErrorNo;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.RpcPipeType;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.utils.msutils.MsException;
 import io.netty.buffer.ByteBuf;
@@ -15,6 +16,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
+import java.util.Optional;
 
 import static com.macrosan.constants.ServerConstants.DEFAULT_DATA;
 import static com.macrosan.filesystem.FsConstants.*;
@@ -264,20 +266,26 @@ public class CifsUtils {
         int cifsMode = oldCifsMode;
         boolean hasChange = false;
         if (StringUtils.isNotBlank(newObj)) {
-            if (newObj.endsWith("/")) {
-                cifsMode |= FILE_ATTRIBUTE_DIRECTORY;
-                if ((cifsMode & FILE_ATTRIBUTE_NORMAL) == 0) {
-                    cifsMode = cifsMode & ~FILE_ATTRIBUTE_HIDDEN;
-                }
+            Optional<RpcPipeType> rpcTypeOpt = RpcPipeType.fromFileName(newObj);
+            if (rpcTypeOpt.isPresent()){
+                cifsMode = FILE_ATTRIBUTE_PIPE_ACCESS_MASK;
                 hasChange = true;
-            } else if (!".".equals(newObj) && !"..".equals(newObj)) {
-                cifsMode |= FILE_ATTRIBUTE_ARCHIVE;
-            }
-            if (optHidden && !".".equals(newObj) && !"..".equals(newObj)) {
-                String[] split = newObj.split("/");
-                if (split[split.length - 1].startsWith(".")) {
-                    cifsMode |= FILE_ATTRIBUTE_HIDDEN;
+            } else {
+                if (newObj.endsWith("/")) {
+                    cifsMode |= FILE_ATTRIBUTE_DIRECTORY;
+                    if ((cifsMode & FILE_ATTRIBUTE_NORMAL) == 0) {
+                        cifsMode = cifsMode & ~FILE_ATTRIBUTE_HIDDEN;
+                    }
                     hasChange = true;
+                } else if (!".".equals(newObj) && !"..".equals(newObj)) {
+                    cifsMode |= FILE_ATTRIBUTE_ARCHIVE;
+                }
+                if (optHidden && !".".equals(newObj) && !"..".equals(newObj)) {
+                    String[] split = newObj.split("/");
+                    if (split[split.length - 1].startsWith(".")) {
+                        cifsMode |= FILE_ATTRIBUTE_HIDDEN;
+                        hasChange = true;
+                    }
                 }
             }
         }

@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 
 import static com.macrosan.constants.SysConstants.LOCAL_IP_ADDRESS;
 import static com.macrosan.constants.SysConstants.ROCKS_DEDUPLICATE_KEY;
+import static com.macrosan.ec.ErasureClient.lifecycleDeleteFileWithData;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.lifecycle.mq.LifecycleChannels.publishCommand;
 
@@ -108,6 +109,7 @@ public class LifecycleClearTask {
         String fileNameStr = jsonObject.getString("fileName");
         String storageStrategy = jsonObject.getString("storageStrategy");
         final String snapshotMark=jsonObject.getString("snapshotMark");
+        String lastAccessStamp = jsonObject.getString("lastAccessStamp");
         String fileName = fileNameStr.substring(1, fileNameStr.length() - 1);
         String[] fileNameArr = fileName.split(", ");
         boolean dedup = fileName.contains(ROCKS_DEDUPLICATE_KEY);
@@ -183,13 +185,23 @@ public class LifecycleClearTask {
                         }
                     }
                     if (!flag && !migrationResults.var2) {
+                        MetaData tmpMetaData = new MetaData().setFileName(fileNameArr[0]).setBucket(bucket).setStorage(storage).setLastAccessStamp(lastAccessStamp);
                         if(dedup){
                             StoragePool sourcePool = StoragePoolFactory.getMetaStoragePool(bucket);
                             return ErasureClient.deleteDedupObjectFile(sourcePool, fileNameArr, null, true)
                                     .flatMap(b -> {
                                       if(b && !allFile.isEmpty()){
                                           StoragePool sourceObjPool = StoragePoolFactory.getStoragePool(storage, bucket);
-                                          return ErasureClient.lifecycleDeleteFile(sourceObjPool, allFile.toArray(new String[0]), null);
+                                          boolean needDelFileInData = sourceObjPool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(lastAccessStamp);
+                                          return Mono.just(needDelFileInData)
+                                                  .flatMap(b0 -> {
+                                                      if (b0) {
+                                                          return lifecycleDeleteFileWithData(tmpMetaData, allFile.toArray(new String[0]), null);
+                                                      } else {
+                                                          return Mono.just(b0);
+                                                      }
+                                                  })
+                                                  .flatMap(b1 -> ErasureClient.lifecycleDeleteFile(sourceObjPool, allFile.toArray(new String[0]), null));
                                       }
                                       return Mono.just(b);
                                     })
@@ -200,7 +212,15 @@ public class LifecycleClearTask {
                                     });
                         }
                         StoragePool sourcePool = StoragePoolFactory.getStoragePool(storage, bucket);
-                        return ErasureClient.lifecycleDeleteFile(sourcePool, fileNameArr, null)  // 生命周期删除限流
+                        boolean needDelFileInData = sourcePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(lastAccessStamp);
+                        return Mono.just(needDelFileInData)
+                                .flatMap(b0 -> {
+                                    if (b0) {
+                                        return lifecycleDeleteFileWithData(tmpMetaData, fileNameArr, null);
+                                    } else {
+                                        return Mono.just(b0);
+                                    }
+                                }).flatMap(b1 -> ErasureClient.lifecycleDeleteFile(sourcePool, fileNameArr, null))//生命周期删除限流
                                 .doOnNext(b -> {
                                     if (b) {
                                         deleteMq(taskKey);

@@ -50,6 +50,7 @@ import com.macrosan.storage.client.channel.ListObjectMergeChannel;
 import com.macrosan.storage.client.channel.ListVersionsMergeChannel;
 import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.storage.crypto.common.CryptoAlgorithm;
+import com.macrosan.storage.move.CacheMove;
 import com.macrosan.storage.strategy.StorageStrategy;
 import com.macrosan.utils.cache.Md5DigestPool;
 import com.macrosan.utils.codec.UrlEncoder;
@@ -137,6 +138,7 @@ import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
 import static com.macrosan.filesystem.utils.FSQuotaUtils.s3AddQuotaDirInfo;
+import static com.macrosan.filesystem.utils.FsTierUtils.fileS3AccessHandle;
 import static com.macrosan.filesystem.utils.InodeUtils.isError;
 import static com.macrosan.httpserver.MossHttpClient.*;
 import static com.macrosan.httpserver.ResponseUtils.*;
@@ -151,8 +153,9 @@ import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.message.jsonmsg.MetaData.ERROR_META;
 import static com.macrosan.message.jsonmsg.MetaData.NOT_FOUND_META;
 import static com.macrosan.storage.StorageOperate.PoolType.DATA;
+import static com.macrosan.storage.StoragePoolFactory.getStrategyNameByDataPrefix;
 import static com.macrosan.storage.crypto.impl.AES256Crypto.DEFAULT_AES256_SECRET_KEY;
-import static com.macrosan.storage.move.CacheFlushConfigRefresher.isStrategyEnableAccessTimeFlush;
+import static com.macrosan.storage.move.CacheMove.getCachePoolFullWaterMark;
 import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 import static com.macrosan.storage.strategy.StorageStrategy.BUCKET_STRATEGY_NAME_MAP;
 import static com.macrosan.storage.strategy.StorageStrategy.POOL_STRATEGY_MAP;
@@ -891,10 +894,10 @@ public class StreamService extends BaseService {
         // 无论是否开启NFS，均对元数据生成唯一cookie，防止NFS多客户端list无cookie对象时生成不一样的cookie
 //        metaData.setCookie(VersionUtil.newInode());
         String lastAccessStamp = "";
-        boolean needRecordAccess = false;
         //如果上传时桶所在策略开启数据分层且将存到缓存池中
-        if (isEnableCacheAccessTimeFlush(dataPool)) {//当前缓存池开启访问记录
-            needRecordAccess = true;
+        //获取存储策略是否配置分层
+        String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucketName);
+        if (dataPool.getVnodePrefix().startsWith("cache") && isEnableCacheAccessTimeFlush(strategy)) {//当前缓存池开启访问记录
             lastAccessStamp = String.valueOf(System.currentTimeMillis());//这里直接按照上传时间更新最近访问时间吧
             metaData.setLastAccessStamp(lastAccessStamp);
         }
@@ -1403,12 +1406,28 @@ public class StreamService extends BaseService {
             result = ErasureClient.deleteDedupObjectFile(metaStoragePool, dedupFile.toArray(new String[0]), request, false)
                     .flatMap(b -> {
                         if (!allFile.isEmpty()) {
-                            return deleteObjectFile(storagePool, allFile.toArray(new String[0]), request);
+                            boolean needDelFileInData = storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(metaData[0].getLastAccessStamp());
+                            return Mono.just(needDelFileInData)
+                                    .flatMap(b0 -> {
+                                        if (b0) {
+                                            return deleteObjectFileWithData(metaData[0], allFile.toArray(new String[0]), request);//依赖缓存池访问记录表获取源数据池，需在删缓存池数据前执行
+                                        } else {
+                                            return Mono.just(b0);
+                                        }
+                                    })
+                                    .flatMap(b1 -> deleteObjectFile(storagePool, allFile.toArray(new String[0]), request));
                         }
                         return Mono.just(b);
                     });
         } else {
-            result = deleteObjectFile(storagePool, needDeleteFile.toArray(new String[0]), request);
+            if (storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(metaData[0].getLastAccessStamp())) {
+                result = deleteObjectFileWithData(metaData[0], needDeleteFile.toArray(new String[0]), request)
+                        .flatMap(b0 -> {
+                            return deleteObjectFile(storagePool, needDeleteFile.toArray(new String[0]), request);
+                        });
+            } else {
+                result = deleteObjectFile(storagePool, needDeleteFile.toArray(new String[0]), request);
+            }
         }
 
         return result
@@ -2384,6 +2403,7 @@ public class StreamService extends BaseService {
         final int[] policy = new int[1];
         AtomicBoolean deleteSource = new AtomicBoolean(false);
         AtomicBoolean backSource = new AtomicBoolean(false);
+        long[] objectSize = new long[1];
 
         final String method = request.getParam(VERSIONID) == null ? "GetObject" : "GetObjectVersion";
         final String userName = request.getUserName() == null ? "" : request.getUserName();
@@ -2399,6 +2419,7 @@ public class StreamService extends BaseService {
         StoragePool[] dataPool = new StoragePool[]{null};
         boolean[] hasStartFS = {false};
         int[] startFsType = {0};
+        MetaData[] accessMetaData = new MetaData[1];
         pool.getReactive(REDIS_BUCKETINFO_INDEX)
                 .hgetall(bucketName)
                 .doOnNext(bucketInfo -> {
@@ -2441,6 +2462,7 @@ public class StreamService extends BaseService {
                 })
                 .flatMap(metaData -> {
                     dataPool[0] = StoragePoolFactory.getStoragePool(metaData);
+                    objectSize[0] = metaData.endIndex + 1;
 
 
                     return dataPool[0].mapToNodeInfo(dataPool[0].getObjectVnodeId(metaData)).zipWith(Mono.just(metaData));
@@ -2533,6 +2555,8 @@ public class StreamService extends BaseService {
                                 .map(BytesWrapperBuffer::new);
                     }
 
+                    accessMetaData[0] = metaData.clone();
+
                     Flux<byte[]> dataFlux = ErasureClient.getObject(dataPool[0], metaData, startIndex, endIndex, tuple2.getT1(), streamController, request, null);
                     if (compressionType == null) {
                         return dataFlux.map(BytesWrapperBuffer::new);
@@ -2548,13 +2572,40 @@ public class StreamService extends BaseService {
                     return ImageCompressionProcessor.getInstance().decompressImage(compressionType, endIndex - startIndex + 1, dataFlux, streamController, readController);
                 })
                 .doFinally(s -> {
-                    //只有在读开启了数据分层的缓存池上的数据才异步对访问记录更新, 数据池数据的访问直接在异步迁移回缓存池时进行更新
-                    if (isEnableCacheAccessTimeFlush(dataPool[0])) {
+                    //处理文件通过s3协议访问，单独进行处理
+                    if (accessMetaData[0] != null && accessMetaData[0].inode > 0) {
+                        fileS3AccessHandle(accessMetaData[0]);
+                        return;
+                    }
+                    //只有在读开启了数据分层的缓存池上的数据其所属策略开启了分层才异步对访问记录更新, 数据池数据的访问直接在异步迁移回缓存池时进行更新
+                    String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucketName);
+                    if (dataPool[0] == null) {
+                        return;
+                    }
+                    if (isEnableCacheAccessTimeFlush(dataPool[0]) && isEnableCacheAccessTimeFlush(strategy)) {
                         ObjectAccessCache.addAccessRecord(bucketName, objName, versionId[0]);//添加到异步处理增加访问记录
                     }
-                    //策略开启数据分层后get数据池上的对象会触发异步回迁至缓存池
-                    if (dataPool[0].getVnodePrefix().startsWith("data") && isStrategyEnableAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucketName))) {
-                        BackStoreAccessedData.addNeedBackStoreRecord(bucketName, objName, versionId[0]);
+                    //策略开启数据分层后get数据池上的对象会触发异步回迁至缓存池//todo 判断数据池对应策略下缓存池是否容量都超过了80，存在未超过80的则可以进行回迁
+                    if (dataPool[0].getVnodePrefix().startsWith("data") && isEnableCacheAccessTimeFlush(getStrategyNameByDataPrefix(dataPool[0].getVnodePrefix())) && objectSize[0] <= 262144L) {//todo 这里要改成数据池所在的策略确认是否分层
+                        boolean canBackStore = false;
+                        List<StoragePool> cachePools = CacheMove.getPools(getStrategyNameByDataPrefix(dataPool[0].getVnodePrefix()));
+                        long singleUsed = 0L;
+                        long singleTotal = 0L;
+                        float used = 0.0f;
+                        for (StoragePool cachePool : cachePools) {
+                            singleUsed = cachePool.getCache().size;
+                            singleTotal = cachePool.getCache().totalSize;
+                            if (singleTotal != 0L) {
+                                used = singleUsed * 100.0f / singleTotal;//每一个缓存池都单独计算水位线
+                            }
+                            if (used < getCachePoolFullWaterMark(cachePool)) {
+                                canBackStore = true;
+                                break;
+                            }
+                        }
+                        if (canBackStore) {
+                            BackStoreAccessedData.addNeedBackStoreRecord(bucketName, objName, versionId[0]);
+                        }
                     }
                 })
                 .subscribe(new DownLoadSubscriber(request, request.getContext(), controllerToUse, deleteSource, backSource));
@@ -3489,15 +3540,7 @@ public class StreamService extends BaseService {
                 MsException e = (MsException) t;
                 if (e.getErrCode() == NO_SUCH_OBJECT || e.getErrCode() == NO_SUCH_VERSION) {
                     s.cancel();
-                    if (!backSource.get()) {
-                        StoreManagementServer.forwardRequest(request, true, null).subscribe(b -> {
-                            if (!b) {
-                                dealException(request, t);
-                            }
-                        });
-                        return;
-                    }
-                    if (deleteSource.get()) {
+                    if (!backSource.get() || deleteSource.get()) {
                         StoreManagementServer.forwardRequest(request, true, null).subscribe(b -> {
                             if (!b) {
                                 dealException(request, t);

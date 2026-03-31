@@ -1,8 +1,11 @@
 package com.macrosan.filesystem.cifs.types.smb2;
 
 import com.macrosan.filesystem.cache.CifsQueryDirCache;
+import com.macrosan.filesystem.cifs.rpc.pdu.call.RpcRequestCall;
 import com.macrosan.filesystem.cache.WriteCacheClient;
 import com.macrosan.filesystem.cifs.types.Session;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.BindPduInfo;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.RpcPipeType;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.utils.msutils.MsExecutor;
@@ -53,7 +56,8 @@ public class SMB2FileId {
     public static Map<Long, FileInfo> cache = new ConcurrentHashMap<>();
     private static AtomicLong id = new AtomicLong();
     public static Set<Long> needDeleteSet = ConcurrentHashMap.newKeySet();
-    public static long CLEAR_DURATION = 10 * 60 * ONE_SECOND_NANO; // 10分钟
+    public static long CLEAR_DURATION = 5 * 60 * ONE_SECOND_NANO; // 5分钟
+    public static long TIMEOUT_DURATION = 15 * 60 * ONE_SECOND_NANO; // 15分钟
 
     static MsExecutor executor = new MsExecutor(1, 1, new MsThreadFactory("FileInfoCache-"));
 
@@ -64,17 +68,32 @@ public class SMB2FileId {
     private static void tryClearCache() {
         for (Long persistent : cache.keySet()) {
             cache.computeIfPresent(persistent, (k, info) -> {
-                long duration = System.nanoTime() - info.closeTime;
-                if (info.closeTime > 0 && duration > CLEAR_DURATION && info.closeTime > info.openTime) {
+                boolean needClear = false;
+                if (info.closeTime > 0) {
+                    //fileInfo已经关闭，满足清除时长则清理
+                    long closeDuration = System.nanoTime() - info.closeTime;
+                    if (closeDuration > CLEAR_DURATION && info.closeTime > info.openTime) {
+                        needClear = true;
+                    }
+                } else {
+                    //fileInfo没有关闭，满足超时时长再清理
+                    long idleDuration = System.nanoTime() - info.openTime;
+                    if (idleDuration > TIMEOUT_DURATION) {
+                        needClear = true;
+                    }
+                }
+
+                //需要进行清理
+                if (needClear) {
                     if (info.queryDirCache != null) {
                         info.queryDirCache.clear();
                         info.queryDirCache = null;
                     }
                     WriteCacheClient.clear(persistent, info);
                     return null;
-                } else {
-                    return info;
                 }
+
+                return info;
             });
         }
         executor.schedule(SMB2FileId::tryClearCache, 200, TimeUnit.MILLISECONDS);
@@ -133,12 +152,18 @@ public class SMB2FileId {
         public CifsQueryDirCache queryDirCache;
 
         public long dirInode;
+        //打开时间，每次各接口从内存getFileInfo会刷新一次openTime
         public long openTime;
         public long closeTime = -1;
         public boolean updateTimeOnClose = false;
         public Inode openInode;
         public List<Inode.ACE> ACEs;
         public AtomicBoolean abandon = new AtomicBoolean(false);
+        public BindPduInfo bindPduInfo;
+        public RpcRequestCall rpcRequestCall;
+        public int[] uidAndGid;
+        public String targetName;
+        public int isGroupOrUser = 1; // 0: group, 1: user
         public long allocationSize = Long.MAX_VALUE;
 
         FileInfo(String bucket, String obj, long inodeId, long dirInode, Inode openInode, List<Inode.ACE> ACEs) {
@@ -155,7 +180,11 @@ public class SMB2FileId {
     public FileInfo getFileInfo(CompoundRequest compoundRequest) {
         //共用SMB2FileId
         if (compoundRequest != null && compoundRequest.fileId != null) {
-            return cache.get(compoundRequest.fileId.persistent);
+            FileInfo fileInfo = cache.get(compoundRequest.fileId.persistent);
+            if (null != fileInfo) {
+                fileInfo.openTime = System.nanoTime();
+            }
+            return fileInfo;
         }
 
         return cache.compute(persistent, (k, v) -> {
@@ -169,7 +198,11 @@ public class SMB2FileId {
     }
 
     public FileInfo getFileInfo(SMB2FileId smb2FileId) {
-        return cache.get(smb2FileId.persistent);
+        FileInfo fileInfo = cache.get(smb2FileId.persistent);
+        if (null != fileInfo) {
+            fileInfo.openTime = System.nanoTime();
+        }
+        return fileInfo;
     }
 
     //TODO close不应该从session中删除

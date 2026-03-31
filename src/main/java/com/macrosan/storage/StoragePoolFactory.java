@@ -48,6 +48,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.Utils.getMqRocksKey;
@@ -516,6 +517,15 @@ public class StoragePoolFactory {
                 .orElseGet(() -> DEFAULT.getStoragePool(operate));
     }
 
+    public static StoragePool getStoragePool(StorageOperate operate, StoragePool pool) {
+        return Stream.of(pool.getVnodePrefix())
+                .map(DATA_POOL_STRATEGY_MAP::get)
+                .map(POOL_STRATEGY_MAP::get)
+                .map(strategy -> strategy.getStoragePool(operate))
+                .findFirst()
+                .orElseGet(() -> DEFAULT.getStoragePool(operate));
+    }
+
     public static boolean inBucketStrategy(String storageName, String bucketName) {
         return Optional.ofNullable(bucketName)
                 .map(BUCKET_STRATEGY_NAME_MAP::get)
@@ -532,7 +542,7 @@ public class StoragePoolFactory {
                 .orElse(false);
     }
 
-    public static void getAllStorage(String key, Set<String> dedupFile){
+    public static void getAllStorage(String key, Set<String> dedupFile) {
         String suffix = key.split("#")[1];
         int index = key.lastIndexOf("/");
         String prefix = key.substring(0, index + 1);
@@ -545,12 +555,13 @@ public class StoragePoolFactory {
         }
 
     }
+
     public static List<StoragePool> getAvailableStorages(String bucket) {
         List<StoragePool> list = new LinkedList<>();
 
         for (StoragePool pool : MAP.values()) {
             if (pool.getVnodePrefix().startsWith("data")) {
-                if(inBucketStrategy(pool.getVnodePrefix(), bucket)) {
+                if (inBucketStrategy(pool.getVnodePrefix(), bucket)) {
                     list.add(pool);
                 }
             }
@@ -564,11 +575,11 @@ public class StoragePoolFactory {
 
         for (StoragePool pool : MAP.values()) {
             if (pool.getVnodePrefix().startsWith("data")) {
-                if(inBucketStrategy(pool.getVnodePrefix(), bucket)) {
+                if (inBucketStrategy(pool.getVnodePrefix(), bucket)) {
                     list.add(pool);
                 }
             } else if (pool.getVnodePrefix().startsWith("cache")) {
-                if(isCachePoolInBucketStrategy(pool.getVnodePrefix(), bucket)) {
+                if (isCachePoolInBucketStrategy(pool.getVnodePrefix(), bucket)) {
                     list.add(pool);
                 }
             }
@@ -591,18 +602,19 @@ public class StoragePoolFactory {
     }
 
 
-    public static boolean getDeduplicate(String bucketName){
-    String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucketName);
-    String deduplicate = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(strategy, "deduplicate");
-    return "on".equals(deduplicate);
-  }
+    public static boolean getDeduplicate(String bucketName) {
+        String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucketName);
+        String deduplicate = RedisConnPool.getInstance().getCommand(REDIS_POOL_INDEX).hget(strategy, "deduplicate");
+        return "on".equals(deduplicate);
+    }
 
     /**
      * 根据桶获取重删开关
+     *
      * @param bucketName 桶名
      * @return 重删开关
      */
-    public static Mono<Boolean> getDeduplicateByBucketName(String bucketName){
+    public static Mono<Boolean> getDeduplicateByBucketName(String bucketName) {
         String strategyName = BUCKET_STRATEGY_NAME_MAP.getOrDefault(bucketName, DEFAULT_STRATEGY_NAME);
         return Mono.just(strategyName)
                 .flatMap(strategy -> RedisConnPool.getInstance().getReactive(REDIS_POOL_INDEX).hget(strategy, "deduplicate"))
@@ -612,10 +624,11 @@ public class StoragePoolFactory {
 
     /**
      * 根据存储池策略获取重删开关
+     *
      * @param strategyName 桶名
      * @return 重删开关
      */
-    public static Mono<Boolean> getDeduplicateByStrategy(String strategyName){
+    public static Mono<Boolean> getDeduplicateByStrategy(String strategyName) {
         return RedisConnPool.getInstance().getReactive(REDIS_POOL_INDEX).hget(strategyName, "deduplicate")
                 .defaultIfEmpty("off")
                 .map("on"::equals);
@@ -683,7 +696,7 @@ public class StoragePoolFactory {
         return null;
     }
 
-    public static boolean inStorageMAP(String storage){
+    public static boolean inStorageMAP(String storage) {
         return MAP.containsKey(storage);
     }
 
@@ -695,9 +708,17 @@ public class StoragePoolFactory {
         return POOL_NAME_MAP.get(prefix);
     }
 
+    public static String getStrategyNameByDataPrefix(String prefix) {
+        return DATA_POOL_STRATEGY_MAP.get(prefix);
+    }
+
     public static StoragePool getMetaStoragePool(String key) {
         StorageOperate operate = new StorageOperate(PoolType.META, key, -1);
         return getStoragePool(operate);
+    }
+
+    public static StoragePool[] getAllStoragePools() {
+        return MAP.values().toArray(new StoragePool[0]);
     }
 
     public static void reloadCompressionAlgorithm() {
@@ -755,7 +776,7 @@ public class StoragePoolFactory {
                                     long sum = 0;
                                     for (long i = 0; i < flush; i++) {
                                         if (i == flush - 1) {
-                                            sum += averageSize % 4096 == 0 ? (averageSize - MIN_ALLOC_SIZE * (flush -1)) : ((averageSize - MIN_ALLOC_SIZE * (flush -1)) / 4096 * 4096 + 4096);
+                                            sum += averageSize % 4096 == 0 ? (averageSize - MIN_ALLOC_SIZE * (flush - 1)) : ((averageSize - MIN_ALLOC_SIZE * (flush - 1)) / 4096 * 4096 + 4096);
                                         } else {
                                             sum += MIN_ALLOC_SIZE;
                                         }

@@ -239,7 +239,7 @@ public class TaskSender {
                         return Mono.just(new Tuple2<Boolean, ErrorEnum>(true, null));
                     } else {
                         if (ModuleDebug.mediaComponentDebug()) {
-                            log.info("send dicom request to ip:{} fail,bucket:{} object:{} versionId:{} cost: {}", finalIp, record.bucket, record.object, record.versionId, System.currentTimeMillis() - startTime);
+                            log.info("send dicom request to ip:{} fail cause:{},bucket:{} object:{} versionId:{} cost: {}", finalIp, payload.getDataUtf8(), record.bucket, record.object, record.versionId, System.currentTimeMillis() - startTime);
                         }
                         return Mono.just(new Tuple2<Boolean, ErrorEnum>(false, null));
                     }

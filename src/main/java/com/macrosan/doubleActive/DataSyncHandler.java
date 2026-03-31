@@ -939,7 +939,7 @@ public class DataSyncHandler {
                     msHttpRequest.setSyncTag(IS_SYNCING);
                     msHttpRequest.setBucketName(bucketName);
 
-                    return ECUtils.getObject(storagePool[0], partInfo.fileName, false, 0, partSize - 1,
+                    return ECUtils.getObject(storagePool[0], partInfo.fileName, false, partInfo.offset, partInfo.offset + partSize - 1,
                             partSize, tuple2.getT1(), streamController, msHttpRequest, clientRequest);
                 });
     }

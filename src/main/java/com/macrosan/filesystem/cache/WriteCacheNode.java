@@ -5,6 +5,7 @@ import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cifs.handler.SMBHandler;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
+import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.storage.StorageOperate;
 import com.macrosan.storage.StoragePool;
@@ -475,13 +476,16 @@ public class WriteCacheNode {
                                     && writeCacheNode.commitQueue.isEmpty()
                                     && writeCacheNode.cacheSize.get() > 0) {
                                 return Node.getInstance().getInode(writeCacheNode.bucket, inodeId)
-                                        .flatMap(inode -> WriteCacheNode.getCache(inode.getBucket(), inodeId, 0, inode.getStorage())
-                                                .flatMap(wc -> {
-                                                    if (wc.cacheSize.get() == cacheSize) {
-                                                        return Node.getInstance().flushWriteCache(inode, 0, 0, 1);
-                                                    }
-                                                    return Mono.just(true);
-                                                }));
+                                        .flatMap(inode -> {
+                                            WriteCacheNode wc = map.get(inodeId);
+                                            if (SMBHandler.runningDebug && InodeUtils.isError(inode)) {
+                                                log.info("flushByteCache error inode, {}, cacheSize: {}", nodeId, cacheSize);
+                                            }
+                                            if (wc != null && wc.cacheSize.get() == cacheSize && !InodeUtils.isError(inode)) {
+                                                return Node.getInstance().flushWriteCache(inode, 0, 0, 1);
+                                            }
+                                            return Mono.just(true);
+                                        });
                             }
                         }
                         return Mono.just(false);

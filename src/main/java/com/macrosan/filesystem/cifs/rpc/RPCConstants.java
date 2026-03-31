@@ -143,4 +143,22 @@ public class RPCConstants {
     public static final int WITNESS_INFO_IPv4_VALID = 0x01;
     public static final int WITNESS_INFO_IPv6_VALID = 0x02;
     public static final int WITNESS_INFO_WITNESS_IF = 0x04;
+
+    public static class rpcOpnum {
+        public static final short DsRoleGetPrimary_OR_NetWkstaGetInfo = 0;
+        public static final short closePipe = 1;
+        public static final short querySecurity  = 3;
+        public static final short lookupDomain   = 5;
+        public static final short enumDomains     = 6;
+        public static final short createLsaQuery_OR_openDomain = 7;
+        public static final short lookupNames = 17;
+        public static final short openUser = 34;
+        public static final short queryUserInfo = 36;
+        public static final short getGroupForUser = 39;
+        public static final short LsaOpenPolicy2 = 44;
+        public static final short lsaLookupSids2 = 57;
+        public static final short connect5 = 64;
+        public static final short lsaLookupNames3 = 68;
+        public static final short LsaOpenPolicy3 = 130;
+    }
 }

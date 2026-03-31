@@ -36,7 +36,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static com.macrosan.constants.SysConstants.VNODE_LUN_NAME;
+import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.storage.StoragePoolFactory.MAX_VNODE_NUM;
 import static com.macrosan.storage.StoragePoolType.ERASURE;
 import static com.macrosan.storage.StoragePoolType.REPLICA;
@@ -71,6 +71,10 @@ public class StoragePool {
     Map<String, List<Tuple3<String, String, String>>> cachedNodeInfo;
 
     private volatile boolean stopHealthCheck;
+    //0 HDD
+    //1 sata ssd
+    //2 nvme
+    public int media = 0;
 
     StoragePool(String vnodePrefix, StoragePoolType type, int k, int m, int packageSize, long divisionSize,
                 List<String> vnodeList, List<String> mapVnodeList, String updateECPrefix) {
@@ -111,6 +115,24 @@ public class StoragePool {
         }
 
         PoolHealth.updateHealth(this);
+
+        if (!cache.lunSet.isEmpty()) {
+            String lun = cache.lunSet.iterator().next();
+            Map<String, String> map = RedisConnPool.getInstance().getCommand(REDIS_LUNINFO_INDEX).hgetall(lun);
+            String mediaStr = map.get("media");
+            String protocol = map.get("protocol");
+            boolean ssd = "SSD".equalsIgnoreCase(mediaStr);
+            boolean isNvme = "NVME".equalsIgnoreCase(protocol);
+            if (ssd) {
+                if (isNvme) {
+                    media = 2;
+                } else {
+                    media = 1;
+                }
+            } else {
+                media = 0;
+            }
+        }
     }
 
     StoragePool(String vnodePrefix, StoragePoolType type, int k, int m, int packageSize, long divisionSize, List<String> vnodeList,

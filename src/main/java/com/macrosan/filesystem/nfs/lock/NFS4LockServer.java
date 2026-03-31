@@ -1,6 +1,5 @@
 package com.macrosan.filesystem.nfs.lock;
 
-import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.lock.Lock;
 import com.macrosan.filesystem.lock.LockServer;
 import com.macrosan.filesystem.nfs.types.StateOwner;
@@ -52,9 +51,6 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
         Object o = unLocker.computeIfAbsent(value, k -> new Object());
         synchronized (o) {
             MonoProcessor<NFS4Lock> res = MonoProcessor.create();
-            if (unLockMap.containsKey(value)) {
-                return Mono.just(DEFAULT_LOCK);
-            }
             lockMap.compute(bucket, (bucket0, map) -> {
                 if (map == null) {
                     map = new ConcurrentHashMap<>();
@@ -62,6 +58,10 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                 map.compute(key, (key0, dealLock) -> {
                     if (dealLock == null) {
                         dealLock = new DealLock();
+                    }
+                    if (unLockMap.containsKey(value)) {
+                        res.onNext(DEFAULT_LOCK);
+                        return dealLock;
                     }
                     NFS4Lock lock = dealLock.lock(value);
                     res.onNext(lock);
@@ -77,7 +77,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
     @Override
     public Mono<Boolean> tryLock(String bucket, String key, NFS4Lock value) {
         return tryLock0(bucket, key, value)
-                .map(b -> true);
+                .map(DEFAULT_LOCK::equals);
     }
 
     public Mono<NFS4Lock> tryLock0(String bucket, String key, NFS4Lock value) {
@@ -135,13 +135,22 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
         Object o = unLocker.computeIfAbsent(value, k -> new Object());
         synchronized (o) {
             MonoProcessor<NFS4Lock> res = MonoProcessor.create();
-            lockMap.computeIfPresent(bucket, (bucket0, map) -> {
-                map.computeIfPresent(key, (key0, dealLock) -> {
+            NFS4LockServer.lockMap.compute(bucket, (bucket0, map) -> {
+                if (map == null) {
+                    res.onNext(DEFAULT_LOCK);
+                    return null;
+                }
+                map.compute(key, (key0, dealLock) -> {
+                    if (dealLock == null) {
+                        res.onNext(DEFAULT_LOCK);
+                        return null;
+                    }
                     switch (value.optType) {
                         case UNLOCK_TYPE:
                             List<NFS4Lock> nfs4Locks = dealLock.unLock(value);
-                            if (nfs4Locks.contains(DEFAULT_LOCK)){
-                                if (value.removeOwner()){
+                            if (nfs4Locks.contains(DEFAULT_LOCK)) {
+                                nfs4Locks.remove(DEFAULT_LOCK);
+                                if (value.removeOwner()) {
                                     for (NFS4Lock nfs4Lock : nfs4Locks) {
                                         removeKeep(bucket, key, nfs4Lock);
                                         unLockMap.put(nfs4Lock, System.nanoTime());
@@ -150,7 +159,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                                 removeKeep(bucket, key, value);
                                 unLockMap.put(value, System.nanoTime());
                                 res.onNext(DEFAULT_LOCK);
-                            }else {
+                            } else {
                                 res.onNext(nfs4Locks.get(nfs4Locks.size() - 1));
                             }
                             break;
@@ -235,29 +244,31 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                                                     if (dealLock == null) {
                                                         return Mono.just(false);
                                                     } else {
-                                                        if (Node.getInstance().getInodeV(Long.parseLong(key)).isMaster()) {
-                                                            List<NFS4Lock> waitList = new ArrayList<>(dealLock.waitLocks);
-                                                            return Flux.fromIterable(waitList)
-                                                                    .concatMap(value -> {
-                                                                        if (DEFAULT_LOCK.equals(dealLock.lock(value))) {
-                                                                            return NFS4LockClient.lock(bucket, key, value)
-                                                                                    .flatMap(lock -> {
-                                                                                        if (NFS4Lock.DEFAULT_LOCK.equals(lock)) {
-                                                                                            return NFS4LockClient.unLockOrRemoveWait(bucket, key, value.setOptType(REMOVE_WAIT_TYPE))
-                                                                                                    .flatMap(cancel -> NFS4LockClient.unLockOrRemoveWait(bucket, key, value.setOptType(RECALL_TYPE)));
-                                                                                        } else {
-                                                                                            return Mono.just(false);
-                                                                                        }
-                                                                                    });
-                                                                        } else {
-                                                                            return Mono.just(false);
-                                                                        }
-                                                                    })
-                                                                    .collectList()
-                                                                    .map(list -> true);
-                                                        } else {
-                                                            return Mono.just(false);
-                                                        }
+                                                        List<NFS4Lock> waitList = new ArrayList<>(dealLock.waitLocks);
+                                                        return Flux.fromIterable(waitList)
+                                                                .filter(lock0 -> ServerConfig.getInstance().getHostUuid().equals(lock0.node))
+                                                                .concatMap(value -> {
+                                                                    if (!value.needKeep()) {
+                                                                        return NFS4LockClient.unLockOrRemoveWait(bucket, key, value.setOptType(REMOVE_WAIT_TYPE));
+                                                                    }
+                                                                    NFS4Lock lock1 = dealLock.lock(value);
+                                                                    if (DEFAULT_LOCK.equals(lock1)) {
+                                                                        return NFS4LockClient.lock(bucket, key, value)
+                                                                                .flatMap(lock -> {
+                                                                                    if (NFS4Lock.DEFAULT_LOCK.equals(lock)) {
+                                                                                        return NFS4LockClient.unLockOrRemoveWait(bucket, key, value.setOptType(REMOVE_WAIT_TYPE))
+                                                                                                .flatMap(cancel -> NFS4LockClient.unLockOrRemoveWait(bucket, key, value.setOptType(RECALL_TYPE)));
+                                                                                    } else {
+                                                                                        return Mono.just(false);
+                                                                                    }
+                                                                                });
+                                                                    } else {
+                                                                        return Mono.just(false);
+                                                                    }
+                                                                })
+                                                                .collectList()
+                                                                .map(list -> true);
+
                                                     }
                                                 })
                                                 .collectList()
@@ -340,28 +351,8 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                         ownerLocks.add(addLock);
                     }
                     return conflictLock.get();
-
                 }
                 return ERROR_LOCK;
-
-//                    Set<Nfs4Lock> mergeLocks = lockSet.stream()
-//                            .filter(l -> l.existOverRange(addLock) && l.sameOwner(addLock) && l.getLockType() == addLock.getLockType())
-//                            .collect(Collectors.toSet());
-//                    //同一个owner有多段锁
-//                    if (!mergeLocks.isEmpty()) {
-//                        //合并成一个锁
-//                        long lockBegin = addLock.getOffset();
-//                        long lockEnd = addLock.getLength() == UINT64_MAX ? UINT64_MAX : (lockBegin + addLock.getLength());
-//                        for (Nfs4Lock l : mergeLocks) {
-//                            lockBegin = Math.min(lockBegin, l.getOffset());
-//                            lockEnd = lockEnd == UINT64_MAX || l.getLength() == UINT64_MAX ? UINT64_MAX : Math.max(lockEnd, l.getOffset() + l.getLength() - 1);
-//                        }
-//                        lockEnd = lockEnd == UINT64_MAX ? lockEnd : lockEnd - lockBegin;
-//                        Nfs4Lock mergeLock = new Nfs4Lock(addLock.getLockType(), addLock.getStateOwner(), lockBegin, lockEnd, addLock.node, addLock.clientId);
-//                        lockSet.removeAll(mergeLocks);
-//                        lockSet.add(mergeLock);
-//                    } else {
-
             }
         }
 
@@ -377,66 +368,31 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                 boolean remove = readLocks.remove(delLock);
                 boolean remove1 = writeLocks.remove(delLock);
                 exist = remove || remove1;
-                Set<NFS4Lock> ownerLocks = new HashSet<>();
+                Set<NFS4Lock> ownerLocks = ownerLockMap.getOrDefault(delLock.stateOwner, new HashSet<>());
+                Set<NFS4Lock> ownerLocks0 = new HashSet<>();
                 if (delLock.removeOwner()) {
-                    ownerLocks = ownerLockMap.get(delLock.stateOwner);
-                    if (ownerLocks != null && !ownerLocks.isEmpty()) {
+                    if (!ownerLocks.isEmpty()) {
                         for (NFS4Lock ownerLock : ownerLocks) {
                             remove = readLocks.remove(ownerLock);
                             remove1 = writeLocks.remove(ownerLock);
                             removeWait(ownerLock);
                             exist = exist || remove || remove1;
+                            ownerLocks0.add(ownerLock);
                         }
+                        ownerLocks.clear();
                     }
                     ownerLockMap.remove(delLock.stateOwner);
+                } else {
+                    ownerLocks.remove(delLock);
+                    removeWait(delLock);
+                    ownerLocks0.add(delLock);
                 }
-
                 if (exist) {
-                    if (ownerLocks == null) {
-                        ownerLocks = new HashSet<>();
-                    }
-                    ownerLocks.add(DEFAULT_LOCK);
-                    return new ArrayList<>(ownerLocks);
+                    ownerLocks0.add(DEFAULT_LOCK);
+                    return new ArrayList<>(ownerLocks0);
                 }
                 return Collections.singletonList(NFS4Lock.NOMATCH_LOCK);
             }
-//            synchronized (this) {
-//
-//                if (!lockSet.isEmpty()) {
-//                    boolean remove = lockSet.remove(delLock);
-//                    if (remove) {
-//                        //存在同段锁
-//                        return NFS4Lock.DEFAULT_LOCK;
-//                    } else {
-//                        return NFS4Lock.NOMATCH_LOCK;
-//                        Set<Nfs4Lock> removeLocks = new HashSet<>();
-//                        Set<Nfs4Lock> addLocks = new HashSet<>();
-//                        lockSet.stream().filter(l -> l.sameOwner(delLock) && l.existOverRange(delLock)).forEach(lock -> {
-//                            removeLocks.add(lock);
-//                            long firstLen = delLock.getOffset() - lock.getOffset();
-//                            if (firstLen > 0) {
-//                                Nfs4Lock firstPart = new Nfs4Lock(lock.getLockType(), lock.getStateOwner(), lock.getOffset(), firstLen, lock.getNode(), lock.getClientId());
-//                                addLocks.add(firstPart);
-//                            }
-//                            if (delLock.getLength() != UINT64_MAX) {
-//                                long unlockEnd = delLock.getOffset() + delLock.getLength();
-//                                long originalEnd = lock.getOffset() + lock.getLength();
-//                                long secondLen = originalEnd - unlockEnd;
-//                                if (secondLen > 0) {
-//                                    Nfs4Lock secondPart = new Nfs4Lock(lock.getLockType(), lock.getStateOwner(), delLock.getOffset() + delLock.getLength(), secondLen, lock.getNode(), lock.getClientId());
-//                                    addLocks.add(secondPart);
-//                                }
-//                            }
-//                        });
-//                        if (removeLocks.isEmpty()) {
-//
-//                        }
-//                        lockSet.removeAll(removeLocks);
-//                        lockSet.addAll(addLocks);
-//                    }
-//                }
-//                return NFS4Lock.NOMATCH_LOCK;
-//            }
         }
 
         public boolean addWait(NFS4Lock waitLock) {

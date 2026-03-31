@@ -6,7 +6,7 @@ import lombok.ToString;
 
 @ToString
 public class BindConnToSessionCall extends CompoundCall {
-    public long sessionId;
+    public byte[] sessionId = new byte[16];
     public int bctsaDir;
     //not support
     public boolean bctsaUseConnInRdmaMode;
@@ -19,10 +19,9 @@ public class BindConnToSessionCall extends CompoundCall {
 
     @Override
     public int readStruct(ByteBuf buf, int offset) {
-        sessionId = buf.getLong(offset);
+        buf.getBytes(offset, sessionId);
         bctsaDir = buf.getInt(offset + 16);
         bctsaUseConnInRdmaMode = buf.getBoolean(offset + 20);
         return 24;
     }
 }
-

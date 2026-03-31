@@ -359,6 +359,7 @@ public class ECUtils {
                         msgs.get(0).put("realKey", key);
                     }
                     msgs.get(0).put("poolQueueTag", poolQueueTag);
+                    msgs.get(0).put("vnode", nodeList.get(0).var3);
                     publishEcError(responseInfo.res, nodeList, msgs.get(0), errorType);
                     res.onNext(true);
                 } else {
@@ -631,6 +632,9 @@ public class ECUtils {
                 if (errorType != ECErrorType.ERROR_PUT_BUCKET_INFO) {
                     if (errorType.equals(ERROR_PUT_DEDUPLICATE_META)) {
                         msgs.get(0).put("realKey", key);
+                    }
+                    if (errorType.equals(ERROR_PUT_OBJECT_META)) {
+                        msgs.get(0).put("vnode", Utils.getVnode(key));
                     }
                     String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(pool.getVnodePrefix());
                     msgs.get(0).put("poolQueueTag", poolQueueTag);
@@ -1153,6 +1157,103 @@ public class ECUtils {
                                         processor.onNext(new Tuple2<>(errorRes, responseInfo.res));
                                     }
                                 });
+                    } catch (Exception e) {
+                        //捕获processor中抛出的错误
+                        log.error("getRocksKey error", e);
+                        processor.onNext(new Tuple2<>(errorRes, responseInfo.res));
+                    }
+                });
+        Optional.ofNullable(request).ifPresent(r -> r.addResponseCloseHandler(v -> {
+            for (Disposable disposable : disposables) {
+                if (disposable != null) {
+                    disposable.dispose();
+                }
+            }
+        }));
+
+        return processor.onErrorReturn(new Tuple2<>(errorRes, responseInfo.res));
+
+    }
+
+    public static <T> Mono<Tuple2<T, Tuple2<PayloadMetaType, T>[]>> getAccessRecordRes(StoragePool pool, String key, Class<T> tClass, PayloadMetaType type, T notFoundRes, T errorRes,
+                                                                                       List<Tuple3<String, String, String>> nodeList, MsHttpRequest request) {
+        MonoProcessor<Tuple2<T, Tuple2<PayloadMetaType, T>[]>> processor = MonoProcessor.create();//返回得到的结果
+        List<SocketReqMsg> msgs = nodeList.stream()
+                .map(tuple -> {
+                    SocketReqMsg msg = new SocketReqMsg("", 0)
+                            .put("key", key)
+                            .put("lun", tuple.var2);
+                    return msg;
+                })
+                .collect(Collectors.toList());
+
+        ResponseInfo<T> responseInfo = ClientTemplate.oneResponse(msgs, type, tClass, nodeList);
+
+        T[] real = (T[]) Array.newInstance(tClass, 1);
+
+        Disposable[] disposables = new Disposable[2];
+        disposables[1] = responseInfo.responses
+                .timeout(Duration.ofSeconds(30))
+                .doOnCancel(() -> {
+                    log.info("close disposables.");
+                    for (Disposable disposable : disposables) {
+                        if (disposable != null) {
+                            disposable.dispose();
+                        }
+                    }
+                })
+                .subscribe(tuple -> {
+                    if (tuple.var2.equals(SUCCESS)) {
+                        real[0] = tuple.var3;
+                    } else if (tuple.var2.equals(NOT_FOUND) && real[0] == null) {
+                        real[0] = tuple.var3;
+                    }
+                }, e -> {
+                    log.error("key: {}, type: {}, error: {}", key, type.name(), e);
+                    processor.onNext(new Tuple2<>(errorRes, responseInfo.res));
+                }, () -> {
+                    try {
+                        if (responseInfo.errorNum > pool.getM()) {
+                            processor.onNext(new Tuple2<>(errorRes, responseInfo.res));
+                            return;
+                        }
+
+                        if (responseInfo.errorNum == 0) {
+                            for (Tuple3<String, String, String> tuple3 : nodeList) {
+                                String diskName = getDiskName(tuple3.var1, tuple3.var2);
+                                if (!diskIsAvailable(diskName)) {
+                                    Mono.just(true).publishOn(DISK_SCHEDULER)
+                                            .subscribe(b -> {
+                                                updateDiskStatus(diskName, DISK_CONSUMER_STATUS.AVAILABLE);
+                                            });
+                                }
+                            }
+
+                            if (real[0].equals(notFoundRes)) {//只要有一个成功就不会是notFound
+                                processor.onNext(new Tuple2<>(notFoundRes, responseInfo.res));
+                                return;
+                            } else if (responseInfo.successNum == pool.getK() + pool.getM() || responseInfo.successNum >= pool.getK()) {//都成功
+                                processor.onNext(new Tuple2<>(real[0], responseInfo.res));
+                                return;
+                            } else {//errornum为0，三个不全是notfound，至少有一个success，需要修复//todo 这里不修复
+                                processor.onNext(new Tuple2<>(notFoundRes, responseInfo.res));
+                                return;
+                            }
+                        }
+
+                        //存在error的返回。
+                        T t;
+                        //不直接删除是因为down掉的节点可能保存有完好的metadata，节点重启时若其他节点没有记录会重新修复
+                        if (real[0].equals(notFoundRes)) {//如果返回notfound，说明没有success，不修复
+                            t = real[0];
+                            processor.onNext(new Tuple2<>(real[0], responseInfo.res));
+                        } else {
+                            if (responseInfo.successNum == pool.getK() + pool.getM() || responseInfo.successNum >= pool.getK()) {//都成功
+                                processor.onNext(new Tuple2<>(real[0], responseInfo.res));
+                            } else {
+                                processor.onNext(new Tuple2<>(errorRes, responseInfo.res));
+                            }
+                        }
                     } catch (Exception e) {
                         //捕获processor中抛出的错误
                         log.error("getRocksKey error", e);

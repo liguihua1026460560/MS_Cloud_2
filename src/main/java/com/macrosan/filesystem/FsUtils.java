@@ -7,10 +7,7 @@ import com.macrosan.ec.*;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.ErasureServer.PayloadMetaType;
 import com.macrosan.filesystem.cache.Node;
-import com.macrosan.filesystem.utils.ChunkFileUtils;
-import com.macrosan.filesystem.utils.CifsUtils;
-import com.macrosan.filesystem.utils.FSQuotaUtils;
-import com.macrosan.filesystem.utils.InodeUtils;
+import com.macrosan.filesystem.utils.*;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.message.jsonmsg.ChunkFile;
 import com.macrosan.message.jsonmsg.EsMeta;
@@ -66,6 +63,7 @@ import static com.macrosan.message.jsonmsg.Inode.*;
 import static com.macrosan.message.jsonmsg.MetaData.NOT_FOUND_META;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.rabbitmq.RabbitMqUtils.getDiskName;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 import static com.macrosan.storage.move.CacheMove.isEnableCacheOrderFlush;
 
 @Log4j2
@@ -95,9 +93,14 @@ public class FsUtils {
                 .put("metaKey", metaKey[0])
                 .put("fileOffset", String.valueOf(curOffset));
 
+        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", Inode.getLastAccessTime(inode), isEnableCacheAccessTimeFlush(pool));
+        if (FsTierUtils.isFsEnableCacheAccessTimeFlush(inode, pool)) {
+            //这里应该要和上面按上传时间下刷的配置互斥
+            msg.put("lastAccessStamp", String.valueOf(System.currentTimeMillis()));
+        }
         // 判断是否开启缓冲池 按序下刷
         if (isEnableCacheOrderFlush(pool)) {
-            long timeMs =  inode.getCreateTime() * 1000L;
+            long timeMs = inode.getCreateTime() * 1000L;
             msg.put("flushStamp", String.valueOf(timeMs));
         }
 
@@ -183,6 +186,7 @@ public class FsUtils {
                                 .put("poolQueueTag", poolQueueTag)
                                 .put("fileOffset", String.valueOf(curOffset));
                         log.debug("【publishFix】 res:{} >>>>>> errorMsg:{}", responseInfo.res, errorMsg);
+                        Optional.ofNullable(msg.get("lastAccessStamp")).ifPresent(v -> errorMsg.put("lastAccessStamp", v));
                         publishEcError(responseInfo.res, nodeList, errorMsg, ERROR_FS_PUT_FILE);
                     } else {
                         res.onNext(false);
@@ -1481,7 +1485,7 @@ public class FsUtils {
     /**
      * 从redis表2获取端口号
      *
-     * @param portName 端口的名称
+     * @param portName    端口的名称
      * @param defaultPort 端口的默认值
      **/
     public static int getFsPort(String portName, int defaultPort) {

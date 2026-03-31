@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -194,7 +195,17 @@ public class SMBHandler {
                         if (session.handler != null) {
                             session.handler.thisSession2Map.remove(sessionId);
                             if (session.handler.thisSession2Map.isEmpty()) {
-                                session.handler.getSocket().close();
+                                try {
+                                    session.handler.getSocket().close();
+                                }catch (Exception e){
+                                    if (!(e instanceof RejectedExecutionException && e.getMessage().contains("event executor terminated"))){
+                                        if (notPrintStackDebug){
+                                            log.error("smb socket close fail, sessionId {} {}",sessionId, e);
+                                        }else {
+                                            log.error("smb socket close fail, sessionId {}",sessionId, e);
+                                        }
+                                    }
+                                }
                             }
                         }
                         release(sessionId);

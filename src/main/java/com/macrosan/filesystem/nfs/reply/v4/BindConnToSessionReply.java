@@ -7,7 +7,7 @@ import lombok.ToString;
 
 @ToString
 public class BindConnToSessionReply extends CompoundReply {
-    public long sessionId;
+    public byte[] sessionId = new byte[16];
     public int bctsaDir;
     public boolean bctsaUseConnInRdmaMode;
 
@@ -18,9 +18,11 @@ public class BindConnToSessionReply extends CompoundReply {
 
     @Override
     public int writeStruct(ByteBuf buf, int offset) {
-        buf.setLong(offset, sessionId);
-        buf.setInt(offset + 16, bctsaDir);
-        buf.setBoolean(offset + 20, bctsaUseConnInRdmaMode);
-        return 24;
+        buf.setInt(offset, opt);
+        buf.setInt(offset + 4, status);
+        buf.setBytes(offset + 8, sessionId);
+        buf.setInt(offset + 24, bctsaDir);
+        buf.setBoolean(offset + 28, bctsaUseConnInRdmaMode);
+        return 32;
     }
 }

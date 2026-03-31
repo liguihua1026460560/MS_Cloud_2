@@ -73,6 +73,7 @@ public class IOCTLCall extends SMB2Body {
     public static final int FSCTL_FILESYSTEM = 0x00090000;
     public static final int FSCTL_NAMED_PIPE = 0x00110000;
     public static final int FSCTL_PIPE_WAIT = 0x00110018;
+    public static final int FSCTL_PIPE_TRANSCEIVE = 0x0011C017;
     public static final int FSCTL_NETWORK_FILESYSTEM = 0x00140000;
     public static final int FSCTL_SMBTORTURE = 0x83840000;
 

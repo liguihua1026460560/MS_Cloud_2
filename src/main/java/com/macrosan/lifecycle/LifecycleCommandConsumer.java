@@ -668,7 +668,16 @@ public class LifecycleCommandConsumer extends DefaultConsumer {
                     if (dupFile.isEmpty()) {
                         try {
                             if (!needDeleteFile.isEmpty()) {
-                                return ErasureClient.deleteObjectFile(storagePool, needDeleteFile.toArray(new String[0]), null);
+                                boolean needDelFileInData = storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(metaData[0].getLastAccessStamp());
+                                return Mono.just(needDelFileInData)
+                                        .flatMap(b0 -> {
+                                            if (b0) {
+                                                return deleteObjectFileWithData(metaData[0], needDeleteFile.toArray(new String[0]), null);
+                                            } else {
+                                                return Mono.just(b0);
+                                            }
+                                        })
+                                        .flatMap(b1 -> ErasureClient.deleteObjectFile(storagePool, needDeleteFile.toArray(new String[0]), null));
                             }
                             return Mono.just(true);
                         } catch (Exception e) {
@@ -680,7 +689,16 @@ public class LifecycleCommandConsumer extends DefaultConsumer {
                         return ErasureClient.deleteDedupObjectFile(metaStoragePool, dupFile.toArray(new String[0]), null, false)
                                 .flatMap(b -> {
                                     if (b && allFile.size() > 0) {
-                                        return ErasureClient.deleteObjectFile(storagePool, allFile.toArray(new String[0]), null);
+                                        boolean needDelFileInData = storagePool.getVnodePrefix().startsWith("cache") && StringUtils.isNotEmpty(metaData[0].getLastAccessStamp());
+                                        return Mono.just(needDelFileInData)
+                                                .flatMap(b0 -> {
+                                                    if (b0) {
+                                                        return deleteObjectFileWithData(metaData[0], allFile.toArray(new String[0]), null);
+                                                    } else {
+                                                        return Mono.just(b0);
+                                                    }
+                                                })
+                                                .flatMap(b1 -> ErasureClient.deleteObjectFile(storagePool, allFile.toArray(new String[0]), null));
                                     }
                                     return Mono.just(b);
                                 });

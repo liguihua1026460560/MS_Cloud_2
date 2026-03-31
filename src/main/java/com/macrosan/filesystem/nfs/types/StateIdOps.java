@@ -147,6 +147,7 @@ public class StateIdOps {
                 ADD_SHARE_TYPE, stateIdType, VersionUtil.getVersionNum(), false);
         Tuple2<NFS4State, Boolean> tuple2 = prepareState(client, owner, inode, stateIdType, shareAccessLock, context);
         NFS4State openState = tuple2.var1;
+        client.addLocalIp();
         //需要更新shareAccess或shareDeny
         return ShareAccessClient.lock(inode.getBucket(), String.valueOf(inode.getNodeId()), shareAccessLock)
                 .flatMap(lock -> {

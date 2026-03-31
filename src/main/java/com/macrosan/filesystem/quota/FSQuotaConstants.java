@@ -10,6 +10,7 @@ public class FSQuotaConstants {
      */
     public static final String QUOTA_TYPE = "quota_type";
     public static final String DIR_NAME = "dir_name";
+    public static final String UID = "id_";
     public static final String QUOTA_SUFFIX = "_quota";
     public static final String QUOTA_PREFIX = "quota_";
     public static final String QUOTA_KEY = "quota_key";

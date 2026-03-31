@@ -96,6 +96,20 @@ public class ListObjVnode {
         }
 
         @Override
+        public void handleComplete() {
+            //nodeList.size()等于1时为加节点删除源盘数据调用, 后续如果有其他nodeList.size()等于1的情况也可以按照一下逻辑处理
+            if (nodeList.size() == 1) {
+                if (responseInfo.successNum == 0) {
+                    res.onNext(false);
+                } else {
+                    repairFlux.onNext(0);
+                }
+            } else {
+                super.handleComplete();
+            }
+        }
+
+        @Override
         protected void putErrorList(Counter counter) {
 
         }
@@ -236,6 +250,7 @@ public class ListObjVnode {
         ListVnode clientHandler = new ListVnode(storagePool, responseInfo, nodeList, marker, targetDiskIndex);
         responseInfo.responses.subscribe(clientHandler::handleResponse, e -> {
             log.error("", e);
+            listController.onComplete();
             listFlux.onError(e);
         }, clientHandler::handleComplete);
 
@@ -243,6 +258,11 @@ public class ListObjVnode {
         if (!removeDisk) {
             clientHandler.listFlux.subscribe(listFlux::onNext);
             clientHandler.res.subscribe(b -> {
+                if (!b) {
+                    listFlux.onError(new RequeueMQException("list object vnode error!"));
+                    listController.onComplete();
+                    return;
+                }
                 if (clientHandler.listComplete) {
                     listFlux.onComplete();
                 } else {

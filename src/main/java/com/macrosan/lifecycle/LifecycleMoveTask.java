@@ -82,7 +82,7 @@ public class LifecycleMoveTask {
      *
      * @param metaData 对象元数据
      */
-    private Mono<Boolean> move(MetaData metaData, String currentSnapshotMark) {
+    private Mono<Boolean> move(MetaData metaData, String currentSnapshotMark, String targetStorageStrategy) {
         Map<String, String> sysMetaMap = Json.decodeValue(metaData.sysMetaData, new TypeReference<Map<String, String>>() {
         });
         String md5 = sysMetaMap.get(ETAG);
@@ -114,7 +114,7 @@ public class LifecycleMoveTask {
                             return move(MOVE_TYPE.MOVE_OBJECT, oldFileName
                                     , metaData.bucket, metaData.key
                                     , metaData.versionId, metaData.startIndex + metaData.offset
-                                    , metaData.endIndex + metaData.offset, null, null, metaData.crypto, currentSnapshotMark);
+                                    , metaData.endIndex + metaData.offset, null, null, metaData.crypto, currentSnapshotMark, targetStorageStrategy);
                         }
                         return ErasureClient.getDeduplicateMeta(md5, targetPool.getVnodePrefix(), firstKey, targetNodeList, null)
                                 .timeout(Duration.ofSeconds(30))
@@ -132,7 +132,7 @@ public class LifecycleMoveTask {
                                         return move(MOVE_TYPE.MOVE_OBJECT, oldFileName
                                                 , metaData.bucket, metaData.key
                                                 , metaData.versionId, metaData.startIndex + metaData.offset
-                                                , metaData.endIndex + metaData.offset, null, null, metaData.crypto, currentSnapshotMark)
+                                                , metaData.endIndex + metaData.offset, null, null, metaData.crypto, currentSnapshotMark, targetStorageStrategy)
                                                 .flatMap(b -> {
                                                     String sourceStorage = metaData.storage;
                                                     if (b) {
@@ -217,7 +217,7 @@ public class LifecycleMoveTask {
                         return move(MOVE_TYPE.MOVE_PART, oldFileName
                                 , partInfo.bucket, partInfo.object
                                 , partInfo.versionId, 0, partInfo.getPartSize() - 1
-                                , partInfo.uploadId, partInfo.partNum, crypto, partInfo.initSnapshotMark);
+                                , partInfo.uploadId, partInfo.partNum, crypto, partInfo.initSnapshotMark, null);
                     }
                     String dupKey = Utils.getDeduplicatMetaKey(vnodeId, md5, targetPool.getVnodePrefix(), requestId);
                     String firstKey = Utils.getDeduplicatMetaKey(vnodeId, md5, targetPool.getVnodePrefix());
@@ -234,7 +234,7 @@ public class LifecycleMoveTask {
                                     return move(MOVE_TYPE.MOVE_PART, oldFileName
                                             , partInfo.bucket, partInfo.object
                                             , partInfo.versionId, 0
-                                            , partInfo.getPartSize() - 1, partInfo.uploadId, partInfo.partNum, crypto, partInfo.initSnapshotMark)
+                                            , partInfo.getPartSize() - 1, partInfo.uploadId, partInfo.partNum, crypto, partInfo.initSnapshotMark, null)
                                             .flatMap(b -> {
                                                 String sourceStorage = partInfo.storage;
                                                 if (b) {
@@ -257,7 +257,7 @@ public class LifecycleMoveTask {
             , String oldFileName
             , String bucket, String object, String versionId
             , long startIndex, long endIndex
-            , String uploadId, String partNum, String crypto, String snapshotMark) {
+            , String uploadId, String partNum, String crypto, String snapshotMark, String targetStorageStrategy) {
 
         //获取原始数据字节流，放入ecEncodeHanlder进行encode，生成dataFluxes，dataFluxes包含k+m个数据流
         Encoder ecEncodeHandler = targetPool.getEncoder();
@@ -316,7 +316,7 @@ public class LifecycleMoveTask {
             msg.put("flushStamp", String.valueOf(System.currentTimeMillis()));
         }
 
-        if (isEnableCacheAccessTimeFlush(targetPool)) {//生命周期迁移如果准备迁到缓存池，那么访问时间需要更新
+        if (isEnableCacheAccessTimeFlush(targetPool) && targetStorageStrategy != null && isEnableCacheAccessTimeFlush(targetStorageStrategy)) {//生命周期迁移如果准备迁到缓存池，那么访问时间需要更新
             msg.put("lastAccessStamp", String.valueOf(System.currentTimeMillis()));
         }
         CryptoUtils.generateKeyPutToMsg(crypto, msg);
@@ -504,7 +504,7 @@ public class LifecycleMoveTask {
                                         }
                                     })
                                     .flatMap(dup -> new LifecycleMoveTask(sourcePool, targetPool, requestId, dup)
-                                            .move(meta, currentSnapshotMark[0])
+                                            .move(meta, currentSnapshotMark[0], targetStorageStrategy)
                                             .flatMap(b -> {
                                                 logger.debug("end new file = {}", meta.fileName);
                                                 if (b) {
@@ -655,6 +655,7 @@ public class LifecycleMoveTask {
                                                                         map.put("fileName", oldFileName.toString());
                                                                         map.put("storageStrategy", targetStorageStrategy);
                                                                         Optional.ofNullable(meta.snapshotMark).ifPresent(v -> map.put("snapshotMark", v));
+                                                                        Optional.ofNullable(meta.lastAccessStamp).ifPresent(v -> map.put("lastAccessStamp", v));
                                                                         String jsonValue = JSON.toJSONString(map);
                                                                         putMq(MQ_KEY_PREFIX + requestId, jsonValue);
                                                                     }

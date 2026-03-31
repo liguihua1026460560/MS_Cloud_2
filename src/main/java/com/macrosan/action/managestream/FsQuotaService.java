@@ -2,6 +2,7 @@ package com.macrosan.action.managestream;
 
 import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
+import com.macrosan.doubleActive.DoubleActiveUtil;
 import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.quota.FSQuotaRealService;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
@@ -11,6 +12,7 @@ import com.macrosan.utils.msutils.MsException;
 import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.eclipse.collections.impl.map.mutable.UnifiedMap;
 import reactor.core.publisher.MonoProcessor;
 
 import java.io.UnsupportedEncodingException;
@@ -22,6 +24,7 @@ import static com.macrosan.constants.ErrorNo.*;
 import static com.macrosan.constants.ServerConstants.BUCKET_NAME;
 import static com.macrosan.constants.ServerConstants.USER_ID;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.doubleActive.DoubleActiveUtil.notifySlaveSite;
 import static com.macrosan.filesystem.FsConstants.S_IFDIR;
 import static com.macrosan.filesystem.FsConstants.S_IFMT;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.*;
@@ -75,16 +78,19 @@ public class FsQuotaService extends BaseService {
 
     public ResponseMsg putFsDirQuotaInfo(Map<String, String> paramMap) {
         paramMap.put(QUOTA_TYPE, String.valueOf(FS_DIR_QUOTA));
+        paramMap.put(MSG_TYPE, MSG_TYPE_PUT_FS_DIR_QUOTA_INFO);
         return putFsQuotaInfo(paramMap);
     }
 
     public ResponseMsg putFsUserQuotaInfo(Map<String, String> paramMap) {
         paramMap.put(QUOTA_TYPE, String.valueOf(FS_USER_QUOTA));
+        paramMap.put(MSG_TYPE, MSG_TYPE_PUT_FS_USER_QUOTA_INFO);
         return putFsQuotaInfo(paramMap);
     }
 
     public ResponseMsg putFsGroupQuotaInfo(Map<String, String> paramMap) {
         paramMap.put(QUOTA_TYPE, String.valueOf(FS_GROUP_QUOTA));
+        paramMap.put(MSG_TYPE, MSG_TYPE_PUT_FS_GROUP_QUOTA_INFO);
         return putFsQuotaInfo(paramMap);
     }
 
@@ -97,6 +103,7 @@ public class FsQuotaService extends BaseService {
         if (bucketInfo.isEmpty()) {
             throw new MsException(ErrorNo.NO_SUCH_BUCKET, "no such bucket. bucket_name: " + bucketName);
         }
+        DoubleActiveUtil.siteConstraintCheck(bucketInfo, paramMap.containsKey(SITE_FLAG) || paramMap.containsKey(SITE_FLAG.toLowerCase()));
         if (!userId.equals(bucketInfo.get(BUCKET_USER_ID))) {
             throw new MsException(ErrorNo.ACCESS_FORBIDDEN,
                     "no permission.user " + userId + " can not configure " + bucketName + " worm.");
@@ -105,6 +112,13 @@ public class FsQuotaService extends BaseService {
             throw new MsException(ErrorNo.QUOTA_BUCKET_NOT_START_FS,
                     "no permission.bucket " + bucketName + " do not start FS");
         }
+        String msgType = paramMap.get(MSG_TYPE);
+        String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
+        String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
+        if (!DoubleActiveUtil.dealSiteSyncRequest(new UnifiedMap<>(paramMap), msgType, localCluster, masterCluster)) {
+            return new ResponseMsg(ErrorNo.SUCCESS_STATUS, new byte[0]);
+        }
+
         String s3AccountName = pool.getCommand(REDIS_USERINFO_INDEX).hget(userId, "name");
         FSQuotaConfig fsQuotaConfig = FSQuotaUtils.buildQuotaConfig(paramMap, bucketName, s3AccountName);
         MonoProcessor<Integer> putRes = MonoProcessor.create();
@@ -127,6 +141,17 @@ public class FsQuotaService extends BaseService {
         if (finalRes != 0) {
             throw new MsException(finalRes, errorMsg[0]);
         }
+        String action = ACTION_PUT_FS_DIR_QUOTA_INFO;
+        if (MSG_TYPE_PUT_FS_USER_QUOTA_INFO.equals(msgType)) {
+            action = ACTION_PUT_FS_USER_QUOTA_INFO;
+        } else if (MSG_TYPE_PUT_FS_GROUP_QUOTA_INFO.equals(msgType)) {
+            action = ACTION_PUT_FS_GROUP_QUOTA_INFO;
+        }
+
+        int resCode = notifySlaveSite(new UnifiedMap<>(paramMap), action);
+        if (resCode != SUCCESS_STATUS) {
+            throw new MsException(resCode, "master delete bucket error");
+        }
         return new ResponseMsg(ErrorNo.SUCCESS_STATUS, new byte[0]);
     }
 
@@ -134,7 +159,7 @@ public class FsQuotaService extends BaseService {
         log.info("delFsQuotaInfo paramMap: {}", paramMap);
         String bucketName = paramMap.get(BUCKET_NAME);
         String dirName = paramMap.get(DIR_NAME);
-        if (StringUtils.isBlank(dirName)){
+        if (StringUtils.isBlank(dirName)) {
             throw new MsException(INVALID_ARGUMENT, "the dirName input is invalid.");
         }
         try {
@@ -157,6 +182,13 @@ public class FsQuotaService extends BaseService {
             throw new MsException(ErrorNo.QUOTA_BUCKET_NOT_START_FS,
                     "no permission.bucket " + bucketName + " do not start FS");
         }
+
+        String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
+        String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
+        if (!DoubleActiveUtil.dealSiteSyncRequest(new UnifiedMap<>(paramMap), MSG_TYPE_DEL_FS_QUOTA_INFO, localCluster, masterCluster)) {
+            return new ResponseMsg(ErrorNo.SUCCESS_STATUS, new byte[0]);
+        }
+
         if (!dirName.endsWith("/")) {
             dirName += "/";
         }
@@ -164,7 +196,7 @@ public class FsQuotaService extends BaseService {
         try {
             int[] id_ = new int[]{-1};
             int[] quotaType = new int[]{-1};
-            checkQuotaTypeAndId(paramMap.get(QUOTA_TYPE), paramMap.get("id_"), quotaType, id_);
+            checkQuotaTypeAndId(paramMap.get(QUOTA_TYPE), paramMap.get(UID), quotaType, id_);
 
             FsUtils.lookup(bucketName, dirName, null, false, false, -1, null)
                     .onErrorReturn(ERROR_INODE)
@@ -181,7 +213,7 @@ public class FsQuotaService extends BaseService {
                             delRes.onNext(-2);
                             return;
                         }
-                        FSQuotaRealService.delFsDirQuotaInfo(bucketName, inode.getNodeId(), inode.getObjName(), quotaType[0], id_[0], delRes,bucketInfo.get("user_name"), false);
+                        FSQuotaRealService.delFsDirQuotaInfo(bucketName, inode.getNodeId(), inode.getObjName(), quotaType[0], id_[0], delRes, bucketInfo.get("user_name"), false);
                     });
 
         } catch (Exception ex) {
@@ -207,6 +239,10 @@ public class FsQuotaService extends BaseService {
             throw new MsException(finalRes, errorMsg[0]);
         }
 
+        int resCode = notifySlaveSite(new UnifiedMap<>(paramMap), ACTION_DEL_FS_QUOTA_INFO);
+        if (resCode != SUCCESS_STATUS) {
+            throw new MsException(resCode, "master delete bucket error");
+        }
         return new ResponseMsg(ErrorNo.SUCCESS_STATUS, new byte[0]);
     }
 

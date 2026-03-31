@@ -926,6 +926,9 @@ public class LifecycleValidation {
         checkSourceClusterName(sourceSite);
         Objects.requireNonNull(backupSite);
         checkBackUpClusterName(backupSite);
+        if (sourceSite.equals(backupSite)) {
+            throw new MsException(ErrorNo.INVALID_BACKUP_RULE, "Replication with same sourceSite and backupSite");
+        }
         if (condition.getDays() == null) {
             date_sign = true;
             Objects.requireNonNull(condition.getDate());
@@ -974,6 +977,9 @@ public class LifecycleValidation {
         checkSourceClusterName(sourceSite);
         Objects.requireNonNull(backupSite);
         checkBackUpClusterName(backupSite);
+        if (sourceSite.equals(backupSite)) {
+            throw new MsException(ErrorNo.INVALID_BACKUP_RULE, "Replication of Noncurrent Version with same sourceSite and backupSite");
+        }
         checkDaysAndNoncurrentDays(condition.getNoncurrentDays(), false);
         if (prefixStr == null) {
             addTimestampsToMap(condition.getNoncurrentDays(), NON_REPLICATION);

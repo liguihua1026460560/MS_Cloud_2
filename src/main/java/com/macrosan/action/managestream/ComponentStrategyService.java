@@ -2,6 +2,8 @@ package com.macrosan.action.managestream;
 
 import com.alibaba.fastjson.JSON;
 import com.macrosan.action.core.BaseService;
+import com.macrosan.component.param.ImageWatermarkImageParams;
+import com.macrosan.component.param.ProcessParams;
 import com.macrosan.component.pojo.ComponentRecord;
 import com.macrosan.component.utils.ParamsUtils;
 import com.macrosan.constants.ErrorNo;
@@ -80,8 +82,23 @@ public class ComponentStrategyService extends BaseService {
         }
         //检验process参数格式
         String[] processArray = process.split("/");
+        ImageWatermarkImageParams watermarkImageParams = null;
         for (String processItem : processArray) {
-            ParamsUtils.getParams(processType, processItem).checkParams();
+            ProcessParams params = ParamsUtils.getParams(processType, processItem);
+            if (params instanceof ImageWatermarkImageParams) {
+                watermarkImageParams = (ImageWatermarkImageParams) params;
+            }
+            params.checkParams();
+        }
+        // 校验图片水印的logg是否存在
+        if (watermarkImageParams != null) {
+            Boolean exists = watermarkImageParams.checkImageIsExists().block();
+            if (exists == null) {
+                throw new MsException(ErrorNo.UNKNOWN_ERROR, "check watermark image fail");
+            }
+            if (!exists) {
+                throw new MsException(ErrorNo.WATER_MARKER_IMAGE_NOT_FOUND, " watermark image is not found");
+            }
         }
         if (ComponentRecord.Type.DICOM.name.equals(processType) && !DICOM_SUPPORT_DESTINATION) {
             // 影像压缩策略，不支持删源和目标位置

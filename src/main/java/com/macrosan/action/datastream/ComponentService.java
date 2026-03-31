@@ -3,6 +3,8 @@ package com.macrosan.action.datastream;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.macrosan.action.core.BaseService;
 import com.macrosan.component.ComponentUtils;
+import com.macrosan.component.param.ImageWatermarkImageParams;
+import com.macrosan.component.param.ProcessParams;
 import com.macrosan.component.pojo.ComponentRecord;
 import com.macrosan.component.pojo.ComponentStrategy;
 import com.macrosan.component.utils.ParamsUtils;
@@ -87,9 +89,6 @@ public class ComponentService extends BaseService {
         if (StringUtils.isEmpty(contentLength) || Integer.parseInt(contentLength) == 0) {
             throw new MsException(ErrorNo.MISSING_CONTENT_LENGTH, "put object component error, no content-length param");
         }
-        if (CheckUtils.bucketFsCheck(bucket)) {
-            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs, can not add objectComponentStrategy");
-        }
         MultiMap paramMap = request.params();
         //  判断源对象是否存在
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
@@ -100,6 +99,7 @@ public class ComponentService extends BaseService {
                 .doOnNext(bucketInfo -> throwWhenEmpty(bucketInfo, new MsException(ErrorNo.NO_SUCH_BUCKET, "no such bucket. bucket name :" + bucket + ".")))
                 .doOnNext(bucketInfo -> regionCheck(bucketInfo.get(REGION_NAME)))
                 .doOnNext(SnapshotUtil::checkOperationCompatibility)
+                .doOnNext(CheckUtils::bucketFsCheck)
                 .doOnNext(this::siteCheck)
                 .flatMap(bucketInfo -> ReactorPolicyCheckUtils.getPolicyCheckResult(request, bucket, object, method).zipWith(Mono.just(bucketInfo)))
                 .doOnNext(tuple2 -> policy[0] = tuple2.getT1())
@@ -178,9 +178,14 @@ public class ComponentService extends BaseService {
         ComponentRecord.Type type = ComponentRecord.Type.parseType(processType);
         //参数校验
         String[] processArray = process.split("/");
+        ImageWatermarkImageParams watermarkImageParams = null;
         //根据处理名称进行参数校验
         for (String processItem : processArray) {
-            ParamsUtils.getParams(processType, processItem).checkParams();
+            ProcessParams params = ParamsUtils.getParams(processType, processItem);
+            if (params instanceof ImageWatermarkImageParams) {
+                watermarkImageParams = (ImageWatermarkImageParams) params;
+            }
+            params.checkParams();
         }
         if (ComponentRecord.Type.DICOM.equals(type) && !DICOM_SUPPORT_DESTINATION) {
             // 影像压缩策略，不支持删源和目标位置
@@ -233,6 +238,7 @@ public class ComponentService extends BaseService {
                 ? destination.split(File.separator, 2)[1] + File.separator + metaData.key : metaData.key;
         String sourceIp = request.remoteAddress().host();
         String finalTargetBucket = targetBucket;
+        ImageWatermarkImageParams finalWatermarkImageParams = watermarkImageParams;
         Disposable subscribe = pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(targetBucket)
                 .doOnNext(bucketInfo -> throwWhenEmpty(bucketInfo, new MsException(TARGET_BUCKET_NOT_EXISTS, "The target bucket does not exists,targetBucket:" + finalTargetBucket)))
                 .doOnNext(bucketInfo -> regionCheck(bucketInfo.get(REGION_NAME)))
@@ -247,6 +253,17 @@ public class ComponentService extends BaseService {
                     }
                 })
                 .defaultIfEmpty(true)
+                .flatMap(b -> {
+                    // 校验图片水印的logo是否存在
+                    return finalWatermarkImageParams != null ? finalWatermarkImageParams.checkImageIsExists() : Mono.just(true);
+                })
+                .handle((waterMarkImageExists, sink) -> {
+                    if (!waterMarkImageExists) {
+                        sink.error(new MsException(ErrorNo.WATER_MARKER_IMAGE_NOT_FOUND, "watermark image not found"));
+                    } else {
+                        sink.next(true);
+                    }
+                })
                 .flatMap(b -> pool.getReactive(REDIS_POOL_INDEX).sismember(COMPONENT_RECORD_BUCKET_SET, bucket))
                 .doOnNext(b -> {
                     if (!b) {

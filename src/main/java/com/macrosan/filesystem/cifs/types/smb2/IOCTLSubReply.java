@@ -119,4 +119,17 @@ public abstract class IOCTLSubReply {
             }
         }
     }
+    @EqualsAndHashCode(callSuper = true)
+    @Data
+    public static class RpcResponseSubReply extends IOCTLSubReply {
+        private byte[] responsePDU;
+
+        @Override
+        public int writeStruct(ByteBuf buf, int offset) {
+            if (responsePDU.length > 0) {
+                buf.setBytes(offset, responsePDU);
+            }
+            return responsePDU.length;
+        }
+    }
 }

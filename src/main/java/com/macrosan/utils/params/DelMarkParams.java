@@ -59,6 +59,10 @@ public class DelMarkParams {
     @Setter
     public long fileCookie;
 
+    @Getter
+    @Setter
+    public String lastAccessStamp;
+
     public DelMarkParams(String bucket, String object, String versionId, MetaData pendingMark, List<Tuple3<String, String, String>> vnodeList, String versionStatus, String currentVersion) {
         this.bucket = bucket;
         this.object = object;
@@ -112,6 +116,11 @@ public class DelMarkParams {
 
     public DelMarkParams fileCookie(long fileCookie) {
         this.fileCookie = fileCookie;
+        return this;
+    }
+
+    public DelMarkParams lastAccessStamp(String lastAccessStamp) {
+        this.lastAccessStamp = lastAccessStamp;
         return this;
     }
 }

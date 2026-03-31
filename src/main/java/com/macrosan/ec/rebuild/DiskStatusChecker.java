@@ -51,8 +51,8 @@ public class DiskStatusChecker {
             if (waiter.isEmpty()) {
                 return;
             }
-            Sets.SetView<String> newRebuildWaiterSet = Sets.difference(waiter, rebuildWaiter);
-            if (newRebuildWaiterSet.isEmpty()){
+            Set<String> newRebuildWaiterSet = new HashSet<>(Sets.difference(waiter, rebuildWaiter));
+            if (newRebuildWaiterSet.isEmpty()) {
                 return;
             }
             log.info("add lun:{} to rebuild waiter", newRebuildWaiterSet);

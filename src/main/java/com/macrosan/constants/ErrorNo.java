@@ -872,6 +872,7 @@ public class ErrorNo {
     public static final int DELETE_SOURCE_CONFLICT = 2934;
     public static final int IMAGE_SIZE_TOO_LARGE = 2935;
     public static final int NOT_SUPPORTED_COMPONENT_PARAM = 2936;
+    public static final int WATER_MARKER_IMAGE_NOT_FOUND = 2937;
 
     public static final int ROLE_NOT_EXISTS = 2707;
     public static final int ROLE_ALREADY_EXISTS = 2708;
@@ -969,4 +970,6 @@ public class ErrorNo {
     public static final int NO_SUCH_CACHE_POOL = 3202;
 
     public static final int COMPRESS_SERVER_ERROR = 3301;
+
+    public static final int INVALID_FS_STATUS = 3401;
 }

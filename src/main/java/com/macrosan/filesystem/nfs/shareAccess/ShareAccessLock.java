@@ -2,6 +2,8 @@ package com.macrosan.filesystem.nfs.shareAccess;
 
 import com.macrosan.filesystem.lock.Lock;
 import com.macrosan.filesystem.nfs.delegate.DelegateLock;
+import com.macrosan.filesystem.nfs.handler.NFSHandler;
+import com.macrosan.filesystem.nfs.types.NFS4Client;
 import com.macrosan.filesystem.nfs.types.StateId;
 import com.macrosan.httpserver.ServerConfig;
 import lombok.AllArgsConstructor;
@@ -53,8 +55,20 @@ public class ShareAccessLock extends Lock {
 
     @Override
     public boolean needKeep() {
-        return node.equals(ServerConfig.getInstance().getHostUuid())
-                && clientControl.getClient0(clientId) != null;
+        if (!node.equals(ServerConfig.getInstance().getHostUuid())){
+            return false;
+        }
+        NFS4Client client = clientControl.getClient0(clientId);
+        if (client == null){
+            return false;
+        }
+        if (client.getMinorVersion() >= 1 && client.getSession0(sessionId) == null){
+            return false;
+        }
+        if (client.getLocalAddress() == null || !Objects.equals(0, NFSHandler.localIpMap.get(client.getLocalAddress()))){
+            return false;
+        }
+        return true;
     }
 
     @Override

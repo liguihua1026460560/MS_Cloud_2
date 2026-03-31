@@ -155,6 +155,9 @@ public class AsyncUtils {
 
                             // 改进：先处理所有 msgs 的 beforeService
                             return Flux.fromIterable(msgs)
+                                    // 过滤缓存池下刷请求
+                                    // opt7可能会出现oldInodeData
+                                    .filter(msg -> StringUtils.isBlank(msg.get("oldInodeData")))
                                     // concatMap保证执行顺序
                                     .concatMap(msg -> beforeService(bucket, nodeID, opt, msg.dataMap))
                                     .doOnNext(tuple2 -> {

@@ -1,8 +1,13 @@
 package com.macrosan.component.param;
 
 import com.macrosan.constants.ErrorNo;
+import com.macrosan.ec.ErasureClient;
+import com.macrosan.message.jsonmsg.MetaData;
+import com.macrosan.storage.StoragePool;
+import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.utils.msutils.MsException;
 import org.apache.commons.lang3.StringUtils;
+import reactor.core.publisher.Mono;
 
 import java.util.Base64;
 
@@ -25,6 +30,9 @@ public class ImageWatermarkImageParams implements ProcessParams {
 
     public String versionId;
 
+    private String bucket;
+    private String key;
+
     @Override
     public void checkParams() {
         // 图片路径不能为空
@@ -34,9 +42,12 @@ public class ImageWatermarkImageParams implements ProcessParams {
             try {
                 byte[] decode = Base64.getUrlDecoder().decode(this.image);
                 String imagePath = new String(decode);
-                if (imagePath.split("/").length < 2) {
+                String[] split = imagePath.split("/", 2);
+                if (split.length < 2) {
                     throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "watermark image process: image path is invalid.");
                 }
+                bucket = split[0];
+                key = split[1];
             } catch (Exception e) {
                 if (e instanceof MsException) {
                     throw (MsException) e;
@@ -58,4 +69,19 @@ public class ImageWatermarkImageParams implements ProcessParams {
             throw new MsException(ErrorNo.INVALID_COMPONENT_PARAM, "watermark image process: p is invalid.");
         }
     }
+
+    public Mono<Boolean> checkImageIsExists() {
+        StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
+        String bucketVnodeId = storagePool.getBucketVnodeId(bucket, key);
+        return storagePool.mapToNodeInfo(bucketVnodeId)
+                .flatMap(nodeList -> ErasureClient.getObjectMetaVersionResOnlyRead(bucket, key, versionId, nodeList, null))
+                .handle((res, sink) -> {
+                    if (res.var1().equals(MetaData.ERROR_META)) {
+                        sink.error(new MsException(ErrorNo.UNKNOWN_ERROR, "watermark image process: image is invalid."));
+                        return;
+                    }
+                    sink.next(res.var1() != MetaData.NOT_FOUND_META && !res.var1().isDeleteMark() && !res.var1().isDeleteMarker());
+                });
+    }
+
 }

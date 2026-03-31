@@ -234,7 +234,9 @@ public class StoreManagementServer {
                     String targetIp = request.getMember(TARGET_IP_HEADER);
                     String uri = request.uri();
                     String signPath = RestfulVerticle.getSignPath(request.host(), request.path());
-                    boolean isHost = !Objects.equals(signPath, request.path());
+                    boolean isHost = !Objects.equals(signPath, request.path())
+                            || ((request.getParam(EXPIRES) != null && request.getHeader(DATE) != null)
+                            && !request.params().contains(AuthorizeV4.X_AMZ_SIGNATURE) && request.params().contains(SIGNATURE));
                     if (isHost) {
                         uri = getUri(request);
                     }
@@ -356,7 +358,9 @@ public class StoreManagementServer {
                     String targetIp = request.getMember(TARGET_IP_HEADER);
                     String uri = request.uri();
                     String signPath = RestfulVerticle.getSignPath(request.host(), request.path());
-                    boolean isHost = !Objects.equals(signPath, request.path());
+                    boolean isHost = !Objects.equals(signPath, request.path())
+                            || ((request.getParam(EXPIRES) != null && request.getHeader(DATE) != null)
+                            && !request.params().contains(AuthorizeV4.X_AMZ_SIGNATURE) && request.params().contains(SIGNATURE));
                     if (isHost) {
                         uri = getUri(request);
                     }

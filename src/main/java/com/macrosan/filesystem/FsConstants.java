@@ -413,6 +413,7 @@ public class FsConstants {
         public static final int STATUS_DATA_ERROR = 0xc000003E;
         public static final int STATUS_DIRECTORY_NOT_EMPTY = 0xc0000101;
         public static final int STATUS_NO_SUCH_FILE = 0xC000000F;
+        public static final int STATUS_NO_SUCH_USER = 0xC0000064;
         public static final int STATUS_OBJECT_NAME_EXISTS = 0x40000000;
         public static final int STATUS_OBJECT_NAME_COLLISION = 0xC0000035;
         public static final int STATUS_FILE_TOO_LARGE = 0xC0000904;
@@ -475,6 +476,7 @@ public class FsConstants {
     public static final int FILE_ATTRIBUTE_NONINDEXED = 0x2000;
     public static final int FILE_ATTRIBUTE_ENCRYPTED = 0x4000;
     public static final int FILE_ATTRIBUTE_ALL_MASK = 0x7FFF;
+    public static final int FILE_ATTRIBUTE_PIPE_ACCESS_MASK = 0x0012019F;
     public static final int MAX_CIFS_LOOKUP_BUFFER_SIZE = (16 * 1024);
 
     // NLM4 Stats

@@ -6,6 +6,11 @@ package com.macrosan.utils.layerMonitor;/**
 import com.macrosan.database.rocksdb.batch.BatchRocksDB;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.Utils;
+import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.filesystem.cache.Node;
+import com.macrosan.filesystem.utils.InodeUtils;
+import com.macrosan.message.jsonmsg.ChunkFile;
+import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
@@ -18,40 +23,44 @@ import org.apache.commons.lang3.StringUtils;
 import org.rocksdb.RocksIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
+import static com.macrosan.constants.SysConstants.ROCKS_CHUNK_FILE_KEY;
 import static com.macrosan.ec.ErasureClient.getObjectMetaVersionRes;
 import static com.macrosan.ec.Utils.getAccessTimeKey;
 import static com.macrosan.ec.Utils.getVersionMetaDataKey;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
-import static com.macrosan.storage.move.CacheFlushConfigRefresher.isStrategyEnableAccessTimeFlush;
+import static com.macrosan.filesystem.FsConstants.ONE_SECOND_NANO;
+import static com.macrosan.filesystem.utils.FsTierUtils.FS_TIER_DEBUG;
+import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
+import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
+import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 import static com.macrosan.storage.strategy.StorageStrategy.BUCKET_STRATEGY_NAME_MAP;
 
 /**
- *@program: MS_Cloud
- *@description: 监测对象的访问
- *@author: niechengxing
- *@create: 2026-02-25 14:45
+ * @program: MS_Cloud
+ * @description: 监测对象的访问
+ * @author: niechengxing
+ * @create: 2026-02-25 14:45
  */
 public class ObjectAccessCache {
     private static final Logger log = LoggerFactory.getLogger(ObjectAccessCache.class);
     public static long cycleTime = 24L * 60 * 60 * 1000;//默认记录一天内最早的访问
-//    static Map<String, Long> cache = Collections.emptyMap();
+    //    static Map<String, Long> cache = Collections.emptyMap();
     //缓存对象的访问记录
     public static Map<String, Long> accessCache = new ConcurrentHashMap<>();
     public static MsExecutor executor = new MsExecutor(4, 1, new MsThreadFactory("ObjectAccessCache"));
     public static Set<String> processing = new ConcurrentHashSet<>();//记录正在进行更新访问时间的对象，避免重复处理
+
     public static void init() {
         executor.schedule(ObjectAccessCache::flush, 10, TimeUnit.SECONDS);
         executor.schedule(ObjectAccessCache::queue, 30, TimeUnit.SECONDS);
@@ -68,7 +77,7 @@ public class ObjectAccessCache {
     public static void flush() {
         try {
             long curTime = System.currentTimeMillis();
-            Map<String , Long> tmp = new HashMap<>(accessCache.size());
+            Map<String, Long> tmp = new HashMap<>(accessCache.size());
 
 
             for (String key : new LinkedList<>(accessCache.keySet())) {
@@ -89,7 +98,6 @@ public class ObjectAccessCache {
 //                }
 //
 //            }
-
 
 
             BatchRocksDB.customizeOperateData(Utils.getMqRocksKey(), (db, w, request) -> {
@@ -134,7 +142,7 @@ public class ObjectAccessCache {
                         return update(bucket, object, versionId, stamp).zipWith(Mono.just(tuple2.var1))
                                 .doOnNext(tuple -> {
                                     if (tuple.getT1()) {
-                                        log.debug("update bucket:{}, object:{}, versionId:{} access record success",bucket, object, versionId);
+                                        log.debug("update bucket:{}, object:{}, versionId:{} access record success", bucket, object, versionId);
                                     }
                                 })
                                 .doOnError(e -> {
@@ -151,6 +159,7 @@ public class ObjectAccessCache {
                         }
                     }, e -> {
                         log.error("", e);
+                        res.onNext(1);
                     }, () -> {
                         res.onNext(1);
                     });
@@ -169,7 +178,7 @@ public class ObjectAccessCache {
 //                        String object = realKey.substring(realKey.indexOf("/") + 1, realKey.lastIndexOf("/"));
 //                        String versionId = realKey.substring(realKey.lastIndexOf("/") + 1);
                         //根据bucket获取存储策略，确认是否开启数据分层
-                        if (!isStrategyEnableAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucket))) {
+                        if (!isEnableCacheAccessTimeFlush(BUCKET_STRATEGY_NAME_MAP.get(bucket))) {
                             w.delete(iterator.key());
                             if (!processing.contains(realKey)) {
                                 processing.remove(realKey);
@@ -179,9 +188,9 @@ public class ObjectAccessCache {
                             if (!processing.contains(realKey)) {
                                 processing.remove(realKey);
                             }
-                        } else if (!processing.contains(realKey)){
+                        } else if (!processing.contains(realKey)) {
                             //满足1天内的记录，直接处理更新
-    //                        map.computeIfAbsent(realKey, k -> stamp);
+                            //                        map.computeIfAbsent(realKey, k -> stamp);
                             //直接更新记录
                             //如果是数据盘上数据的访问也更新，访问后数据会转存回缓存盘，未被访问的话就会一直在数据池中，也不会进行访问记录
                             //获取对象元数据，在缓存池中存储的对象生成访问记录然后去各自fileMeta所存节点盘上增加进行访问记录并更新fileMeta
@@ -205,6 +214,7 @@ public class ObjectAccessCache {
                     processor.onComplete();
                 }
             }).flatMap(r -> res).flatMap(r -> {
+                processing.clear();
                 log.debug("updateAccessRecord wait delete taskKey");
                 return BatchRocksDB.customizeOperateData(Utils.getMqRocksKey(), (db, w, request) -> {
                     for (String key : deleteKeys) {
@@ -253,8 +263,13 @@ public class ObjectAccessCache {
                         //上次访问时间据当前时间超过1天则进行更新
                         return Mono.just(true);
                     } else {
-                        //
-                        if (metaData.storage.startsWith("cache")) {//数据池数据被访问时与数据转存至缓存盘同时进行访问记录的更新，可以不在这里更新
+                        //处理文件的更新
+                        if (metaData.inode > 0) {
+                            return updateInodeDataAccessTime(bucketName, bucketVnode, metaData, stamp, tuple2.var2);
+                        }
+
+                        if (metaData.storage.startsWith("cache")) {
+                            //数据池数据被访问时与数据转存至缓存盘同时进行访问记录的更新，可以不在这里更新
                             //在缓存池中存储的对象
                             //生成访问记录，确认所有fileMeta的位置
                             String accessRecord = getAccessTimeKey(stamp, metaData.fileName);
@@ -267,7 +282,7 @@ public class ObjectAccessCache {
                                         .flatMap(nodeList -> {
                                             log.debug("update fileMeta AccessRecord, fileName:{}", metaData.fileName);
                                             //记录最新访问key,并更新对象所有fileMeta的最新访问时间
-                                            return ErasureClient.updateFileAccessTime(dataPool, metaData.fileName,nodeList, stamp, metaData.storage);
+                                            return ErasureClient.updateFileAccessTime(dataPool, metaData.fileName, nodeList, stamp, metaData.storage);
                                         })
                                         .flatMap(b -> {
                                             if (b) {
@@ -309,6 +324,114 @@ public class ObjectAccessCache {
     }
 
 
+    public static Mono<Boolean> updateInodeDataAccessTime(String bucket, String vnode, MetaData metaData, String stamp, Tuple2<ErasureServer.PayloadMetaType, MetaData>[] getMetaRes) {
+        Node nodeInstance = Node.getInstance();
+        if (nodeInstance == null) {
+            return Mono.just(false);
+        }
+        long nodeId = metaData.inode;
+        if (FS_TIER_DEBUG) {
+            log.info("updateInodeDataAccessTime bucket:{} vnode:{} nodeId:{}", bucket, vnode, nodeId);
+        }
+        long[] atime = new long[1];
+//        StoragePool metaStoragePool = StoragePoolFactory.getMetaStoragePool(metaData.bucket);
+//        Tuple2<String, String> bucketVnodeIdTuple = metaStoragePool.getBucketVnodeIdTuple(metaData.bucket, metaData.key);
+//        String bucketVnode = bucketVnodeIdTuple.var1;
+//        String migrateVnode = bucketVnodeIdTuple.var2;
+        return nodeInstance.getInode(bucket, nodeId)
+                .flatMap(inode -> {
+                    if (inode.getLinkN() == ERROR_INODE.getLinkN()) {
+                        return Mono.just(false);
+                    }
+                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                        return Mono.just(true);
+                    }
+                    atime[0] = inode.getAtime();
+                    return updateInodeDataAccessTime(inode.getInodeData(), nodeInstance, bucket, stamp);
+                })
+                .flatMap(res -> {
+                    if (res && InodeUtils.needUpdateAtime(atime[0])) {
+                        int stampNano = (int) (System.nanoTime() % ONE_SECOND_NANO);
+                        return nodeInstance.updateInodeTime(nodeId, bucket, Long.parseLong(stamp), stampNano, true, false, false)
+                                .map(i -> i.getLinkN() != ERROR_INODE.getLinkN());
+                    }
+                    return Mono.just(res);
+                })
+//                .flatMap(b -> {
+//                    if (b) {
+//                        //更新对象元数据的最新访问时间
+//                        log.debug("update metaData AccessRecord, metaData:{}", metaData);
+//                        metaData.setLastAccessStamp(stamp);
+//                        String versionMetaDataKey = getVersionMetaDataKey(bucketVnode, metaData.bucket, metaData.key, metaData.versionId, metaData.snapshotMark);
+//                        return Mono.just(StringUtils.isNotEmpty(migrateVnode))
+//                                .flatMap(b0 -> {
+//                                    if (b0) {
+//                                        return metaStoragePool.mapToNodeInfo(migrateVnode)
+//                                                .flatMap(migrateVnodeList -> ErasureClient.getObjectMetaVersionResOnlyRead(metaData.bucket, metaData.key, metaData.versionId, migrateVnodeList, null, metaData.snapshotMark, null).zipWith(Mono.just(migrateVnodeList)))
+//                                                .flatMap(resTuple2 -> ErasureClient.updateMetaData(versionMetaDataKey, metaData.clone(), resTuple2.getT2(), null, resTuple2.getT1().var2, true))
+//                                                .timeout(Duration.ofSeconds(30))
+//                                                .map(r -> r == 1)
+//                                                .onErrorReturn(false);
+//                                    }
+//                                    return Mono.just(true);
+//                                })
+//                                .flatMap(b1 -> {
+//                                    if (b1) {
+//                                        return metaStoragePool.mapToNodeInfo(bucketVnode)
+//                                                .flatMap(nodeList -> ErasureClient.updateMetaData(versionMetaDataKey, metaData.clone(), nodeList, null, getMetaRes, true))
+//                                                .timeout(Duration.ofSeconds(30))
+//                                                .map(r -> r == 1)
+//                                                .onErrorReturn(false);
+//                                    }
+//                                    return Mono.just(false);
+//                                });
+//                    }
+//                    return Mono.just(false);
+//                })
+                .timeout(Duration.ofSeconds(59))
+                .onErrorResume(e -> {
+                    log.info("updateInodeDataAccessTime error {} {} ", bucket, nodeId, e);
+                    return Mono.just(false);
+                });
+    }
+
+    public static Mono<Boolean> updateInodeDataAccessTime(List<Inode.InodeData> inodeDataList, Node node, String bucketName, String stamp) {
+        return Flux.fromStream(inodeDataList.stream())
+                .flatMap(inodeData -> {
+                    if (inodeData.getFileName().startsWith(ROCKS_CHUNK_FILE_KEY)) {
+                        if (FS_TIER_DEBUG) {
+                            log.info("updateInodeDataAccessTime chunk file, bucket:{} fileName:{}", bucketName, inodeData.getFileName());
+                        }
+                        return node.getChunk(inodeData.getFileName())
+                                .flatMap(chunkFile -> {
+                                    if (chunkFile.getSize() == ChunkFile.ERROR_CHUNK.getSize()) {
+                                        log.info("updateInodeDataAccessTime chunk file fail, bucket:{} fileName:{}", bucketName, inodeData.getFileName());
+                                        return Mono.just(false);
+                                    }
+
+                                    return updateInodeDataAccessTime(chunkFile.getChunkList(), node, bucketName, stamp);
+                                });
+                    }
+                    if (inodeData.storage.startsWith("cache")) {
+                        StoragePool dataPool = StoragePoolFactory.getStoragePool(inodeData.storage, bucketName);
+                        return dataPool.mapToNodeInfo(dataPool.getObjectVnodeId(inodeData.fileName))
+                                .flatMap(nodeList -> {
+                                    if (FS_TIER_DEBUG) {
+                                        log.debug("update fileMeta AccessRecord, bucketName:{},fileName:{}", bucketName, inodeData.fileName);
+                                    }
+                                    //记录最新访问key,并更新对象所有fileMeta的最新访问时间
+                                    return ErasureClient.updateFileAccessTime(dataPool, inodeData.fileName, nodeList, stamp, inodeData.storage);
+                                });
+                    }
+                    return Mono.just(true);
+                })
+                .onErrorResume(e -> {
+                    log.error("updateInodeDataAccessTime error bucket:{} inodeDataList:{}", bucketName, inodeDataList, e);
+                    return Mono.just(false);
+                })
+                .collectList()
+                .map(list -> list.stream().allMatch(b -> b));
+    }
 
 }
 

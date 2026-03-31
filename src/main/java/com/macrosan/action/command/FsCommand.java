@@ -1,5 +1,7 @@
 package com.macrosan.action.command;
 
+import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.ec.DelFileRunner;
 import com.macrosan.ec.error.DiskErrorHandler;
 import com.macrosan.ec.server.WriteCacheServer;
 import com.macrosan.filesystem.FsConstants;
@@ -18,6 +20,8 @@ import com.macrosan.filesystem.nfs.api.NFS3Proc;
 import com.macrosan.filesystem.nfs.api.NFS4Proc;
 import com.macrosan.filesystem.nfs.lock.NLMLockClient;
 import com.macrosan.filesystem.nfs.lock.NLMLockServer;
+import com.macrosan.filesystem.tier.FileTierMove;
+import com.macrosan.filesystem.utils.FsTierUtils;
 import com.macrosan.filesystem.utils.IpWhitelistUtils;
 import com.macrosan.filesystem.utils.ReadDirCache;
 import com.macrosan.filesystem.utils.RunNumUtils;
@@ -30,6 +34,7 @@ import com.macrosan.message.jsonmsg.FSQuotaConfig;
 import com.macrosan.storage.move.CacheMove;
 import com.macrosan.utils.functional.Tuple3;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -39,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
 
+import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 import static com.macrosan.filesystem.FsConstants.SMB2ACCESS_MASK.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEFlag.*;
 import static com.macrosan.filesystem.cache.Vnode.FS_VNODE_STATE_DEBUG;
@@ -139,7 +145,8 @@ public class FsCommand extends Reusable {
                     } catch (Exception e) {
                         e.printStackTrace();
                     }
-                    log.info("【writeCacheDebug:】" + WriteCacheServer.writeCacheDebug);break;
+                    log.info("【writeCacheDebug:】" + WriteCacheServer.writeCacheDebug);
+                    break;
                 case "printSMBStack":
                     boolean notPrint = Boolean.parseBoolean(args[1]);
                     SMBHandler.notPrintStackDebug = notPrint;
@@ -380,6 +387,65 @@ public class FsCommand extends Reusable {
                 case "nfs4ErrorDebug":
                     boolean nfs4Debug = Boolean.parseBoolean(args[1]);
                     NFS4Proc.errorDebug = nfs4Debug;
+                    break;
+                case "fsTierDebug":
+                    FsTierUtils.FS_TIER_DEBUG = Boolean.parseBoolean(args[1]);
+                    break;
+                case "fsTierCacheSwitch":
+                    FileTierMove.cacheSwitch = Boolean.parseBoolean(args[1]);
+                    break;
+                case "deleteFileRun":
+                    String opt;
+                    if (args.length > 1) {
+                        opt = args[1];
+                    } else {
+                        opt = "";
+                    }
+
+                    switch (opt) {
+                        //set limit
+                        case "hdd": {
+                            DelFileRunner.HDD_LIMIT = Integer.parseInt(args[2]);
+                            break;
+                        }
+                        case "ssd": {
+                            DelFileRunner.SSD_LIMIT = Integer.parseInt(args[2]);
+                        }
+                        case "nvme": {
+                            DelFileRunner.NVME_LIMIT = Integer.parseInt(args[2]);
+                        }
+                        case "reload": {
+                            String hdd = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).hget("delete_file_limit", "hdd");
+                            if (StringUtils.isNotBlank(hdd)) {
+                                DelFileRunner.HDD_LIMIT = Integer.parseInt(hdd);
+                            }
+
+                            String ssd = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).hget("delete_file_limit", "ssd");
+                            if (StringUtils.isNotBlank(ssd)) {
+                                DelFileRunner.SSD_LIMIT = Integer.parseInt(ssd);
+                            }
+
+                            String nvme = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).hget("delete_file_limit", "nvme");
+                            if (StringUtils.isNotBlank(nvme)) {
+                                DelFileRunner.NVME_LIMIT = Integer.parseInt(nvme);
+                            }
+                        }
+                        //set running
+                        case "running": {
+                            String storage = args[2];
+                            int num = Integer.parseInt(args[3]);
+                            DelFileRunner.deleteRunning.get(storage).addAndGet(num);
+                            break;
+                        }
+                        case "debug": {
+                            DelFileRunner.DEBUG = Boolean.parseBoolean(args[2]);
+                            break;
+                        }
+                        default:
+                            log.info("running {}", DelFileRunner.deleteRunning);
+                            log.info("limit {}", DelFileRunner.deleteLimit);
+                    }
+                    break;
                 default:
             }
         } catch (Exception e) {
@@ -650,14 +716,14 @@ public class FsCommand extends Reusable {
 
                     response.setStatus(printString);
                     log.info("【printInfo】:{}", printString);
-                } else if (12 == args[1].length()){ //12是s3Id的长度
+                } else if (12 == args[1].length()) { //12是s3Id的长度
                     String s3Id = args[1];
                     long id = Long.parseLong(s3Id);
                     String userInfo = ACLUtils.userInfo.get(s3Id) + "";
                     String gids = ACLUtils.s3IDToGids.get(s3Id) + "";
                     String printString =
                             "【userInfo】:" + userInfo + "\n" +
-                            "【gids】:" + gids;
+                                    "【gids】:" + gids;
                     response.setStatus(printString);
                 } else if (args[1].startsWith("uid:")) {
                     String[] split = args[1].split(":");

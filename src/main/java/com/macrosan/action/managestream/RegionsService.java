@@ -15,7 +15,6 @@ import com.macrosan.message.socketmsg.MapResMsg;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.message.socketmsg.SocketSender;
 import com.macrosan.message.socketmsg.StringResMsg;
-import com.macrosan.message.xmlmsg.InstancePerformanceQuota;
 import com.macrosan.message.xmlmsg.region.GetBucketLocationOutput;
 import com.macrosan.message.xmlmsg.region.LocationResult;
 import com.macrosan.storage.metaserver.BucketShardCache;
@@ -30,7 +29,6 @@ import io.etcd.jetcd.KeyValue;
 import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.ScanArgs;
 import io.lettuce.core.ScanCursor;
-import io.vertx.core.impl.ConcurrentHashSet;
 import io.vertx.core.json.Json;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -41,7 +39,6 @@ import reactor.core.publisher.Flux;
 import java.net.InetAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -248,8 +245,8 @@ public class RegionsService extends BaseService {
                     } else {
                         pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anonuid");
                     }
-                    if (jsonParam.containsKey("anonuid")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anongid", jsonParam.getString("anonuid"));
+                    if (jsonParam.containsKey("anongid")) {
+                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anongid", jsonParam.getString("anongid"));
                     } else {
                         pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anongid");
                     }

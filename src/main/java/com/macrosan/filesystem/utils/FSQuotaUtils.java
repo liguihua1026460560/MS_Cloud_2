@@ -35,6 +35,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import static com.macrosan.constants.ErrorNo.*;
@@ -1494,5 +1496,59 @@ public class FSQuotaUtils {
                     }
                     return Mono.just(i);
                 });
+    }
+
+    private static final long QUOTA_LOG_INTERVAL_MS = Duration.ofMinutes(1).toMillis();
+    private static final long QUOTA_LOG_TTL_MS = Duration.ofMinutes(10).toMillis();
+    private static final long QUOTA_LOG_CLEANUP_INTERVAL_MS = Duration.ofMinutes(5).toMillis();
+    private static final Map<String, QuotaLogThrottle> QUOTA_LOG_THROTTLE_MAP = new ConcurrentHashMap<>();
+    private static final AtomicLong QUOTA_LOG_LAST_CLEANUP_TIME = new AtomicLong();
+
+    private static class QuotaLogThrottle {
+        private volatile long lastLogTime;
+        private volatile long lastAccessTime;
+        private final AtomicLong suppressedCount = new AtomicLong();
+    }
+
+    public static void logQuotaExceeded(Inode inode, Throwable e) {
+        long currentTime = System.currentTimeMillis();
+        cleanupExpiredQuotaLogThrottle(currentTime);
+        String bucket = inode == null ? "" : inode.getBucket();
+        long nodeId = inode == null ? -1L : inode.getNodeId();
+        String object = inode == null ? "" : inode.getObjName();
+        String logKey = bucket + ":" + nodeId;
+        QuotaLogThrottle throttle = QUOTA_LOG_THROTTLE_MAP.computeIfAbsent(logKey, k -> new QuotaLogThrottle());
+        throttle.lastAccessTime = currentTime;
+        long lastLogTime = throttle.lastLogTime;
+        if (lastLogTime == 0 || currentTime - lastLogTime >= QUOTA_LOG_INTERVAL_MS) {
+            synchronized (throttle) {
+                lastLogTime = throttle.lastLogTime;
+                if (lastLogTime == 0 || currentTime - lastLogTime >= QUOTA_LOG_INTERVAL_MS) {
+                    long suppressedCount = throttle.suppressedCount.getAndSet(0);
+                    throttle.lastLogTime = currentTime;
+                    if (suppressedCount > 0) {
+                        log.info("NFS quota exceeded. bucket:{}, obj:{}, nodeId:{}, msg:{} (suppressed {} repeated logs)",
+                                bucket, object, nodeId, e.getMessage(), suppressedCount);
+                    } else {
+                        log.info("NFS quota exceeded. bucket:{}, obj:{}, nodeId:{}, msg:{}",
+                                bucket, object, nodeId, e.getMessage());
+                    }
+                    return;
+                }
+            }
+        }
+        throttle.suppressedCount.incrementAndGet();
+    }
+
+    private static void cleanupExpiredQuotaLogThrottle(long currentTime) {
+        long lastCleanupTime = QUOTA_LOG_LAST_CLEANUP_TIME.get();
+        if (currentTime - lastCleanupTime < QUOTA_LOG_CLEANUP_INTERVAL_MS) {
+            return;
+        }
+        if (!QUOTA_LOG_LAST_CLEANUP_TIME.compareAndSet(lastCleanupTime, currentTime)) {
+            return;
+        }
+        QUOTA_LOG_THROTTLE_MAP.entrySet().removeIf(entry ->
+                currentTime - entry.getValue().lastAccessTime >= QUOTA_LOG_TTL_MS);
     }
 }

@@ -151,6 +151,10 @@ FSPerformanceService-getBucketAddress                       = GET/bucket/?fsaddr
 FSPerformanceService-getBucketAddressPerformanceQuota       = GET/bucket/?address&fsaddressperformancequota
 FSPerformanceService-putBucketAddressPerformanceQuota       = PUT/bucket/?address&fsaddressperformancequota&quota&type
 FSPerformanceService-putBucketMultipleFSPerformanceQuota    = POST/bucket/?fsperformancequota
+FsAclService-setNfsAcl                                      = PUT/bucket/?setNfsAcl
+FsAclService-addNfsIpWhitelists                             = PUT/bucket/?addNfsIpWhitelists
+FSAclService-setCifsAcl                                     = PUT/bucket/?setCifsAcl
+FSAclService-setFtpAcl                                      = PUT/bucket/?setFtpAcl
 
 SyncSignService-getAWSSigns                              = GET/bucket/?getAWSSigns
 SyncSignService-setAWSSign                               = PUT/bucket/?dstIndex&setAWSSign&signType&srcIndex

@@ -82,7 +82,7 @@ public class WriteCacheServer {
                         }
                     });
         } else if (type == 3) {
-            return WriteCacheNode.getCache(inode.getBucket(), inode.getNodeId(), 0, inode.getStorage())
+            return WriteCacheNode.getCache(inode.getBucket(), inode.getNodeId(), 1, inode.getStorage())
                     .flatMap(writeCacheNode -> writeCacheNode.flushByteCache())
                     .flatMap(b -> {
                         if (writeCacheDebug) {

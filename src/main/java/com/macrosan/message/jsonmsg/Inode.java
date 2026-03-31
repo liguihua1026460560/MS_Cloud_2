@@ -155,6 +155,9 @@ public class Inode {
     public static Inode BUSY_INODE = new Inode().setLinkN(-12);
     public static Inode UPDATE_PROCESS_INODE = new Inode().setLinkN(-13);
     public static Inode INVALID_ARGUMENT_INODE = new Inode().setLinkN(-14);
+    public static Inode LSARPC_INODE = new Inode().setLinkN(-15);
+    public static Inode WKSSVC_INODE = new Inode().setLinkN(-16);
+    public static Inode SAMR_INODE = new Inode().setLinkN(-17);
 
     public static Boolean NOATIME = false;
     public static Boolean NODIRATIME = false;
@@ -340,6 +343,10 @@ public class Inode {
     public Inode setAtime(long atime) {
         this.atime = atime;
         return this;
+    }
+
+    public static long getLastAccessTime(Inode inode) {
+        return inode.getMtime() * 1000L + inode.getMtimensec() / 1_000_000L;
     }
 
     public Inode setMtime(long mtime) {

@@ -268,21 +268,15 @@ public class FSResponseServerHandler implements RequestChannalHandler {
             Node.getInstance().exec(nodeId, msg, 0, res);
 
             return res.map(i -> {
-                switch (opt) {
-                    case 3:
-                        if (Inode.NOT_FOUND_INODE.getLinkN() == i.getLinkN()) {
-                            // 同步deleteInode时,待同步端已经没有相关的inode。
-                            return DefaultPayload.create(Json.encode(i), SUCCESS.name());
-                        }
-                        break;
-                    default:
-                        break;
+                if (DataSynChecker.isDebug) {
+                    log.info("fileAsyncReqRes done,{} {} {}", i.getLinkN(), opt, msg.dataMap);
+                } else {
+                    log.debug("fileAsyncReqRes done,{} {} {}", i.getLinkN(), opt, msg.dataMap);
                 }
 
-                if (DataSynChecker.isDebug) {
-                    log.info("sendFileAsyncResponse done,{} {} {}", i.getLinkN(), opt, msg.dataMap);
-                } else {
-                    log.debug("sendFileAsyncResponse done,{} {} {}", i.getLinkN(), opt, msg.dataMap);
+                if (Inode.NOT_FOUND_INODE.getLinkN() == i.getLinkN()) {
+                    // 如同步deleteInode时,待同步端已经没有相关的inode。或者待同步端已经删除了该inode
+                    return DefaultPayload.create(Json.encode(i), SUCCESS.name());
                 }
 
                 if (i.getLinkN() >= 0) {

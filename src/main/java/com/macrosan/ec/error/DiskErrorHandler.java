@@ -777,11 +777,18 @@ public class DiskErrorHandler {
         }
 
         try {
+
             String uuid = RebuildRabbitMq.getMaster().hget(runningKey, "node");
             String poolName = RebuildRabbitMq.getMaster().hget(runningKey, "poolName");
             String poolListStr = redisConnPool.getCommand(SysConstants.REDIS_POOL_INDEX).hget(poolName, "file_system");
+            String poolPrefix = redisConnPool.getCommand(SysConstants.REDIS_POOL_INDEX).hget(poolName, "prefix");
             String[] poolArray = poolListStr.substring(1, poolListStr.length() - 1).split(", ");
             String poolType = RebuildRabbitMq.getMaster().hget(runningKey, "poolType");
+            StoragePool pool = StoragePoolFactory.getStoragePool(poolPrefix, null);
+            //初始化磁盘实例和rocksdb
+            for (int i = 0; i < diskArray.size(); i++) {
+                initRocksDbAndBlockDevice(diskArray.getString(i), pool);
+            }
 
             long objSumAllDisk = 0L;
             String[] disks = disk.substring(1, disk.length() - 1).split(",");
@@ -925,16 +932,7 @@ public class DiskErrorHandler {
         log.info("migrate {} in {} pool", vnode, poolType);
         RebuildLog.log(pool, vnode, "start addDisk");
         //初始化新盘各rocksdb实例及批处理对象
-        MSRocksDB.getRocksDB(dstDisk);
-        if (dstDisk.contains("index")) {
-            MSRocksDB.getRocksDB(getSyncRecordLun(dstDisk));
-            MSRocksDB.getRocksDB(getComponentRecordLun(dstDisk));
-            MSRocksDB.getRocksDB(getSTSTokenLun(dstDisk));
-            MSRocksDB.getRocksDB(getRabbitmqRecordLun(dstDisk));
-            MSRocksDB.getRocksDB(getAggregateLun(dstDisk));
-        }
-        BlockDevice.get(dstDisk);
-        pool.addLun(ServerConfig.getInstance().getHostUuid(), dstDisk);
+        initRocksDbAndBlockDevice(dstDisk, pool);
         String vKey = SCAN_MIGRATE_POSITION_PREFIX + DigestUtils.md5Hex(Json.encode(vnode + srcDisk + dstDisk + poolType)) + "_" + poolQueueTag;
 
         String removeNode;
@@ -967,6 +965,24 @@ public class DiskErrorHandler {
                     MigrateUtil.checkAndHandleAddDiskCompletion(poolQueueTag, vnode, runningKey, operate);
                     return true;
                 });
+    }
+
+    /**
+     * 初始化磁盘rocksdb实例和磁盘块设备实例
+     * @param dstDisk 磁盘
+     * @param pool 存储池
+     */
+    public static void initRocksDbAndBlockDevice(String dstDisk, StoragePool pool) {
+        MSRocksDB.getRocksDB(dstDisk);
+        if (dstDisk.contains("index")) {
+            MSRocksDB.getRocksDB(getSyncRecordLun(dstDisk));
+            MSRocksDB.getRocksDB(getComponentRecordLun(dstDisk));
+            MSRocksDB.getRocksDB(getSTSTokenLun(dstDisk));
+            MSRocksDB.getRocksDB(getRabbitmqRecordLun(dstDisk));
+            MSRocksDB.getRocksDB(getAggregateLun(dstDisk));
+        }
+        BlockDevice.get(dstDisk);
+        pool.addLun(ServerConfig.getInstance().getHostUuid(), dstDisk);
     }
 
 

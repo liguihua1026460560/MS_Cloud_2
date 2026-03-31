@@ -53,6 +53,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.Utils.DEFAULT_META_HASH;
@@ -348,7 +349,7 @@ public class InodeOperator {
             case 18:
                 Inode flushInode = Json.decodeValue(msg.get("inode"), Inode.class);
                 // 独立执行, 不影响其他操作
-                return flushWriteCache(bucket, nodeId, flushInode, msg)
+                return FastMonoTimeOut.fastTimeout(flushWriteCache(bucket, nodeId, flushInode, msg), Duration.ofSeconds(300))
                         .map(i -> local ? new LocalPayload<>(SUCCESS, i) : DefaultPayload.create(Json.encode(i), SUCCESS.name()))
                         .onErrorResume(e -> {
                             if (e instanceof TimeoutException || "closed connection".equals(e.getMessage())
@@ -374,11 +375,33 @@ public class InodeOperator {
                 String createVersion = msg.get("version");
                 String s3Account = msg.get("s3Account");
                 String displayName = msg.get("displayName");
-                operator = new InodeOperator(nodeId, 10, false, () -> Mono.just(createInode),
-                        (args, inode) -> Mono.just(createInode),
-                        (args, oldInode, inode) -> InodeUtils.create0(bucket, inode, nodeId, stamp, createVersion, s3Account, displayName), opt);
 
-                break;
+                Mono<Inode> res = InodeUtils.create0(bucket, createInode, nodeId, stamp, createVersion, s3Account, displayName);
+                Mono<Inode> mono;
+                if (AsyncUtils.checkOptForAsync(opt, msg)) {
+                    // 异步复制写预提交记录操作放在这里是为了保证写预提交记录的顺序和waitLit中任务处理的顺序一致
+                    // todo del
+                    log.debug("opt1 : {}, {}, {}", nodeId, opt, msg);
+                    List<SocketReqMsg> msgs = Stream.of(msg).collect(Collectors.toList());
+                    mono = AsyncUtils.asyncBatch(msg.get("bucket"), nodeId, opt, msgs, res);
+                } else {
+                    mono = res;
+                }
+                return FastMonoTimeOut.fastTimeout(mono, Duration.ofSeconds(300))
+                        .map(i -> local ? new LocalPayload<>(SUCCESS, i) : DefaultPayload.create(Json.encode(i), SUCCESS.name()))
+                        .onErrorResume(e -> {
+                            if (e instanceof TimeoutException || "closed connection".equals(e.getMessage())
+                                    || (e.getMessage() != null && e.getMessage().startsWith("No keep-alive acks for"))) {
+                                log.error("vnode exec timeout, nodeId: {}, opt: {}, bucket: {}, msg: {}, {}", nodeId, opt, bucket, msg, e.getMessage());
+                            } else {
+                                log.error("vnode exec error, nodeId: {}, opt: {}, bucket: {}, msg: {}", nodeId, opt, bucket, msg, e);
+                            }
+                            if (local) {
+                                return Mono.just(RETRY_INODE_PAYLOAD);
+                            } else {
+                                return Mono.just(DefaultPayload.create(Json.encode(RETRY_INODE), SUCCESS.name()));
+                            }
+                        });
             default:
         }
 
@@ -1601,6 +1624,11 @@ public class InodeOperator {
     private static Mono<Inode> flushWriteCache(String bucket, long nodeId, Inode inode, SocketReqMsg msg0) {
         if (WriteCacheServer.writeCacheDebug) {
             log.info("opt flushWriteCache {}", nodeId);
+        }
+
+        if (InodeUtils.isError(inode)) {
+            log.info("flushWriteCache error, bucket: {}, inode: {}", bucket, inode);
+            return Mono.just(ERROR_INODE);
         }
 
         StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);

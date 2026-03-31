@@ -107,7 +107,7 @@ public class MigrateUtil {
         }
 
         return TaskHandler.rebuildObjFile(storagePool, fileMeta.getMetaKey(), srcDisk, String.valueOf(errorIndex), fileMeta.getFileName(), String.valueOf(endIndex),
-                String.valueOf(fileMeta.getSize()), fileMeta.getCrypto(), sk, nodeList, fileMeta.getFlushStamp(), fileMeta.getLastAccessStamp());
+                String.valueOf(fileMeta.getSize()), fileMeta.getCrypto(), sk, nodeList, fileMeta.getFlushStamp(), fileMeta.getLastAccessStamp(), String.valueOf(fileMeta.getFileOffset()));
     }
 
     public static Mono<Boolean> migrateFile(FileMeta fileMeta, String srcDisk, String dstIP, String dstDisk, String poolType, boolean remigrate, int retryNum) {
@@ -155,7 +155,8 @@ public class MigrateUtil {
                 .put("recover", "1")
                 .put("fileName", fileMeta.getFileName())
                 .put("lun", dstDisk)
-                .put("compression", fileMeta.getCompression());
+                .put("compression", fileMeta.getCompression())
+                .put("fileOffset", String.valueOf(fileMeta.getFileOffset()));
 
         if (fileMeta.getFlushStamp() != null) {
             msg.put("flushStamp", fileMeta.getFlushStamp());

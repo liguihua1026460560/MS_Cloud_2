@@ -52,6 +52,7 @@ import reactor.core.publisher.MonoProcessor;
 import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,6 +75,7 @@ import static com.macrosan.ec.ECUtils.publishEcError;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_PUT_SYNC_RECORD;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.IF_PUT_DONE;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.UPDATE_SYNC_RECORD;
+import static com.macrosan.filesystem.quota.FSQuotaConstants.*;
 import static com.macrosan.httpserver.MossHttpClient.*;
 import static com.macrosan.httpserver.RestfulVerticle.getSignPath;
 import static com.macrosan.message.jsonmsg.UnSynchronizedRecord.Type.*;
@@ -232,11 +234,11 @@ public class DoubleActiveUtil {
             paramMap.forEach((k, v) -> {
                 if (k.startsWith("x-amz-grant-") || "x-amz-acl".equals(k) || "metadata-analysis".equals(k)
                         || "object-lock-enabled-for-bucket".equals(k) || "site".equals(k) || "sourcesite".equals(k)
-                        || DATA_SYNC_SWITCH.equals(k) || ARCHIVE_INDEX.equals(k) || SYNC_INDEX.equals(k) || SYNC_RELATION.equals(k)|| USER_ID.equals(k)
+                        || DATA_SYNC_SWITCH.equals(k) || ARCHIVE_INDEX.equals(k) || SYNC_INDEX.equals(k) || SYNC_RELATION.equals(k) || USER_ID.equals(k)
                         || BUCKET_NAME.equals(k) || SERVER_AK.equals(k) || SERVER_SK.equals(k) || BUCKET_VERSION_STATUS.equals(k)
                         || ROLE_ARN.equals(k) || (k.startsWith(POLICY_ARNS_MEMBER_PREFIX) && k.endsWith(".arn"))
                         || "policyIds".equals(k) || "policyMrns".equals(k) || "assumeRoleName".equals(k) || ROLE_SESSION_NAME.equals(k)
-                        || DURATION_SECONDS.equals(k) || POLICY.equals(k) || "roleId".equals(k) || "roleName".equals(k)
+                        || DURATION_SECONDS.equals(k) || POLICY.equals(k) || "roleId".equals(k) || "roleName".equals(k) || "address".equals(k)
                         || "AssumeId".equals(k) || "PolicyId".equals(k) || "AccessKey".equals(k) || "SecretKey".equals(k) || "Deadline".equals(k)
                         || NFS_SWITCH.equals(k) || CIFS_SWITCH.equals(k) || FTP_SWITCH.equals(k) || BUCKET_VERSION_QUOTA.equals(k)
                         || "srcIndex".equals(k) || "dstIndex".equals(k) || "signType".equals(k) || "tagging".equals(k)) {
@@ -273,7 +275,8 @@ public class DoubleActiveUtil {
                     ACTION_PUT_BUCKET_ENCRYPTION.equals(paramMap.get("action")) || ACTION_PUT_BUCKET_TRASH.equals(paramMap.get("action")) ||
                     ACTION_ASSUME_ROLE.equals(paramMap.get("action")) || ACTION_PUT_BUCKET_REFERER.equals(paramMap.get("action")) ||
                     ACTION_PUT_BUCKET_CLEAR_CONFIG.equals(paramMap.get("action")) || ACTION_PUT_BUCKET_BACKUP.equals(paramMap.get("action")) ||
-                    ACTION_PUT_BUCKET_CORS.equals(paramMap.get("action")) || ACTION_PUT_BUCKET_TAG.equals(paramMap.get("action"))) {
+                    ACTION_PUT_BUCKET_CORS.equals(paramMap.get("action")) || ACTION_PUT_BUCKET_TAG.equals(paramMap.get("action")) ||
+                    ACTION_PUT_MULTI_FS_PERFORMANCE_QUOTA.equals(paramMap.get("action"))) {
                 reqMap.put(BODY, paramMap.get(BODY));
             } else if (ACTION_PUT_BUCKET_QUOTA.equals(paramMap.get("action"))) {
                 if (!StringUtils.isEmpty(paramMap.get("bucket-quota"))) {
@@ -294,6 +297,42 @@ public class DoubleActiveUtil {
                 reqMap.put("quota", paramMap.get("quota"));
             } else if (ACTION_DEL_BUCKET_INVENTORY.equals(paramMap.get("action"))) {
                 reqMap.put("inventoryId", paramMap.get(ID));
+            } else if (ACTION_PUT_FS_DIR_QUOTA_INFO.equals(paramMap.get("action")) || ACTION_PUT_FS_USER_QUOTA_INFO.equals(paramMap.get("action"))
+                    || ACTION_PUT_FS_GROUP_QUOTA_INFO.equals(paramMap.get("action"))) {
+                reqMap.put(DIR_NAME, URLDecoder.decode(paramMap.getOrDefault(DIR_NAME, ""), "utf-8"));
+                reqMap.put(FILES_SOFT_QUOTA, paramMap.getOrDefault(FILES_SOFT_QUOTA, "0"));
+                reqMap.put(FILES_HARD_QUOTA, paramMap.getOrDefault(FILES_HARD_QUOTA, "0"));
+                reqMap.put(CAPACITY_SOFT_QUOTA, paramMap.getOrDefault(CAPACITY_SOFT_QUOTA, "0"));
+                reqMap.put(CAPACITY_HARD_QUOTA, paramMap.getOrDefault(CAPACITY_HARD_QUOTA, "0"));
+                reqMap.put(MODIFY, paramMap.getOrDefault(MODIFY, "0"));
+                if (ACTION_PUT_FS_USER_QUOTA_INFO.equals(paramMap.get("action"))) {
+                    reqMap.put(FS_UID, paramMap.get(FS_UID));
+                }
+
+                if (ACTION_PUT_FS_GROUP_QUOTA_INFO.equals(paramMap.get("action"))) {
+                    reqMap.put(FS_GID, paramMap.get(FS_GID));
+                }
+            } else if (ACTION_ADD_NFS_IP_WHITELISTS.equals(paramMap.get("action")) || ACTION_DEL_NFS_IP_WHITELISTS.equals(paramMap.get("action"))) {
+                reqMap.put(NFS_IP_WHITELISTS, paramMap.get(NFS_IP_WHITELISTS));
+            } else if (ACTION_SET_BUCKET_NFS.equals(paramMap.get("action"))) {
+                reqMap.put(NFS_ACL, paramMap.get(NFS_ACL));
+                reqMap.put(FS_STATUS, paramMap.get(FS_STATUS));
+                reqMap.put(FS_SQUASH, paramMap.get(FS_SQUASH));
+                reqMap.put(ANON_UID, paramMap.get(ANON_UID));
+                reqMap.put(ANON_GID, paramMap.get(ANON_GID));
+            } else if (ACTION_SET_BUCKET_CIFS.equals(paramMap.get("action"))) {
+                reqMap.put(CIFS_ACL, paramMap.get(CIFS_ACL));
+                reqMap.put(GUEST, paramMap.get(GUEST));
+                reqMap.put(FS_STATUS, paramMap.get(FS_STATUS));
+                reqMap.put(CASE_SENSITIVE, paramMap.get(CASE_SENSITIVE));
+            } else if (ACTION_SET_BUCKET_FTP.equals(paramMap.get("action"))) {
+                reqMap.put(FTP_ACL, paramMap.get(FTP_ACL));
+                reqMap.put(FS_STATUS, paramMap.get(FS_STATUS));
+                reqMap.put(ANONYMOUS, paramMap.get(ANONYMOUS));
+            } else if (ACTION_DEL_FS_QUOTA_INFO.equals(paramMap.get("action"))) {
+                reqMap.put(DIR_NAME, URLDecoder.decode(paramMap.getOrDefault(DIR_NAME, ""), "utf-8"));
+                reqMap.put(QUOTA_TYPE, paramMap.get(QUOTA_TYPE));
+                reqMap.put(UID, paramMap.get(UID));
             }
 
             addReqParam(paramMap, reqMap, msg);
@@ -306,7 +345,7 @@ public class DoubleActiveUtil {
             } else {
                 return sender.sendAndGetResponse(msg, BaseResMsg.class, false).getCode();
             }
-        } catch (MsException e) {
+        } catch (MsException | UnsupportedEncodingException e) {
             logger.error(e);
             return UNKNOWN_ERROR;
         }
@@ -991,10 +1030,30 @@ public class DoubleActiveUtil {
                 return ACTION_PUT_BUCKET_BACKUP;
             case MSG_TYPE_SITE_DEL_BACKUP:
                 return ACTION_DEL_BUCKET_BACKUP;
-            case MSG_TYPE_STIE_SET_AWS_SIGN:
+            case MSG_TYPE_SITE_SET_AWS_SIGN:
                 return ACTION_SET_AWS_SIGN;
             case MSG_TYPE_SITE_DELETE_AWS_SIGN:
                 return ACTION_DELETE_AWS_SIGN;
+            case MSG_TYPE_PUT_FS_DIR_QUOTA_INFO:
+                return ACTION_PUT_FS_DIR_QUOTA_INFO;
+            case MSG_TYPE_PUT_FS_USER_QUOTA_INFO:
+                return ACTION_PUT_FS_USER_QUOTA_INFO;
+            case MSG_TYPE_PUT_FS_GROUP_QUOTA_INFO:
+                return ACTION_PUT_FS_GROUP_QUOTA_INFO;
+            case MSG_TYPE_PUT_MULTi_FS_PERFORMANCE_QUOTA:
+                return ACTION_PUT_MULTI_FS_PERFORMANCE_QUOTA;
+            case MSG_TYPE_DEL_FS_QUOTA_INFO:
+                return ACTION_DEL_FS_QUOTA_INFO;
+            case MSG_TYPE_SET_BUCKET_NFS:
+                return ACTION_SET_BUCKET_NFS;
+            case MSG_TYPE_SET_BUCKET_CIFS:
+                return ACTION_SET_BUCKET_CIFS;
+            case MSG_TYPE_SET_BUCKET_FTP:
+                return ACTION_SET_BUCKET_FTP;
+            case MSG_TYPE_ADD_NFS_IP_WHITELISTS:
+                return ACTION_ADD_NFS_IP_WHITELISTS;
+            case MSG_TYPE_DEL_NFS_IP_WHITELISTS:
+                return ACTION_DEL_NFS_IP_WHITELISTS;
             default:
                 logger.error("unknown type {}", msgType);
                 return null;
@@ -1152,7 +1211,7 @@ public class DoubleActiveUtil {
     public static long getDataSizeFromRecord(UnSynchronizedRecord record) {
         try {
             if (record.isFSUnsyncRecord()) {
-                if (StringUtils.isBlank(record.headers.get("inodeData"))){
+                if (StringUtils.isBlank(record.headers.get("inodeData"))) {
                     return 0L;
                 }
                 Inode.InodeData inodeData = Json.decodeValue(record.headers.get("inodeData"), Inode.InodeData.class);
@@ -1358,6 +1417,16 @@ public class DoubleActiveUtil {
         Map<String, String> bucketInfo = pool.getCommand(REDIS_BUCKETINFO_INDEX).hgetall(bucketName);
         if (bucketInfo.isEmpty()) {
             throw new MsException(ErrorNo.NO_SUCH_BUCKET, "no such bucket. bucket_name: " + bucketName);
+        }
+
+        if (!containsFlag && !isSwitchOn(bucketInfo) && !LOCAL_SITE.equals(bucketInfo.get(CLUSTER_NAME))) {
+            throw new MsException(INVALID_SITE_CONSTRAINT, "the bucket does not belong to the current site.");
+        }
+    }
+
+    public static void siteConstraintCheck(Map<String, String> bucketInfo, boolean containsFlag) {
+        if (!isMultiAliveStarted) {
+            return;
         }
 
         if (!containsFlag && !isSwitchOn(bucketInfo) && !LOCAL_SITE.equals(bucketInfo.get(CLUSTER_NAME))) {

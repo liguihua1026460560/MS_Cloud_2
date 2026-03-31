@@ -205,6 +205,13 @@ public class BlockDevice {
         });
     }
 
+    public static synchronized void initDisk(String disk) {
+        // 获取锁后判断是否已经加载过
+        if (!map.containsKey(disk)) {
+            init();
+        }
+    }
+
     private String name;
     private String path;
     private long size;
@@ -336,7 +343,7 @@ public class BlockDevice {
     public static BlockDevice get(String lun) {
         BlockDevice res = map.get(lun);
         if (null == res && !DiskStatusChecker.isRebuildWaiter(lun)) {
-            init();
+            initDisk(lun);
             res = map.get(lun);
         }
 

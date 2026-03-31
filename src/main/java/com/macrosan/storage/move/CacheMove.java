@@ -7,6 +7,7 @@ import com.macrosan.ec.Utils;
 import com.macrosan.ec.rebuild.RemovedDisk;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.RequestResponseServerHandler;
+import com.macrosan.filesystem.tier.FileTierMove;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.FileMeta;
 import com.macrosan.message.socketmsg.SocketReqMsg;
@@ -74,6 +75,7 @@ public class CacheMove implements Runnable {
     private CacheMove(Map<String, List<StoragePool>> map) {
         this.strategyMap = map;
         poolStrategyMap = new ConcurrentHashMap<>();
+        fullUsedPool = new ConcurrentHashSet<>();
         for (Map.Entry<String, List<StoragePool>> entry : map.entrySet()) {
             List<StoragePool> list = entry.getValue();
             for (StoragePool pool : list) {
@@ -91,6 +93,7 @@ public class CacheMove implements Runnable {
     private Map<String, List<StoragePool>> strategyMap;
 
     private Map<String, Set<String>> poolStrategyMap;
+    private Set<String> fullUsedPool;
 
     private boolean deleteOldKeyCompeleted = false;
     private final CacheFlushConfigRefresher cacheFlushConfigRefresher = CacheFlushConfigRefresher.getInstance();
@@ -106,6 +109,7 @@ public class CacheMove implements Runnable {
                             CacheFlushConfig flushConfig = cacheFlushConfigRefresher.getFlushConfig(pool.getVnodePrefix());
                             int low = flushConfig.getLow();
                             int high = flushConfig.getHigh();
+                            int full = flushConfig.getFull();
                             // 清理旧版本存储在mq/rocks_db中的key-value
                             if (!deleteOldKeyCompeleted) {
                                 log.info("Starting deletion of old task key");
@@ -148,10 +152,26 @@ public class CacheMove implements Runnable {
                             }
 
                             long start = System.nanoTime();
-                            int n = scan(pool, RUN_ONCE);
-                            if (n > 0) {
+                            if (used >= full) {
+                                fullUsedPool.add(pool.getVnodePrefix());
+                            } else if (used < high) {
+                                fullUsedPool.remove(pool.getVnodePrefix());
+                            }
+                            int n = 0;
+                            //每次遍历扫两处，先扫描访问记录表，然后再扫描#表, 这里两次扫描可以串行
+                            if (isEnableCacheAccessTimeFlush(pool)) {
+                                int n0 = scanAccess(pool, RUN_ONCE);
+                                n += n0;
+                                if (n0 > 0) {
+                                    long time = (System.nanoTime() - start) / 1000_000L;
+                                    log.info("scan access {} {} {}ms", pool.getVnodePrefix(), n0, time);
+                                }
+                            }
+                            int n1 = scan(pool, RUN_ONCE);
+                            n += n1;
+                            if (n1 > 0) {
                                 long time = (System.nanoTime() - start) / 1000_000L;
-                                log.info("scan {} {} {}ms", pool.getVnodePrefix(), n, time);
+                                log.info("scan {} {} {}ms", pool.getVnodePrefix(), n1, time);
                             }
                             Set<String> set = poolStrategyMap.get(pool.getVnodePrefix());
                             List<String> list = new ArrayList<>(set);
@@ -166,9 +186,10 @@ public class CacheMove implements Runnable {
                                 runner.run();
                             }
 
+                            int finalNum = n;
                             return runner.res.delayElement(Duration.ofSeconds(10)).flatMap(b -> {
-                                        if (n > 0) {
-                                            log.info("start clear {} {} {}", pool.getVnodePrefix(), n, runNum);
+                                        if (finalNum > 0) {
+                                            log.info("start clear {} {} {}", pool.getVnodePrefix(), finalNum, runNum);
                                         }
                                         ClearTaskRunner clearRunner = new ClearTaskRunner(pool, mqDB);
                                         for (int i = 0; i < runNum; i++) {
@@ -179,8 +200,8 @@ public class CacheMove implements Runnable {
                                     .defaultIfEmpty(false)
                                     .onErrorReturn(false)
                                     .doFinally(s -> {
-                                        if (n > 0) {
-                                            log.info("move end {} {}", pool.getVnodePrefix(), n);
+                                        if (finalNum > 0) {
+                                            log.info("move end {} {}", pool.getVnodePrefix(), finalNum);
                                         }
                                     });
                         } catch (Exception e) {
@@ -320,29 +341,8 @@ public class CacheMove implements Runnable {
 
     private int scan(StoragePool pool, int max) {
         String[] disks = getCurNodePoolDisk(pool);
-        /**************************** 开启数据分层 ********************/
-        int total = 0;
-        log.debug("isEnableCacheAccessTimeFlush:{}", isEnableCacheAccessTimeFlush(pool));
-        if (isEnableCacheAccessTimeFlush(pool)) {
-            LocalTime startTime = LocalTime.MIN;
-            LocalTime endTime = LocalTime.MAX;
-
-            LocalTime now = LocalTime.now();
-            if (now.isAfter(startTime) && now.isBefore(endTime)) {
-                //开启分层这里只按照最后访问时间表进行扫描
-                //且配置一个开启时间，到达每天的指定时间后再触发扫描
-                //扫描一定数量的数据，当前时间戳据上次访问时间大于30天进行下刷
-                total = scanByAccessTime(pool, max, new LinkedList<>(Arrays.asList(disks)));
-                log.debug("scanByAccessTime:{}", total);
-            } else {
-                return 0;//不执行
-            }
-
-        } else {
-            // 先按照上传时间进行扫描
-            total = orderedScan(pool, max, new LinkedList<>(Arrays.asList(disks)));
-        }
-
+        // 先按照上传时间进行扫描
+        int total = orderedScan(pool, max, new LinkedList<>(Arrays.asList(disks)));
         if (total == max) {
             return total;
         }
@@ -356,6 +356,34 @@ public class CacheMove implements Runnable {
         }
 
         return max - remainingSacnNum;
+    }
+
+    /**
+     * 仅扫描访问记录表
+     *
+     * @param pool
+     * @param max
+     * @return
+     */
+    private int scanAccess(StoragePool pool, int max) {
+        String[] disks = getCurNodePoolDisk(pool);
+        /**************************** 开启数据分层 ********************/
+        int total = 0;
+        log.debug("isEnableCacheAccessTimeFlush:{}", isEnableCacheAccessTimeFlush(pool));
+        LocalTime startTime = LocalTime.MIN;
+        LocalTime endTime = LocalTime.MAX;
+
+        LocalTime now = LocalTime.now();
+        if (now.isAfter(startTime) && now.isBefore(endTime)) {
+            //开启分层这里只按照最后访问时间表进行扫描
+            //且配置一个开启时间，到达每天的指定时间后再触发扫描
+            //扫描一定数量的数据，当前时间戳据上次访问时间大于30天进行下刷
+            total = scanByAccessTime(pool, max, new LinkedList<>(Arrays.asList(disks)));
+            log.debug("scanByAccessTime:{}", total);
+            return total;
+        } else {
+            return 0;//不执行
+        }
     }
 
     /**
@@ -430,6 +458,7 @@ public class CacheMove implements Runnable {
         return total + scanByAccessTime(pool, (scanNum - total), disks);
 
     }
+
     public int scanCacheDisk(StoragePool pool, String disk, int scanNum, ScanType scanType) {
         AtomicInteger n = new AtomicInteger(0);
         if (scanNum == 0) {
@@ -469,16 +498,9 @@ public class CacheMove implements Runnable {
          * 扫描key时判断是否大于结束key，大于就不再进行扫描
          */
         boolean isEnd = false;
-        String marker = "";
-        if (isEnableCacheAccessTimeFlush(pool) && ScanType.DEFAULT.equals(scanType)) {
-            marker = redisConnPool.getShortMasterCommand(15).hget("access_flush_marker_" + pool.getVnodePrefix(), this.node);
-        }
+
         try (MSRocksIterator iterator = cacheDb.newIterator()) {
-            if (StringUtils.isNotEmpty(marker)) {
-                iterator.seek(marker.getBytes());
-            } else {
-                iterator.seek(keyPrefix.getBytes());
-            }
+            iterator.seek(keyPrefix.getBytes());
             while (iterator.isValid() && n.get() < scanNum) {
                 String key = new String(iterator.key());
                 if (!key.startsWith(keyPrefix)) {
@@ -519,33 +541,45 @@ public class CacheMove implements Runnable {
                         break;
                 }
                 if (isEnd) {
-                    log.debug("scan access record over in {}",  disk);
+                    log.debug("scan access record over in {}", disk);
                     break;
                 }
 
                 if (null != meta && null != meta.getMetaKey()) {
-                    if (isEnableCacheAccessTimeFlush(pool)) {//开启了访问时间分层之后，之前扫“}”表结束，这里继续扫“#”对本次开启分层前已存在的数据进行处理
+                    if (isEnableCacheAccessTimeFlush(pool) && !fullUsedPool.contains(pool.getVnodePrefix())) {//判断是否处在高负载恢复期
+
+                        //获取桶名
+                        String[] fileNameSplit = meta.getFileName().split("_", 3);
+                        String bucket = fileNameSplit[1];
+                        String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucket);
+
+                        //如果先判断是否存在lastAccessStamp
                         if (StringUtils.isNotEmpty(meta.getLastAccessStamp())) {
-                            if (meta.getLastAccessStamp().compareTo(String.valueOf(endStamp)) < 0) {
-                                //这里如果fileMeta中的lastAccessStamp是上次开启分层时更新的，然后后面关闭了分层后就没再更新，本次开启分层后还未进行访问，缓存盘中的访问记录还是上次的
-                                //如果访问记录中或者fileMeta中上次的访问时间戳在处理范围内，则进行下刷，无论是否访问都按照冷数据处理，就不再统一用本次开启分层的时间作为其访问时间了
-                                recordTask(pool, meta, disk, n);
+                            if (ScanType.BY_ACCESS_TIME.equals(scanType)) {
+                                if (isEnableCacheAccessTimeFlush(strategy)) {//如果策略开启分层
+                                    if (meta.getLastAccessStamp().compareTo(String.valueOf(endStamp)) < 0) {
+                                        //这里如果fileMeta中的lastAccessStamp是上次开启分层时更新的，然后后面关闭了分层后就没再更新，本次开启分层后还未进行访问，缓存盘中的访问记录还是上次的
+                                        //如果访问记录中或者fileMeta中上次的访问时间戳在处理范围内，则进行下刷，无论是否访问都按照冷数据处理，就不再统一用本次开启分层的时间作为其访问时间了
+                                        recordTask(pool, meta, disk, n);
+                                    }
+
+                                } else {
+                                    recordTask(pool, meta, disk, n);
+                                }
                             }
                         } else {
-                            //无访问时间属性，使用开启分层功能的时间作为其最后访问时间
-                            log.debug("endStamp:{}, flag:{}", endStamp, getEnableLayeringStamp(pool).compareTo(String.valueOf(endStamp)) < 0);
-                            if (getEnableLayeringStamp(pool).compareTo(String.valueOf(endStamp)) < 0) {
+                            if (isEnableCacheAccessTimeFlush(strategy)) {
+                                if (getEnableLayeringStamp(strategy).compareTo(String.valueOf(endStamp)) < 0) {
+                                    recordTask(pool, meta, disk, n);
+                                }
+                            } else {
                                 recordTask(pool, meta, disk, n);
                             }
                         }
+
+
                     } else {
                         recordTask(pool, meta, disk, n);
-                    }
-                }
-                if (isEnableCacheAccessTimeFlush(pool) && ScanType.DEFAULT.equals(scanType)) {
-                    if (scanNum == n.get()) {
-                        marker = key;
-                        redisConnPool.getShortMasterCommand(15).hset("access_flush_marker_" + pool.getVnodePrefix(), this.node, marker);//关闭分层后maker也需要被清除
                     }
                 }
 
@@ -650,6 +684,7 @@ public class CacheMove implements Runnable {
     }
 
     private static CacheMove move = null;
+    private static FileTierMove tierFileMove = null;
 
     public static void dealPools(String strategyName, StoragePool... cachePools) {
         List<StoragePool> list = Arrays.asList(cachePools);
@@ -658,17 +693,32 @@ public class CacheMove implements Runnable {
             map.put(strategyName, list);
             move = new CacheMove(map);
             ErasureServer.DISK_SCHEDULER.schedule(move, 30_000L, TimeUnit.MILLISECONDS);
+            tierFileMove = new FileTierMove(map);
+            ErasureServer.DISK_SCHEDULER.schedule(tierFileMove, 30_000L, TimeUnit.MILLISECONDS);
         } else {
             move.refreshPoolMap(strategyName, list);
+            tierFileMove.refreshPoolMap(strategyName, list);
         }
+    }
+
+    public static List<StoragePool> getPools(String strategyName) {
+        if (move == null) {
+            return Collections.emptyList();
+        }
+        return move.strategyMap.getOrDefault(strategyName, Collections.emptyList());
     }
 
     public static boolean isEnableCacheOrderFlush(StoragePool cachePool) {
         return cachePool.getVnodePrefix().startsWith("cache") && CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).isEnableOrderedFlush();
     }
 
+    public static int getCachePoolFullWaterMark(StoragePool cachePool) {
+        return CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).getFull();
+    }
+
     /**
      * 判断是否开启分层下刷
+     *
      * @param cachePool
      * @return
      */
@@ -684,6 +734,26 @@ public class CacheMove implements Runnable {
         return CacheFlushConfigRefresher.getInstance().getFlushConfig(cachePool.getVnodePrefix()).getEnableLayeringStamp();
     }
 
+    public static List<StoragePool> getCachePools(String strategyName) {
+        return move.getStrategyMap().get(strategyName);
+    }
+
+    public static boolean needDeleteDataInDataPool(String strategy) {
+        return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).isDelDataWhenBackStore();
+    }
+
+
+    private Map<String, List<StoragePool>> getStrategyMap() {
+        return strategyMap;
+    }
+
+    public static boolean isEnableCacheAccessTimeFlush(String strategy) {
+        return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).isEnableAccessTimeFlush();
+    }
+
+    public static String getEnableLayeringStamp(String strategy) {
+        return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).getEnableLayeringStamp();
+    }
 
 
     public enum ScanType {

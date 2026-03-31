@@ -84,7 +84,7 @@ public class SyncSignService extends BaseService {
 
         String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
         String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
-        if (!DoubleActiveUtil.dealSiteSyncRequest(paramMap, MSG_TYPE_STIE_SET_AWS_SIGN, localCluster, masterCluster)) {
+        if (!DoubleActiveUtil.dealSiteSyncRequest(paramMap, MSG_TYPE_SITE_SET_AWS_SIGN, localCluster, masterCluster)) {
             return new ResponseMsg().setHttpCode(SUCCESS);
         }
 

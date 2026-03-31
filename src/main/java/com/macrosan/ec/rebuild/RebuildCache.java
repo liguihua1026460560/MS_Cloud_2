@@ -322,12 +322,13 @@ public class RebuildCache {
                 String secretKey = task.map.get("secretKey");
                 String flushStamp = task.map.get("flushStamp");
                 String lastAccessStamp = task.map.get("lastAccessStamp");
+                String fileOffset = task.map.get("fileOffset");
                 taskRes = Mono.just(fileName.contains("#"))
                         .flatMap(isCopyObjFileMeta -> {
                             if (isCopyObjFileMeta) {
-                                return runningTask.task.copyObjectFileRebuilder.rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, 0);
+                                return runningTask.task.copyObjectFileRebuilder.rebuildCopyObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, fileOffset, 0);
                             } else {
-                                return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp);
+                                return TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, fileOffset);
                             }
                         })
                         .doOnNext(b -> {

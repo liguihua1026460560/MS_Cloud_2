@@ -14,6 +14,7 @@ import com.macrosan.doubleActive.deployment.AddClusterHandler;
 import com.macrosan.doubleActive.deployment.BucketSyncChecker;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.server.ErasureServer;
+import com.macrosan.filesystem.utils.acl.ACLUtils;
 import com.macrosan.httpserver.MossHttpClient;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.BucketInfo;
@@ -280,6 +281,7 @@ public class HeartBeatChecker {
             isNotDeleteEs = "false".equals(masterClusterMap.getOrDefault("deleteEs", "false"));
             if (!isMultiAliveStarted && !masterClusterMap.isEmpty()) {
                 log.info("sync data modules start.");
+                ACLUtils.init(false);
                 MossHttpClient.getInstance().init();
                 MainNodeSelector.getInstance().init();
                 DataSynChecker.getInstance().init();

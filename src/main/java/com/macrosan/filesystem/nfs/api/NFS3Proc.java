@@ -2,7 +2,6 @@ package com.macrosan.filesystem.nfs.api;
 
 import com.macrosan.action.managestream.FSPerformanceService;
 import com.macrosan.constants.ErrorNo;
-import com.macrosan.constants.SysConstants;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.VersionUtil;
 import com.macrosan.filesystem.FsUtils;
@@ -10,8 +9,6 @@ import com.macrosan.filesystem.ReqInfo;
 import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.cache.ReadObjCache;
 import com.macrosan.filesystem.cache.WriteCache;
-import com.macrosan.filesystem.cifs.SMB2;
-import com.macrosan.filesystem.cifs.types.smb2.FsFullSizeInfo;
 import com.macrosan.filesystem.lock.redlock.LockType;
 import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.nfs.*;
@@ -63,9 +60,9 @@ import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
 import static com.macrosan.filesystem.cache.ReadObjCache.readCacheDebug;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.getBucketName;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.FS_DIR_QUOTA;
+import static com.macrosan.filesystem.utils.FsTierUtils.*;
 import static com.macrosan.filesystem.utils.InodeUtils.*;
 import static com.macrosan.filesystem.utils.acl.ACLUtils.DEFAULT_ANONY_UID;
-import static com.macrosan.filesystem.utils.acl.ACLUtils.checkId;
 import static com.macrosan.message.jsonmsg.Inode.*;
 
 @Log4j2
@@ -177,7 +174,7 @@ public class NFS3Proc {
                                     return Mono.just(reply);
                                 }));
                     } else {
-                        log.info("the fsid {} does not exits,or bucket:{} does not open NFS,or the client ip is not allow to access.", fh.fsid, reqHeader.bucket);
+                        NFSBucketInfo.logFsidInfo(fh.fsid, reqHeader.bucket);
                         reply.status = NFS3ERR_STALE;
                     }
                     return Mono.just(reply);
@@ -413,7 +410,16 @@ public class NFS3Proc {
                             });
                 }).onErrorResume(e -> {
                     if (inodes[0] != null) {
-                        log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                        if (e instanceof NFSException) {
+                            int stat = ((NFSException) e).getErrCode();
+                            if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                FSQuotaUtils.logQuotaExceeded(inodes[0], e);
+                            } else {
+                                log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                            }
+                        } else {
+                            log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                        }
                     } else {
                         log.error("", e);
                     }
@@ -1064,6 +1070,7 @@ public class NFS3Proc {
             readReply.attrFollows = 0;
             return Mono.just(readReply);
         }
+        Inode[] accessInode = new Inode[1];
         return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_read.name() + "-" + THROUGHPUT_QUOTA, 1L)
                 .flatMap(waitMillis -> {
                     String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
@@ -1081,6 +1088,7 @@ public class NFS3Proc {
                         readReply.data = new byte[0];
                         return Mono.just(readReply);
                     }
+                    accessInode[0] = inode.clone();
 
                     MonoProcessor<ReadReply> res = MonoProcessor.create();
                     List<Inode.InodeData> inodeData = inode.getInodeData();
@@ -1224,6 +1232,10 @@ public class NFS3Proc {
                                     return Mono.just(readReply);
                                 });
                     }
+                })
+                .map(res -> (RpcReply) (res))
+                .doFinally(r -> {
+                    fileFsAccessHandle(accessInode[0]);
                 });
     }
 

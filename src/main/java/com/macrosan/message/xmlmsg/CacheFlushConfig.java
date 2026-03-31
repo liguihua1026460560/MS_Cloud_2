@@ -60,9 +60,6 @@ public class CacheFlushConfig {
         this.enableOrderedFlush = Boolean.parseBoolean(map.getOrDefault(ENABLE_ORDERED_FLUSH_KEY, DEFAULT_ENABLE_ORDERED_FLUSH));
         this.enableAccessTimeFlush = Boolean.parseBoolean(map.getOrDefault(ENABLE_ACCESS_FLUSH_KEY, DEFAULT_ENABLE_ACCESS_FLUSH));//开启分层时需要同时设置当前开启的时间戳
         this.lowFrequencyAccessDays = Integer.parseInt(map.getOrDefault(LOW_FREQUENCY_ACCESS_DAYS_KEY, DEFAULT_LOW_FREQUENCY_ACCESS_DAYS));
-        if  (this.enableAccessTimeFlush) {
-            this.enableLayeringStamp = map.getOrDefault(ENABLE_LAYERING_STAMP_KEY, String.valueOf(System.currentTimeMillis()));//默认配置这个属性可以不设置
-        }
         this.delayedFlushWaterMark = Integer.parseInt(map.getOrDefault(DELAYED_FLUSH_WATER_MARK_KEY, DEFAULT_DELAYED_FLUSH_WATER_MARK));
         this.low = Integer.parseInt(map.getOrDefault(LOW_WATER_MARK_KEY, DEFAULT_LOW_WATER_MARK));
         this.high = Integer.parseInt(map.getOrDefault(HIGH_WATER_MARK_KEY, DEFAULT_HIGH_WATER_MARK));

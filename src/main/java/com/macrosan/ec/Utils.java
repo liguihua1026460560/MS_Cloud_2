@@ -622,6 +622,9 @@ public class Utils {
     }
 
     public static long getObjectSize(MetaData metaData) {
+        if (metaData.getSysMetaData() == null) {
+            return metaData.endIndex - metaData.startIndex + 1;
+        }
         Map<String, String> sysMetaMap = Json.decodeValue(metaData.getSysMetaData(), new TypeReference<Map<String, String>>() {
         });
         if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {

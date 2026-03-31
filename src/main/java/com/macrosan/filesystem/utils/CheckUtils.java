@@ -294,6 +294,12 @@ public class CheckUtils {
         return redisConnPool.getCommand(REDIS_BUCKETINFO_INDEX).hexists(bucketName, "fsid");
     }
 
+    public static void bucketFsCheck(Map<String, String> bucketInfo){
+        if (bucketInfo.containsKey("fsid")){
+            throw new MsException(ErrorNo.NFS_NOT_STOP, "The bucket already start nfs or cifs");
+        }
+    }
+
     public static void validateNfsCanEnabled(String bucketName, Map<String, String> bucketMap) {
         // 若开启了多版本
         if ("Enabled".equals(bucketMap.get("versionstatus"))) {

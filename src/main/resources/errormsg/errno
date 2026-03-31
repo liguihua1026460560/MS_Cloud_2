@@ -560,6 +560,7 @@
 2934=DeleteSourceConflict/Delete source conflict./400
 2935=ImageSizeTooLarge/The image size too large./400
 2936=NotSupportedComponentParam/The component param is not supported./400
+2937=WaterMarkerImageNotFound/The waterMarker image not found./404
 
 2707=RoleNotExists/The requested role does not exist./404
 2708=RoleExisted/Role already exists./400

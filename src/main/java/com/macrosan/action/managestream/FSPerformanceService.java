@@ -4,6 +4,7 @@ import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.redis.Redis6380ConnPool;
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.doubleActive.DoubleActiveUtil;
 import com.macrosan.message.mqmessage.ResponseMsg;
 import com.macrosan.message.xmlmsg.BucketAddressFSPerfQuota;
 import com.macrosan.message.xmlmsg.BucketFSPerfQuota;
@@ -20,8 +21,10 @@ import org.eclipse.collections.impl.map.mutable.UnifiedMap;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static com.macrosan.constants.ErrorNo.SUCCESS_STATUS;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.doubleActive.DoubleActiveUtil.notifySlaveSite;
 
 @Log4j2
 public class FSPerformanceService extends BaseService {
@@ -197,6 +200,7 @@ public class FSPerformanceService extends BaseService {
     }
 
     public ResponseMsg putBucketAddressPerformanceQuota(UnifiedMap<String, String> paramMap) {
+        log.info("putBucketAddressPerformanceQuota {}", paramMap);
         String userId = paramMap.get(USER_ID);
         String bucketName = paramMap.get(BUCKET_NAME);
         String type = paramMap.get(PERFORMANCE_QUOTA_TYPE);
@@ -222,6 +226,12 @@ public class FSPerformanceService extends BaseService {
             throw new MsException(ErrorNo.NO_BUCKET_PERMISSION,
                     "no permission.user " + userId + " can not get bucket performance quota.");
         }
+        DoubleActiveUtil.siteConstraintCheck(bucketInfo, paramMap.containsKey(SITE_FLAG) || paramMap.containsKey(SITE_FLAG.toLowerCase()));
+        String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
+        String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
+        if (!DoubleActiveUtil.dealSiteSyncRequest(new UnifiedMap<>(paramMap), MSG_TYPE_PUT_ADDRESS_PERFORMANCE_QUOTA, localCluster, masterCluster)) {
+            return new ResponseMsg();
+        }
 
         checkBucketIsNFS(bucketName);
         checkMountRecord(bucketName, address);
@@ -231,10 +241,15 @@ public class FSPerformanceService extends BaseService {
         pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hset(key0, redisKey, quota);
         clearTokenBucketData(key0, redisKey);
 
+        int resCode = notifySlaveSite(paramMap, ACTION_PUT_ADDRESS_PERFORMANCE_QUOTA);
+        if (resCode != SUCCESS_STATUS) {
+            throw new MsException(resCode, "master delete bucket error");
+        }
         return new ResponseMsg();
     }
 
     public ResponseMsg putBucketMultipleFSPerformanceQuota(UnifiedMap<String, String> paramMap) {
+        log.info("putBucketMultipleFSPerformanceQuota {}", paramMap);
         String bodyStr = paramMap.get(BODY);
         String userId = paramMap.get(USER_ID);
         String bucketName = paramMap.get(BUCKET_NAME);
@@ -251,6 +266,14 @@ public class FSPerformanceService extends BaseService {
         if (StringUtils.isBlank(bodyStr)) {
             throw new MsException(ErrorNo.INPUT_EMPTY_OBJECT, "no body content in multiFSPerf request");
         }
+
+        DoubleActiveUtil.siteConstraintCheck(bucketInfo, paramMap.containsKey(SITE_FLAG) || paramMap.containsKey(SITE_FLAG.toLowerCase()));
+        String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
+        String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
+        if (!DoubleActiveUtil.dealSiteSyncRequest(new UnifiedMap<>(paramMap), MSG_TYPE_PUT_MULTi_FS_PERFORMANCE_QUOTA, localCluster, masterCluster)) {
+            return new ResponseMsg();
+        }
+
         BucketFSPerfQuota bucketFSPerfQuota = (BucketFSPerfQuota) JaxbUtils.toObject(bodyStr);
         for (InstancePerformanceQuota instancePerformanceQuota : bucketFSPerfQuota.getInstancePerformanceQuotaList()) {
             String instance0 = instancePerformanceQuota.getName();
@@ -263,6 +286,11 @@ public class FSPerformanceService extends BaseService {
             }
             dealSingleInstanceQuota(bucketName, instancePerformanceQuota, instance, THROUGHPUT_QUOTA, address);
             dealSingleInstanceQuota(bucketName, instancePerformanceQuota, instance, BAND_WIDTH_QUOTA, address);
+        }
+
+        int resCode = notifySlaveSite(paramMap, ACTION_PUT_MULTI_FS_PERFORMANCE_QUOTA);
+        if (resCode != SUCCESS_STATUS) {
+            throw new MsException(resCode, "master delete bucket error");
         }
 
         return new ResponseMsg();

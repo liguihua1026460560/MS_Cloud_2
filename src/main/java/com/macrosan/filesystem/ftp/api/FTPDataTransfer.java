@@ -13,6 +13,7 @@ import com.macrosan.filesystem.ftp.Session;
 import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
+import com.macrosan.filesystem.utils.FsTierUtils;
 import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.httpserver.DateChecker;
 import com.macrosan.message.jsonmsg.Inode;
@@ -184,6 +185,9 @@ public class FTPDataTransfer {
                                     } else {
                                         return ERROR_ON_INPUT_FILE.reply();
                                     }
+                                })
+                                .doFinally(s -> {
+                                    FsTierUtils.fileS3AccessHandle(metaData);
                                 });
                     });
 

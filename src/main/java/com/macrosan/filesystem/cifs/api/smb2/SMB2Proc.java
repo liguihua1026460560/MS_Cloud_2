@@ -17,12 +17,17 @@ import com.macrosan.filesystem.cifs.lease.LeaseClient;
 import com.macrosan.filesystem.cifs.lease.LeaseLock;
 import com.macrosan.filesystem.cifs.lock.CIFSLockClient;
 import com.macrosan.filesystem.cifs.reply.smb2.*;
+import com.macrosan.filesystem.cifs.rpc.pdu.call.RpcRequestCall;
 import com.macrosan.filesystem.cifs.shareAccess.ShareAccessClient;
 import com.macrosan.filesystem.cifs.shareAccess.ShareAccessLock;
 import com.macrosan.filesystem.cifs.types.Session;
 import com.macrosan.filesystem.cifs.types.smb2.CreateContext;
+import com.macrosan.filesystem.cifs.types.smb2.IOCTLSubCall;
 import com.macrosan.filesystem.cifs.types.smb2.QueryDirInfo;
 import com.macrosan.filesystem.cifs.types.smb2.SMB2FileId;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.BindPduInfo;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.RpcBindGenerator;
+import com.macrosan.filesystem.cifs.types.smb2.pipe.RpcPipeType;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
@@ -35,6 +40,8 @@ import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.perf.AddressFSPerfLimiter;
 import com.macrosan.utils.perf.BucketFSPerfLimiter;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
@@ -45,6 +52,7 @@ import reactor.util.function.Tuples;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -67,10 +75,13 @@ import static com.macrosan.filesystem.cifs.handler.SMBHandler.localIpDebug;
 import static com.macrosan.filesystem.cifs.reply.smb1.TreeConnectXReply.FILE_ALL_ACCESS;
 import static com.macrosan.filesystem.cifs.reply.smb1.TreeConnectXReply.STANDARD_RIGHTS_ALL_ACCESS;
 import static com.macrosan.filesystem.cifs.reply.smb2.CreateReply.*;
+import static com.macrosan.filesystem.cifs.rpc.RPCConstants.*;
 import static com.macrosan.filesystem.cifs.shareAccess.ShareAccessLock.FILE_CHECK_SHAREACCESS;
 import static com.macrosan.filesystem.cifs.types.smb2.SMB2FileId.isFileNeedDelete;
 import static com.macrosan.filesystem.cifs.types.smb2.SMB2FileId.needDeleteSet;
+import static com.macrosan.filesystem.cifs.types.smb2.pipe.CreatePipe.createVirtualRpcPipeInode;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.SMB_CAP_QUOTA_FILE_NAME;
+import static com.macrosan.filesystem.utils.FsTierUtils.*;
 import static com.macrosan.filesystem.utils.InodeUtils.isError;
 import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
@@ -115,7 +126,7 @@ public class SMB2Proc {
                             createDurableHandleV2.timeout = 300_000;
                             body.getContexts().add(createDurableHandleV2);
                             break;
-                        case "AlSi" : // 设置新创建或覆盖文件的分配大小, 不需要返回
+                        case "AlSi": // 设置新创建或覆盖文件的分配大小, 不需要返回
                             CreateContext.CreateAllocationSize createAllocationSize = (CreateContext.CreateAllocationSize) context;
                             if (createAllocationSize.allocationSize != 0) {
                                 SMB2FileId.FileInfo fileInfo = body.getFileId().getFileInfo(body.getFileId());
@@ -347,20 +358,36 @@ public class SMB2Proc {
                 .doOnNext(b -> CIFSLockClient.close(smb2FileId, node, header));
     }
 
-    @SMB2.Smb2Opt(SMB2_CREATE)
+    @SMB2.Smb2Opt(value = SMB2_CREATE, allowIPCSession = true)
     public Mono<SMB2Reply> create(SMB2Header header, Session session, CreateCall call) {
         String obj = new String(call.getFileName()).replace("\\", "/");
-        String bucket = NFSBucketInfo.getBucketName(header.tid);
-        FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
         SMB2Reply reply = new SMB2Reply(header);
         CreateReply body = new CreateReply();
 
         body.setOplockLevel(call.getOplockLevel());
-        ReqInfo reqHeader = new ReqInfo();
-        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
-        reqHeader.bucket = bucket;
 
-        String s3Id = session.getTreeAccount(header.getTid());
+        // 提前判断是否是命名管道，todo 其余管道仍然返 STATUS_OBJECT_NAME_NOT_FOUND
+        // tid=-1，管道类型 obj名字，
+        int pipeClass = RpcPipeType.judgePipe(obj, header.tid);
+        if (pipeClass != -1) {
+            if (pipeClass == 1) {
+                reply.getHeader().setStatus(STATUS_OBJECT_NAME_NOT_FOUND);
+                return Mono.just(reply);
+            } else {
+                Optional<RpcPipeType> rpcTypeOpt = RpcPipeType.fromFileName(obj);
+                RpcPipeType pipeType = rpcTypeOpt.get();
+                long id0 = SMB2FileId.getId();
+                Inode rpcInode = createVirtualRpcPipeInode(pipeType);
+                boolean[] isLink = {false};
+                Inode[] linkInode = new Inode[1];
+                mapToCreateReply(body, rpcInode, FILE_OPEND, 1L, header.getCompoundRequest(), call.getCreateOptions(), null, id0, isLink[0], linkInode[0]);
+                reply.setBody(body);
+                reply.getHeader().setStatus(STATUS_SUCCESS);
+                return execContext(call, body, rpcInode, header, reply, session);
+            }
+        }
+
+
         boolean[] caseSensitive = {SMB2.caseSensitive};
 
         // 检查桶是否开启文件共享，若已关闭则返错；创建inode需要用到父目录的nodeId，因此先lookup父目录
@@ -371,6 +398,16 @@ public class SMB2Proc {
                         return Mono.just(reply);
                     }
                     log.debug("caseSensitive public:bucket={}:{}", SMB2.caseSensitive, caseSensitive[0]);
+
+                    String bucket = NFSBucketInfo.getBucketName(header.tid);
+                    FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
+
+                    ReqInfo reqHeader = new ReqInfo();
+                    reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
+                    reqHeader.bucket = bucket;
+
+                    String s3Id = session.getTreeAccount(header.getTid());
+
                     return Mono.just(CifsUtils.getParentDirName(obj))
                             .flatMap(dirObj -> {
                                 if (StringUtils.isEmpty(dirObj)) {
@@ -731,7 +768,7 @@ public class SMB2Proc {
 
     }
 
-    @SMB2.Smb2Opt(SMB2_GETINFO)
+    @SMB2.Smb2Opt(value = SMB2_GETINFO, allowIPCSession = true)
     public Mono<SMB2Reply> getInfo(SMB2Header header, Session session, GetInfoCall call) {
         SMB2Reply reply = new SMB2Reply(header);
         reply.getHeader().setCompoundRequest(header.getCompoundRequest());
@@ -750,20 +787,52 @@ public class SMB2Proc {
         }
     }
 
-    @SMB2.Smb2Opt(value = SMB2_WRITE)
+    @SMB2.Smb2Opt(value = SMB2_WRITE, allowIPCSession = true)
     public Mono<SMB2Reply> write(SMB2Header header, Session session, WriteCall call) {
         SMB2Reply reply = new SMB2Reply(header);
         WriteReply body = new WriteReply();
+        SMB2FileId.FileInfo fileInfo = call.fileId.getFileInfo(header.getCompoundRequest());
+        if (fileInfo == null) {
+            reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_FILE_CLOSED);
+            return Mono.just(reply);
+        }
+        SMB2FileId.updateFileInfo(header.getCompoundRequest(), call.fileId, fileInfo);
+
+        Optional<RpcPipeType> rpcTypeOpt = RpcPipeType.fromFileName(fileInfo.obj);
+
+        if (rpcTypeOpt.isPresent()) {
+            BindPduInfo bindPdu = new BindPduInfo();
+            byte[] data = call.data;
+
+            if (data == null || data.length < 28) {
+                log.debug("SMB2_WRITE 数据区太短，无法解析 Bind PDU: length={}, expected >=28",
+                        data == null ? 0 : data.length);
+                body.structSize = 0x0011;
+                body.writeCount = 0;
+                reply.setBody(body);
+                return Mono.just(reply);
+            }
+
+            ByteBuf buf = Unpooled.wrappedBuffer(data);
+            byte pduType = buf.getByte(2);
+            if (pduType == BIND){
+                bindPdu.readStruct(buf, 0);
+                fileInfo.bindPduInfo = bindPdu;
+            } else if (pduType == REQUEST) {
+                IOCTLSubCall.pipeTrans subCall = new IOCTLSubCall.pipeTrans();
+                subCall.readStruct(buf, 0);
+                RpcRequestCall rpcRequestCall = subCall.rpcRequestCall;
+                fileInfo.rpcRequestCall = rpcRequestCall;
+            }
+            body.structSize = 0x0011;
+            body.writeCount = call.dataLength;
+            reply.setBody(body);
+            return Mono.just(reply);
+        }
         String bucket = NFSBucketInfo.getBucketName(header.tid);
         FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
         if (CheckUtils.checkIfOverFlow(call.writeOffset, call.dataLength)) {
             reply.getHeader().setStatus(STATUS_IO_DEVICE_ERROR);
-            return Mono.just(reply);
-        }
-
-        SMB2FileId.FileInfo fileInfo = call.fileId.getFileInfo(header.getCompoundRequest());
-        if (fileInfo == null) {
-            reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_FILE_CLOSED);
             return Mono.just(reply);
         }
 
@@ -804,7 +873,7 @@ public class SMB2Proc {
                         } else {
                             fileInfo.updateTimeOnClose = true;
                             writeRes = qosMono
-                                    .flatMap(q-> FSQuotaUtils.checkFsQuota(inode))
+                                    .flatMap(q -> FSQuotaUtils.checkFsQuota(inode))
                                     .flatMap(l -> WriteCache.getCache(bucket, inode.getNodeId(), call.writeFlags, inode.getStorage(), true))
                                     .flatMap(writeCache -> {
                                         writeCacheReference.set(writeCache);
@@ -867,19 +936,64 @@ public class SMB2Proc {
         }
     }
 
-    @SMB2.Smb2Opt(value = SMB2_READ)
+    @SMB2.Smb2Opt(value = SMB2_READ, allowIPCSession = true)
     public Mono<SMB2Reply> read(SMB2Header header, Session session, ReadCall call) {
         SMB2Reply reply = new SMB2Reply(header);
         SMB2Header replyHeader = reply.getHeader();
         ReadReply body = new ReadReply();
-        String bucket = NFSBucketInfo.getBucketName(header.tid);
-        FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
+
         SMB2FileId.FileInfo fileInfo = call.fileId.getFileInfo(header.getCompoundRequest());
-        body.flags = call.flags;
         if (fileInfo == null) {
             reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_FILE_CLOSED);
             return Mono.just(reply);
         }
+        SMB2FileId.updateFileInfo(header.getCompoundRequest(), call.fileId, fileInfo);
+
+        Optional<RpcPipeType> rpcTypeOpt = RpcPipeType.fromObjName(fileInfo.obj);
+        if (rpcTypeOpt.isPresent()) {
+            RpcPipeType pipeType = rpcTypeOpt.get();
+            byte pduType;
+
+            BindPduInfo bindPduInfo = fileInfo.bindPduInfo;
+            RpcRequestCall rpcRequestCall = fileInfo.rpcRequestCall;
+            if (bindPduInfo != null){
+                pduType = bindPduInfo.getPduType();
+            } else if (rpcRequestCall != null) {
+                pduType = rpcRequestCall.header.packetType;
+            } else {
+                body.dataLen = 0;
+                body.data = new byte[0];
+                reply.setBody(body);
+                reply.getHeader().setStatus(STATUS_SUCCESS);
+                return Mono.just(reply);
+            }
+
+            byte[] response;
+
+            if (pduType == BIND) {
+                response = RpcBindGenerator.generateBindAck(bindPduInfo, pipeType);
+                fileInfo.bindPduInfo = null;
+            } else if (pduType == ALTER_CONTEXT) {
+                response = RpcBindGenerator.generateAlterContextResp(bindPduInfo, pipeType);
+                fileInfo.bindPduInfo = null;
+            } else if (pduType == REQUEST) {
+                response = RpcBindGenerator.generateRequestPdu(rpcRequestCall, fileInfo);
+                fileInfo.rpcRequestCall = null;
+            } else {
+                log.debug("Unexpected pduType in cache: 0x{:02X} for pipe: {}", pduType, fileInfo.obj);
+                response = new byte[0];
+            }
+
+            body.dataLen = response.length;
+            body.data = response;
+            reply.setBody(body);
+            return Mono.just(reply);
+        }
+
+        String bucket = NFSBucketInfo.getBucketName(header.tid);
+        FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
+        body.flags = call.flags;
+        Inode[] accessInode = new Inode[1];
         SMB2FileId smb2FileId = (header.getCompoundRequest() != null && header.getCompoundRequest().getFileId() != null) ? header.getCompoundRequest().getFileId() : call.fileId;
         return BucketFSPerfLimiter.getInstance().limits(bucket, fs_read.name() + "-" + THROUGHPUT_QUOTA, 1L)
                 .flatMap(waitMillis -> {
@@ -928,6 +1042,7 @@ public class SMB2Proc {
                         log.info("fail inode failed.bucketName:{},objName:{}", bucket, fileInfo.obj);
                         return Mono.just(reply);
                     }
+                    accessInode[0] = inode.clone();
                     MonoProcessor<SMB2Reply> res = MonoProcessor.create();
                     List<Inode.InodeData> inodeData = inode.getInodeData();
                     if (inodeData.isEmpty()) {
@@ -1064,10 +1179,13 @@ public class SMB2Proc {
                                     return Mono.just(reply);
                                 });
                     }
+                })
+                .doFinally(r -> {
+                    fileFsAccessHandle(accessInode[0]);
                 });
     }
 
-    @SMB2.Smb2Opt(SMB2_CLOSE)
+    @SMB2.Smb2Opt(value = SMB2_CLOSE, allowIPCSession = true)
     public Mono<SMB2Reply> close(SMB2Header header, Session session, CloseCall call) {
         SMB2Reply reply = new SMB2Reply(header);
         SMB2FileId.FileInfo fileInfo = call.getFileId().getFileInfo(header.getCompoundRequest());
@@ -1077,105 +1195,105 @@ public class SMB2Proc {
 
         return closeRelease(smb2FileId, localNode, header) // close后清除
                 .flatMap(ignore -> {
-        if (fileInfo != null) {
-            FSPerformanceService.addIp(fileInfo.bucket, header.getHandler().getClientAddress());
-            return WriteCache.isExistCache(fileInfo.inodeId, isSMB3, smb2FileId)
-                    .flatMap(res -> {
-                        if (isFileNeedDelete(fileInfo.inodeId)) {
-                            if (res && !isSMB3) {
-                                WriteCache.removeCache(fileInfo.inodeId);
-                            }
-                            return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
-                                    .flatMap(inode -> {
-                                        if (res && isSMB3) {
-                                            // 删除缓存
-                                            return WriteCacheClient.remove(inode, 0, 0, smb2FileId).map(b -> inode);
-                                        } else {
-                                            return Mono.just(inode);
+                    if (fileInfo != null) {
+                        FSPerformanceService.addIp(fileInfo.bucket, header.getHandler().getClientAddress());
+                        return WriteCache.isExistCache(fileInfo.inodeId, isSMB3, smb2FileId)
+                                .flatMap(res -> {
+                                    if (isFileNeedDelete(fileInfo.inodeId)) {
+                                        if (res && !isSMB3) {
+                                            WriteCache.removeCache(fileInfo.inodeId);
                                         }
-                                    })
-                                    .flatMap(inode -> {
-                                if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
-                                    return closeRes(reply, session, STATUS_OBJECT_NAME_NOT_FOUND, call.getFlags(), NOT_FOUND_INODE);
-                                }
-                                if (inode.getLinkN() == ERROR_INODE.getLinkN()) {
-                                    return closeRes(reply, session, STATUS_IO_DEVICE_ERROR, call.getFlags(), ERROR_INODE);
-                                }
-                                if (inode.getObjName().endsWith("/")) {
-                                    return BucketFSPerfLimiter.getInstance().limits(fileInfo.bucket, fs_rmdir.name() + "-" + THROUGHPUT_QUOTA, 1L)
-                                            .flatMap(waitMillis -> {
-                                                String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), fileInfo.bucket);
-                                                return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_rmdir.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
-                                            })
-                                            .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis)).flatMap(l -> ReadDirCache.listAndCache(fileInfo.bucket, inode.getObjName(), 0, 1024,
-                                                    new NFSHandler(), inode.getNodeId(), null, inode.getACEs())))
-                                            .flatMap(inodes -> {
-                                                if (!inodes.isEmpty()) {
-                                                    return closeRes(reply, session, STATUS_DIRECTORY_NOT_EMPTY, call.getFlags(), inode);
-                                                }
-                                                return deleteInodeInClose(fileInfo, reply, session, call);
-                                            });
-                                } else {
-                                    return BucketFSPerfLimiter.getInstance().limits(fileInfo.bucket, fs_remove.name() + "-" + THROUGHPUT_QUOTA, 1L)
-                                            .flatMap(waitMillis -> {
-                                                String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), fileInfo.bucket);
-                                                return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_remove.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
-                                            })
-                                            .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis)).flatMap(l -> deleteInodeInClose(fileInfo, reply, session, call)));
-                                }
-                            });
-
-                        }
-                        if (res) {
-                            return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
-                                    .flatMap(inode -> {
-                                        if (InodeUtils.isError(inode)) {
-                                            reply.setBody(CloseReply.DEFAULT);
-                                            return Mono.just(reply);
-                                        }
-                                        return (isSMB3
-                                                ? WriteCacheClient.flush(inode, 0, 0, smb2FileId)
-                                                : WriteCache.getCache(fileInfo.bucket, inode.getNodeId(), 0, inode.getStorage(), true).flatMap(writeCache -> writeCache.nfsCommit(inode, 0, 0)))
-                                                .flatMap(res1 -> {
-                                                    reply.getHeader().setStatus(STATUS_SUCCESS);
-                                                    SMB2FileId.removeFileInfo(session);
-                                                    if (call.getFlags() == 1) {
-                                                        return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
-                                                                .flatMap(inode1 -> {
-                                                                    reply.setBody(CloseReply.mapToCloseReply(inode1, call.getFlags()));
-                                                                    return Mono.just(reply);
-                                                                });
-
+                                        return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
+                                                .flatMap(inode -> {
+                                                    if (res && isSMB3) {
+                                                        // 删除缓存
+                                                        return WriteCacheClient.remove(inode, 0, 0, smb2FileId).map(b -> inode);
                                                     } else {
-                                                        reply.setBody(CloseReply.DEFAULT);
+                                                        return Mono.just(inode);
                                                     }
+                                                })
+                                                .flatMap(inode -> {
+                                                    if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                        return closeRes(reply, session, STATUS_OBJECT_NAME_NOT_FOUND, call.getFlags(), NOT_FOUND_INODE);
+                                                    }
+                                                    if (inode.getLinkN() == ERROR_INODE.getLinkN()) {
+                                                        return closeRes(reply, session, STATUS_IO_DEVICE_ERROR, call.getFlags(), ERROR_INODE);
+                                                    }
+                                                    if (inode.getObjName().endsWith("/")) {
+                                                        return BucketFSPerfLimiter.getInstance().limits(fileInfo.bucket, fs_rmdir.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                                                                .flatMap(waitMillis -> {
+                                                                    String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), fileInfo.bucket);
+                                                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_rmdir.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                                                                })
+                                                                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis)).flatMap(l -> ReadDirCache.listAndCache(fileInfo.bucket, inode.getObjName(), 0, 1024,
+                                                                        new NFSHandler(), inode.getNodeId(), null, inode.getACEs())))
+                                                                .flatMap(inodes -> {
+                                                                    if (!inodes.isEmpty()) {
+                                                                        return closeRes(reply, session, STATUS_DIRECTORY_NOT_EMPTY, call.getFlags(), inode);
+                                                                    }
+                                                                    return deleteInodeInClose(fileInfo, reply, session, call);
+                                                                });
+                                                    } else {
+                                                        return BucketFSPerfLimiter.getInstance().limits(fileInfo.bucket, fs_remove.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                                                                .flatMap(waitMillis -> {
+                                                                    String redisKey = getAddressPerfRedisKey(header.getHandler().getClientAddress(), fileInfo.bucket);
+                                                                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_remove.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                                                                })
+                                                                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis)).flatMap(l -> deleteInodeInClose(fileInfo, reply, session, call)));
+                                                    }
+                                                });
+
+                                    }
+                                    if (res) {
+                                        return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
+                                                .flatMap(inode -> {
+                                                    if (InodeUtils.isError(inode)) {
+                                                        reply.setBody(CloseReply.DEFAULT);
+                                                        return Mono.just(reply);
+                                                    }
+                                                    return (isSMB3
+                                                            ? WriteCacheClient.flush(inode, 0, 0, smb2FileId)
+                                                            : WriteCache.getCache(fileInfo.bucket, inode.getNodeId(), 0, inode.getStorage(), true).flatMap(writeCache -> writeCache.nfsCommit(inode, 0, 0)))
+                                                            .flatMap(res1 -> {
+                                                                reply.getHeader().setStatus(STATUS_SUCCESS);
+                                                                SMB2FileId.removeFileInfo(session);
+                                                                if (call.getFlags() == 1) {
+                                                                    return nodeInstance.getInode(fileInfo.bucket, fileInfo.inodeId)
+                                                                            .flatMap(inode1 -> {
+                                                                                reply.setBody(CloseReply.mapToCloseReply(inode1, call.getFlags()));
+                                                                                return Mono.just(reply);
+                                                                            });
+
+                                                                } else {
+                                                                    reply.setBody(CloseReply.DEFAULT);
+                                                                }
+                                                                return Mono.just(reply);
+                                                            });
+                                                });
+
+                                    }
+                                    if (fileInfo.updateTimeOnClose) {
+                                        long mtime = System.currentTimeMillis() / 1000;
+                                        int mtimeNano = (int) (System.nanoTime() % ONE_SECOND_NANO);
+                                        return nodeInstance.updateInodeTime(fileInfo.inodeId, fileInfo.bucket, mtime, mtimeNano, false, true, true)
+                                                .flatMap(inode -> closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), inode));
+                                    }
+                                    if (call.getFlags() == 1) {
+                                        return Mono.just(fileInfo.openInode)
+                                                .flatMap(inode -> {
+                                                    if (InodeUtils.isError(inode)) {
+                                                        reply.setBody(CloseReply.DEFAULT);
+                                                        return Mono.just(reply);
+                                                    }
+                                                    reply.setBody(CloseReply.mapToCloseReply(inode, call.getFlags()));
                                                     return Mono.just(reply);
                                                 });
-                                    });
-
-                        }
-                        if (fileInfo.updateTimeOnClose) {
-                            long mtime = System.currentTimeMillis() / 1000;
-                            int mtimeNano = (int) (System.nanoTime() % ONE_SECOND_NANO);
-                            return nodeInstance.updateInodeTime(fileInfo.inodeId, fileInfo.bucket, mtime, mtimeNano, false, true, true)
-                                    .flatMap(inode -> closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), inode));
-                        }
-                        if (call.getFlags() == 1) {
-                            return Mono.just(fileInfo.openInode)
-                                    .flatMap(inode -> {
-                                        if (InodeUtils.isError(inode)) {
-                                            reply.setBody(CloseReply.DEFAULT);
-                                            return Mono.just(reply);
-                                        }
-                                        reply.setBody(CloseReply.mapToCloseReply(inode, call.getFlags()));
-                                        return Mono.just(reply);
-                                    });
-                        }
-                        return closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), new Inode());
-                    })
-                    .doOnNext(r -> SMB2FileId.clearCache(header.getCompoundRequest(), call.getFileId()));
-        }
-        return closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), new Inode());
+                                    }
+                                    return closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), new Inode());
+                                })
+                                .doOnNext(r -> SMB2FileId.clearCache(header.getCompoundRequest(), call.getFileId()));
+                    }
+                    return closeRes(reply, session, STATUS_SUCCESS, call.getFlags(), new Inode());
                 });
     }
 
@@ -1280,7 +1398,7 @@ public class SMB2Proc {
             isReturnHide[0] = true;
         }
         FSPerformanceService.addIp(info.bucket, header.getHandler().getClientAddress());
-        if (QueryDirInfo.isNotValidQueryClass(call.getFileInfoClass())){
+        if (QueryDirInfo.isNotValidQueryClass(call.getFileInfoClass())) {
             reply.getHeader().setStatus(STATUS_INVALID_INFO_CLASS);
             return Mono.just(reply);
         }
