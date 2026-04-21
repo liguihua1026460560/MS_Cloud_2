@@ -165,6 +165,7 @@ public class SMB2FileId {
         public String targetName;
         public int isGroupOrUser = 1; // 0: group, 1: user
         public long allocationSize = Long.MAX_VALUE;
+        public int writeNum = 0;
 
         FileInfo(String bucket, String obj, long inodeId, long dirInode, Inode openInode, List<Inode.ACE> ACEs) {
             this.bucket = bucket;

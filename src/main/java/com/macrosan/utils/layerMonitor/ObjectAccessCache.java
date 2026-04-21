@@ -29,9 +29,11 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
 import static com.macrosan.constants.SysConstants.ROCKS_CHUNK_FILE_KEY;
@@ -338,6 +340,7 @@ public class ObjectAccessCache {
 //        Tuple2<String, String> bucketVnodeIdTuple = metaStoragePool.getBucketVnodeIdTuple(metaData.bucket, metaData.key);
 //        String bucketVnode = bucketVnodeIdTuple.var1;
 //        String migrateVnode = bucketVnodeIdTuple.var2;
+        AtomicBoolean needUpdate = new AtomicBoolean(false);
         return nodeInstance.getInode(bucket, nodeId)
                 .flatMap(inode -> {
                     if (inode.getLinkN() == ERROR_INODE.getLinkN()) {
@@ -347,12 +350,16 @@ public class ObjectAccessCache {
                         return Mono.just(true);
                     }
                     atime[0] = inode.getAtime();
-                    return updateInodeDataAccessTime(inode.getInodeData(), nodeInstance, bucket, stamp);
+                    needUpdate.set(InodeUtils.needUpdateAtime(atime[0]));
+                    if (needUpdate.get()) {
+                        return updateInodeDataAccessTime(inode.getInodeData(), nodeInstance, bucket, stamp);
+                    }
+                    return Mono.just(true);
                 })
                 .flatMap(res -> {
-                    if (res && InodeUtils.needUpdateAtime(atime[0])) {
+                    if (res && needUpdate.get()) {
                         int stampNano = (int) (System.nanoTime() % ONE_SECOND_NANO);
-                        return nodeInstance.updateInodeTime(nodeId, bucket, Long.parseLong(stamp), stampNano, true, false, false)
+                        return nodeInstance.updateInodeTime(nodeId, bucket, Long.parseLong(stamp) / 1000, stampNano, true, false, false)
                                 .map(i -> i.getLinkN() != ERROR_INODE.getLinkN());
                     }
                     return Mono.just(res);

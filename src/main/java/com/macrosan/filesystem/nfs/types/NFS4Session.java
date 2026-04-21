@@ -1,19 +1,15 @@
 package com.macrosan.filesystem.nfs.types;
 
-import com.macrosan.filesystem.lock.Lock;
-import com.macrosan.filesystem.nfs.call.v4.CompoundCall;
-import com.macrosan.filesystem.nfs.delegate.DelegateLock;
+
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.v4.CompoundReply;
-import com.macrosan.utils.functional.Tuple2;
 import io.vertx.reactivex.core.net.SocketAddress;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 
-import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -31,8 +27,7 @@ public class NFS4Session {
     public int cbProgram;
     public final AtomicInteger cbSeqId = new AtomicInteger(0);
     private final Set<SessionConnection> boundConnections;
-    public final ConcurrentLinkedQueue<Tuple2<CompoundCall, Lock>> recallQueue = new ConcurrentLinkedQueue<>();
-    public final AtomicBoolean canSend  = new AtomicBoolean(true);
+    public final AtomicBoolean canSend = new AtomicBoolean(true);
 
 
     public NFS4Session(NFS4Client client, byte[] sessionId, int replyCacheSize, int maxOps, int maxCbOps, NFSHandler nfsHandler, int cbProgram) {
@@ -42,7 +37,7 @@ public class NFS4Session {
         this.maxOps = maxOps;
         this.maxCbOps = maxCbOps;
 //        this.cbReplyCacheSize = cbReplyCacheSize;
-        boundConnections = new HashSet<>();
+        boundConnections = ConcurrentHashMap.newKeySet();
         this.nfsHandler = nfsHandler;
         this.cbProgram = cbProgram;
     }
@@ -84,18 +79,18 @@ public class NFS4Session {
     }
 
 
-    public synchronized void bindIfNeeded(SessionConnection connection) {
+    public void bindIfNeeded(SessionConnection connection) {
         if (boundConnections.isEmpty()) {
             bindToConnection(connection);
         }
     }
 
 
-    public synchronized void bindToConnection(SessionConnection connection) {
+    public void bindToConnection(SessionConnection connection) {
         boundConnections.add(connection);
     }
 
-    public synchronized boolean isReleasableBy(SessionConnection connection) {
+    public boolean isReleasableBy(SessionConnection connection) {
         return boundConnections.isEmpty() || boundConnections.contains(connection);
     }
 

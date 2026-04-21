@@ -3,7 +3,9 @@ package com.macrosan.filesystem.cifs;
 import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.filesystem.FsConstants;
 import com.macrosan.filesystem.ReadStruct;
+import com.macrosan.filesystem.cache.WriteCacheClient;
 import com.macrosan.filesystem.cifs.reply.smb2.ErrorReply;
+import com.macrosan.filesystem.cifs.shareAccess.ShareAccessClient;
 import com.macrosan.filesystem.cifs.types.Session;
 import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.utils.cache.ClassUtils;
@@ -12,6 +14,7 @@ import io.netty.buffer.ByteBuf;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -214,6 +217,22 @@ public class SMB2 {
             caseSensitive = !"0".equals(result);
         } catch (Exception e) {
             log.error("get 'cifs_case_sensitive' fail from redis");
+        }
+        try {
+            String result = pool.getCommand(REDIS_SYSINFO_INDEX).hget("cifs_controls", "share_access");
+            ShareAccessClient.shareAccessSwitch = !"0".equals(result);
+        } catch (Exception e) {
+            log.error("get 'cifs share_access' fail from redis", e);
+        }
+        try {
+            String writeNum = pool.getCommand(REDIS_SYSINFO_INDEX).get("cifs_write_cache_num");
+            if (StringUtils.isNumeric(writeNum)) {
+                WriteCacheClient.writeNum = Integer.parseInt(writeNum);
+            }
+            log.info("cifs_write_cache_num: " + WriteCacheClient.writeNum);
+        } catch (Exception e) {
+            log.error("get 'cifs_write_cache_num' fail from redis", e);
+            log.info("cifs_write_cache_num: " + WriteCacheClient.writeNum);
         }
     }
 }

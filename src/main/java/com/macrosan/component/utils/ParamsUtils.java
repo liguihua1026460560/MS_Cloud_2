@@ -22,11 +22,14 @@ public class ParamsUtils {
 
     public static Map<String, Class> imageProcessParamMap;
     public static Map<String, Class> videoProcessparamMap;
+    public static Map<String, Class> dicomProcessparamMap;
 
     static {
         imageProcessParamMap = new HashMap<>();
         videoProcessparamMap = new HashMap<>();
+        dicomProcessparamMap = new HashMap<>();
         videoProcessparamMap.put("snapshots", VideoSnapshotsParams.class);
+        videoProcessparamMap.put("compress", VideoCompressParams.class);
         imageProcessParamMap.put("watermark-text", ImageWaterMarkTextParams.class);
         imageProcessParamMap.put("scaling", ImageScaleParams.class);
         imageProcessParamMap.put("format", ImageFormatParams.class);
@@ -36,7 +39,10 @@ public class ParamsUtils {
         imageProcessParamMap.put("rounded-corners", ImageRoundedCornersParams.class);
         imageProcessParamMap.put("watermark-image", ImageWatermarkImageParams.class);
         imageProcessParamMap.put("quality", ImageQualityParams.class);
-        imageProcessParamMap.put("compress", ImageCompressParams.class);
+        imageProcessParamMap.put("bmp-compress", BmpCompressParams.class);
+        imageProcessParamMap.put("tiff-compress", TiffCompressParams.class);
+        imageProcessParamMap.put("png-compress", PngCompressParams.class);
+        dicomProcessparamMap.put("compress", DicomCompressParams.class);
     }
 
     /**
@@ -96,8 +102,12 @@ public class ParamsUtils {
     public static <T> Class<T> getClassByProcessType(String processType, String processName) {
         if (ComponentRecord.Type.VIDEO.name.equals(processType)) {
             return videoProcessparamMap.get(processName);
-        } else {
+        } else if (ComponentRecord.Type.IMAGE.name.equals(processType)) {
             return imageProcessParamMap.get(processName);
+        } else if (ComponentRecord.Type.DICOM.name.equals(processType)) {
+            return dicomProcessparamMap.get(processName);
+        } else {
+            return null;
         }
     }
 
@@ -120,6 +130,15 @@ public class ParamsUtils {
             return false;
         }
         return str.matches("^[1-9]\\d*$");
+    }
+
+
+    public static boolean isLossy(String mode) {
+        return "lossy".equals(mode);
+    }
+
+    public static boolean isLossless(String mode) {
+        return "lossless".equals(mode);
     }
 
 }

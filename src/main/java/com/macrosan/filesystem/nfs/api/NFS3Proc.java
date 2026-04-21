@@ -14,6 +14,7 @@ import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.nfs.*;
 import com.macrosan.filesystem.nfs.auth.AuthUnix;
 import com.macrosan.filesystem.nfs.call.*;
+import com.macrosan.filesystem.nfs.direct.DirectWrite;
 import com.macrosan.filesystem.nfs.handler.NFSHandler;
 import com.macrosan.filesystem.nfs.reply.*;
 import com.macrosan.filesystem.nfs.types.*;
@@ -53,14 +54,15 @@ import java.util.stream.Collectors;
 import static com.macrosan.action.managestream.FSPerformanceService.Instance_Type.*;
 import static com.macrosan.action.managestream.FSPerformanceService.getAddressPerfRedisKey;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.filesystem.FsConstants.ACLConstants.NFS_DIR_SUB_DEL_ACL;
+import static com.macrosan.filesystem.FsConstants.ACLConstants.NOT_CONTAIN_ACL;
 import static com.macrosan.filesystem.FsConstants.*;
-import static com.macrosan.filesystem.FsConstants.ACLConstants.*;
 import static com.macrosan.filesystem.FsConstants.NFSACLType.NFS_ACE;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
 import static com.macrosan.filesystem.cache.ReadObjCache.readCacheDebug;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.getBucketName;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.FS_DIR_QUOTA;
-import static com.macrosan.filesystem.utils.FsTierUtils.*;
+import static com.macrosan.filesystem.utils.FsTierUtils.fileFsAccessHandle;
 import static com.macrosan.filesystem.utils.InodeUtils.*;
 import static com.macrosan.filesystem.utils.acl.ACLUtils.DEFAULT_ANONY_UID;
 import static com.macrosan.message.jsonmsg.Inode.*;
@@ -352,6 +354,93 @@ public class NFS3Proc {
     }
 
     @NFSV3.Opt(value = NFSV3.Opcode.NFS3PROC_WRITE)
+    public Mono<RpcReply> directWrite(RpcCallHeader callHeader, ReqInfo reqHeader, DirectWriteCall call) {
+        reqHeader.bucket = getBucketName(call.fh.fsid);
+        FSPerformanceService.addIp(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress());
+        reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
+        String bucket = reqHeader.bucket;
+        long nodeId = call.fh.ino;
+        WriteReply reply = new WriteReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
+        Inode[] inodes = new Inode[1];
+        if (CheckUtils.checkIfOverFlow(call.writeOffset, call.dataLen)) {
+            reply.status = NfsErrorNo.NFS3ERR_FBIG;
+            reply.attr = Attr.mapToAttr(ERROR_INODE, call.fh.fsid);
+            return Mono.just(reply);
+        }
+
+        return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_write.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                .flatMap(waitMillis -> {
+                    String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
+                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_write.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
+                })
+                .flatMap(waitMillis -> waitMillis == 0 ? Mono.just(0L) : Mono.delay(Duration.ofMillis(waitMillis)))
+                .flatMap(l -> nodeInstance.getInode(reqHeader.bucket, call.fh.ino))
+                .flatMap(inode -> {
+                    if (isError(inode)) {
+                        reply.status = NfsErrorNo.NFS3ERR_I0;
+                        reply.attr = Attr.mapToAttr(ERROR_INODE, call.fh.fsid);
+                        log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, nodeId, inode.getLinkN());
+                        return Mono.just(reply);
+                    }
+                    inodes[0] = inode;
+
+                    return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_write.name() + "-" + BAND_WIDTH_QUOTA, call.dataLen)
+                            .flatMap(waitMillis -> {
+                                String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
+                                return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_write.name() + "-" + BAND_WIDTH_QUOTA, call.dataLen).map(waitMillis2 -> waitMillis + waitMillis2);
+                            })
+                            .flatMap(waitMillis -> waitMillis == 0 ? Mono.just(true) : Mono.delay(Duration.ofMillis(waitMillis)))
+                            .flatMap(l -> FSQuotaUtils.checkFsQuota(inode))
+                            .flatMap(l -> DirectWrite.directWrite(call, inode))
+                            .map(b -> {
+                                reply.count = call.count;
+                                reply.sync = call.sync;
+
+                                if (!b) {
+                                    reply.status = NfsErrorNo.NFS3ERR_I0;
+                                } else {
+                                    reply.status = 0;
+                                    inode.setSize(call.writeOffset + call.count);
+                                }
+                                reply.attr = Attr.mapToAttr(inode, call.fh.fsid);
+                                return (RpcReply) reply;
+                            });
+                }).onErrorResume(e -> {
+                    if (inodes[0] != null) {
+                        if (e instanceof NFSException) {
+                            int stat = ((NFSException) e).getErrCode();
+                            if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                FSQuotaUtils.logQuotaExceeded(inodes[0], e);
+                            } else {
+                                log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                            }
+                        } else {
+                            log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                        }
+                    } else {
+                        log.error("", e);
+                    }
+                    reply.status = NfsErrorNo.NFS3ERR_I0;
+                    if (e instanceof NFSException) {
+                        int stat = ((NFSException) e).getErrCode();
+                        if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                            reply.status = NfsErrorNo.NFS3ERR_DQUOT;
+                        }
+                    }
+                    if (inodes[0] != null) {
+                        reply.attr = Attr.mapToAttr(inodes[0], call.fh.fsid);
+                    } else {
+                        reply.attr = Attr.mapToAttr(ERROR_INODE, call.fh.fsid);
+                    }
+                    return Mono.just(reply);
+                });
+    }
+
+    //    @NFSV3.Opt(value = NFSV3.Opcode.NFS3PROC_WRITE)
     public Mono<RpcReply> write(RpcCallHeader callHeader, ReqInfo reqHeader, WriteCall call) {
         reqHeader.bucket = getBucketName(call.fh.fsid);
         FSPerformanceService.addIp(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress());
@@ -895,6 +984,10 @@ public class NFS3Proc {
                 call.attr.mode |= S_IFFIFO;
                 onlyRootExec[0] = false;
                 break;
+            case FileType.NF_SOCK:
+                call.attr.mode |= S_IFSOCK;
+                onlyRootExec[0] = false;
+                break;
             default:
                 onlyRootExec[0] = false;
                 break;
@@ -1022,6 +1115,9 @@ public class NFS3Proc {
                                             .map(i0 -> {
                                                 if (isError(inode1)) {
                                                     removeReply.status = EIO;
+                                                    if (inode1.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                        removeReply.status = ENOENT;
+                                                    }
                                                 } else {
                                                     long end = System.currentTimeMillis();
                                                     if (end - start > 55_000L) {

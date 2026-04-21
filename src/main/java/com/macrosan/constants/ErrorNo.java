@@ -724,6 +724,7 @@ public class ErrorNo {
     public static final int ACCOUNT_ID_EXISTED = 615; // 账户id已存在
     public static final int ACCOUNT_VALIDITY_GRADE_ERROR = 616;// 账户输入的密码有效期等级错误
     public static final int ACCOUNT_HAS_ROLES_ERROR = 617; // 账户下存在角色，无法删除
+    public static final int ACCOUNT_UID_EXIST = 618; // 账户下存在角色，无法删除
 
     /**
      * 授权相关错误码
@@ -970,6 +971,5 @@ public class ErrorNo {
     public static final int NO_SUCH_CACHE_POOL = 3202;
 
     public static final int COMPRESS_SERVER_ERROR = 3301;
-
-    public static final int INVALID_FS_STATUS = 3401;
+    public static final int BUCKET_NFS_CLOSED = 3302;
 }

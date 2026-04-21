@@ -157,6 +157,10 @@ public class InventoryTransmitter {
                         .put("lun", t.var2)
                         .put("vnode", t.var3)
                         .put("compression", pool.getCompression())
+                        .put("bucket", destination.getBucket())
+                        .put("object", destination.getObject())
+                        .put("versionId", destination.getVersionId())
+                        .put("storage", pool.getVnodePrefix())
                 )
                 .map(msg0 -> {
                     UnicastProcessor<Payload> processor = UnicastProcessor.create();

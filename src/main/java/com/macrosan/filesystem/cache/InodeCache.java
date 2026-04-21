@@ -143,7 +143,17 @@ public class InodeCache {
 
         try {
             if (inodeOperator.readOpt) {
-                FastMonoTimeOut.fastTimeout(batch.get(0).getOpt.get(), Duration.ofSeconds(EXEC_TIMEOUT))
+                Mono<Inode> res = batch.get(0).getOpt.get();
+                Mono<Inode> mono;
+                if (inodeOperator.getMsg() != null) {
+                    List<SocketReqMsg> msgs = batch.stream()
+                            .map(InodeOperator::getMsg)
+                            .collect(Collectors.toList());
+                    mono = AsyncUtils.asyncBatch(inodeOperator.getMsg().get("bucket"), inodeOperator.nodeId, msgs, res);
+                } else {
+                    mono = res;
+                }
+                FastMonoTimeOut.fastTimeout(mono, Duration.ofSeconds(EXEC_TIMEOUT))
                         .doFinally(s -> {
                             release(inodeOperator, readCounter, isReleaseNum);
                         })
@@ -205,7 +215,7 @@ public class InodeCache {
                     List<SocketReqMsg> msgs = batch.stream()
                             .map(InodeOperator::getMsg)
                             .collect(Collectors.toList());
-                    mono = AsyncUtils.asyncBatch(inodeOperator.getMsg().get("bucket"), inodeOperator.nodeId, inodeOperator.opt, msgs, res);
+                    mono = AsyncUtils.asyncBatch(inodeOperator.getMsg().get("bucket"), inodeOperator.nodeId, msgs, res);
                 } else {
                     mono = res;
                 }

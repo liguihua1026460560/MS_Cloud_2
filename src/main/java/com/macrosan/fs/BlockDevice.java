@@ -274,7 +274,7 @@ public class BlockDevice {
         ColumnFamilyHandle columnFamilyHandle = MSRocksDB.getColumnFamily(name);
         if (allocator == null) {
             //逻辑空间块alloc和release的粒度为4K
-            allocator = new Allocator((MIN_ALLOC_SIZE / BLOCK_SIZE) * (size / MIN_ALLOC_SIZE - 1), 1);
+            allocator = new MsAllocator((MIN_ALLOC_SIZE / BLOCK_SIZE) * (size / MIN_ALLOC_SIZE - 1), 1);
         }
         long offset = 0;
         long len = 0;
@@ -349,6 +349,7 @@ public class BlockDevice {
 
         return res;
     }
+
     public static void remove(String lun) {
         map.remove(lun);
         log.info("remove block device {}", lun);

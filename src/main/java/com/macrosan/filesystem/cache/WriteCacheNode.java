@@ -27,7 +27,9 @@ import reactor.core.publisher.MonoProcessor;
 
 import java.io.File;
 import java.time.Duration;
-import java.util.*;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -443,7 +445,7 @@ public class WriteCacheNode {
                                 .setOffset(0L)
                                 .setEtag(md5)
                                 .setFileName(fileName);
-                        return Node.getInstance().updateInodeData(inode.getBucket(), inode.getNodeId(), curOffset, inodeData, "", "", updateTime, inode.getXAttrMap().get(QUOTA_KEY))
+                        return Node.getInstance().updateInodeData(inode.getBucket(), inode.getNodeId(), curOffset, inodeData, "", "", updateTime, inode.getXAttrMap().get(QUOTA_KEY), inode.getObjName())
                                 .flatMap(i -> {
                                     if (!isError(i) && !i.isDeleteMark()) {
                                         if (ES_ON.equals(NFSBucketInfo.getBucketInfo(i.getBucket()).get(ES_SWITCH))) {
@@ -459,49 +461,90 @@ public class WriteCacheNode {
                 });
     }
 
+    private static final LinkedList<WriteCacheNode.CommitRes> flushAllQueue = new LinkedList<>();
     public Mono<Boolean> flushByteCache() {
         if (SMBHandler.runningDebug) {
             log.info("start flushByteCache");
         }
-        if (FLUSHING.compareAndSet(false, true)) {
-            return Flux.fromStream(map.keySet().stream())
-                    .flatMap(inodeId -> {
-                        WriteCacheNode writeCacheNode = map.get(inodeId);
-                        if (writeCacheNode != null) {
-                            long cacheSize = writeCacheNode.cacheSize.get();
-                            if (SMBHandler.runningDebug) {
-                                log.info("flushByteCache inode {} writeNum:{}", inodeId, writeCacheNode.writeNum.get());
-                            }
-                            if (writeCacheNode.writeNum.get() <= 0
-                                    && writeCacheNode.commitQueue.isEmpty()
-                                    && writeCacheNode.cacheSize.get() > 0) {
-                                return Node.getInstance().getInode(writeCacheNode.bucket, inodeId)
-                                        .flatMap(inode -> {
-                                            WriteCacheNode wc = map.get(inodeId);
-                                            if (SMBHandler.runningDebug && InodeUtils.isError(inode)) {
-                                                log.info("flushByteCache error inode, {}, cacheSize: {}", nodeId, cacheSize);
-                                            }
-                                            if (wc != null && wc.cacheSize.get() == cacheSize && !InodeUtils.isError(inode)) {
-                                                return Node.getInstance().flushWriteCache(inode, 0, 0, 1);
-                                            }
-                                            return Mono.just(true);
-                                        });
-                            }
-                        }
-                        return Mono.just(false);
-                    })
-                    .collectList()
-                    .map(ignore -> true)
-                    .timeout(Duration.ofSeconds(360))
-                    .onErrorResume(e -> {
-                        log.error("", e);
-                        return Mono.just(false);
-                    })
-                    .doFinally(l -> {
-                        FLUSHING.compareAndSet(true, false);
-                    });
+        WriteCacheNode.CommitRes res = new WriteCacheNode.CommitRes();
+
+        boolean flush;
+        synchronized (flushAllQueue) {
+            flushAllQueue.add(res);
+            flush = FLUSHING.compareAndSet(false, true);
+        }
+
+        if (flush) {
+            FsUtils.fsExecutor.submit(() -> {
+                try {
+                    Flux.fromStream(map.keySet().stream())
+                            .flatMap(inodeId -> {
+                                WriteCacheNode writeCacheNode = map.get(inodeId);
+                                if (writeCacheNode != null) {
+                                    long cacheSize = writeCacheNode.cacheSize.get();
+                                    if (SMBHandler.runningDebug) {
+                                        log.info("flushByteCache inode {} writeNum:{}", inodeId, writeCacheNode.writeNum.get());
+                                    }
+                                    if (writeCacheNode.writeNum.get() <= 0
+                                            && writeCacheNode.commitQueue.isEmpty()
+                                            && writeCacheNode.cacheSize.get() > 0) {
+                                        return Node.getInstance().getInode(writeCacheNode.bucket, inodeId)
+                                                .flatMap(inode -> {
+                                                    WriteCacheNode wc = map.get(inodeId);
+                                                    if (SMBHandler.runningDebug && InodeUtils.isError(inode)) {
+                                                        log.info("flushByteCache error inode, {}, cacheSize: {}", nodeId, cacheSize);
+                                                    }
+                                                    if (wc != null && wc.cacheSize.get() == cacheSize && !InodeUtils.isError(inode)) {
+                                                        return Node.getInstance().flushWriteCache(inode, 0, 0, 1);
+                                                    }
+                                                    return Mono.just(true);
+                                                });
+                                    }
+                                }
+                                return Mono.just(false);
+                            })
+                            .collectList()
+                            .map(ignore -> true)
+                            .timeout(Duration.ofSeconds(360))
+                            .onErrorResume(e -> {
+                                log.error("", e);
+                                return Mono.just(false);
+                            })
+                            .doFinally(l -> {
+                                FLUSHING.compareAndSet(true, false);
+                            })
+                            .subscribe(b -> {
+                                res.complete(b, null);
+                                flushAllEnd();
+                            });
+                } catch (Exception e) {
+                    log.error("", e);
+                    res.complete(false, e);
+                    commitEnd();
+                }
+            });
         } else {
-            return Mono.just(true);
+            res.complete(true, null);
+            flushAllEnd();
+        }
+
+        return res.res;
+    }
+
+    private static void flushAllEnd() {
+        synchronized (flushAllQueue) {
+            while (!flushAllQueue.isEmpty() && flushAllQueue.peekFirst().prepare.get()) {
+                WriteCacheNode.CommitRes res = flushAllQueue.pollFirst();
+                if (res.error != null) {
+                    try {
+                        res.res.onError(res.error);
+                    } catch (Exception e) {
+
+                    }
+                } else {
+                    res.res.onNext(res.value);
+                }
+            }
         }
     }
 

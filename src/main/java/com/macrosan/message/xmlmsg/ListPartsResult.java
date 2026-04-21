@@ -25,6 +25,7 @@ import java.util.List;
         "uploadId",
         "initiator",
         "owner",
+        "storageClass",
         "partNumberMarker",
         "nextPartNumberMarker",
         "maxParts",
@@ -47,6 +48,9 @@ public class ListPartsResult {
 
     @XmlElement(name = "Owner", required = true)
     private Owner owner;
+
+    @XmlElement(name = "StorageClass", required = true)
+    private String storageClass = "STANDARD";
 
     @XmlElement(name = "PartNumberMarker", required = true)
     private int partNumberMarker;

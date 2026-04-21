@@ -446,8 +446,10 @@ public class SysConstants {
     public static final String PART_NUMBER = "partNumber";
     public static final String PART_SIZE = "partSize";
     public static final String PART_CONFIG = "part_config";
+    public static final String ESCAPE_FLAG = "escape_flag";
     public static final String PART_CONFIG_SIGN = "part_config_sign";
     public static long UPLOAD_PART_MIN_SIZE = 5 * 1024 * 1024L;
+    public static boolean ETAG_ESCAPE_FLAG = false;
 
     /**
      * 显示的用户元数据
@@ -494,6 +496,7 @@ public class SysConstants {
     public static final String ES_TYPE_AND = "and";
     public static final String ES_SEARCH_LIST = "searchList";
     public static final String ES_BUCKET_SET = "es_bucket_set";
+    public static final String ES_DELETE_ES = "deleteEs";
 
     public static final String METADATA_ANALYSIS = "metadata-analysis";
     public static final String OBJECT_LOCK_ENABLED = "object-lock-enabled-for-bucket";
@@ -770,7 +773,6 @@ public class SysConstants {
     public static final String DELETE_SOURCE_SIGN = "data-deleteSource-sign";
     public static final String DELETE_SOURCE_TIME = "data-deleteSource-time";
     public static final String DEFAULT_DATA_SYNC_SWITCH = "default_data_sync_switch";
-    public static final String ARCHIVE_SWITCH = "archive-switch";
     public static final String LIFE_EXPIRATION_FLAG = "life-expiration-sign";
     public static final String ARCHIVE_INDEX = "archive-index";
     public static final String SYNC_INDEX = "sync-index";
@@ -795,17 +797,17 @@ public class SysConstants {
     /**
      * 文件相关
      */
-    public static final String NFS_ACL = "nfsAcl";
-    public static final String CIFS_ACL = "cifsAcl";
-    public static final String FTP_ACL = "ftpAcl";
+    public static final String NFS_ACL = "nfs-acl";
+    public static final String CIFS_ACL = "cifs-acl";
+    public static final String FTP_ACL = "ftp-acl";
     public static final String FS_STATUS = "status";
     public static final String FS_SQUASH = "squash";
-    public static final String ANON_UID = "anonUid";
-    public static final String ANON_GID = "anonGid";
+    public static final String ANON_UID = "anonuid";
+    public static final String ANON_GID = "anongid";
     public static final String GUEST = "guest";
-    public static final String CASE_SENSITIVE = "caseSensitive";
+    public static final String CASE_SENSITIVE = "case-sensitive";
     public static final String ANONYMOUS = "anonymous";
-    public static final String NFS_IP_WHITELISTS = "nfsIpWhitelists";
+    public static final String NFS_IP_WHITE_LISTS = "nfs-ip-white-lists";
 
     /**
      * 桶清单
@@ -987,4 +989,7 @@ public class SysConstants {
     /*****域控相关字段*****/
     public static final String LDAP_CONFIG_KEY = "ldap_config";
     public static final String LDAP_DOMAIN_NAME = "domainName";
+
+    public static final String DICOM_COMPRESS_SWITCH = "dicom-compress-switch";
+    public static final String DICOM_COMPRESS_BUCKET_KEY_PREFIX = "dicom_compress_bucket_";
 }

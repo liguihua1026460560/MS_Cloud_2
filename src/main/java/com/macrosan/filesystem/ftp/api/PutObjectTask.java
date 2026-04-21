@@ -92,7 +92,11 @@ public class PutObjectTask {
                 .put("metaKey", versionMetaKey)
                 .put("noGet", "1")
                 .put("compression", dataPool.getCompression())
-                .put("fileName", fileName);
+                .put("fileName", fileName)
+                .put("bucket", inode.getBucket())
+                .put("object", inode.getObjName())
+                .put("versionId", inode.getVersionId())
+                .put("storage", dataPool.getVnodePrefix());
 
 
         List<SocketReqMsg> msgs = nodeList.stream()
@@ -251,7 +255,7 @@ public class PutObjectTask {
                         .setStorage(dataPool.getVnodePrefix())
                         .setSize(encoder.size())
                         .setFileName(fileName);
-                Node.getInstance().updateInodeData(bucket, inode.getNodeId(), offset, inodeData, "")
+                Node.getInstance().updateInodeData1(bucket, inode.getNodeId(), offset, inodeData, "", objectName)
                         .subscribe(i -> {
                             if (InodeUtils.isError(i)) {
                                 res.onNext(false);

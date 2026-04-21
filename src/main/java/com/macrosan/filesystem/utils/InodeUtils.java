@@ -9,6 +9,7 @@ import com.macrosan.ec.VersionUtil;
 import com.macrosan.filesystem.FsConstants;
 import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.ReqInfo;
+import com.macrosan.filesystem.async.AsyncUtils;
 import com.macrosan.filesystem.cache.Node;
 import com.macrosan.filesystem.cifs.SMB2;
 import com.macrosan.filesystem.cifs.reply.smb2.CreateReply;
@@ -29,6 +30,7 @@ import com.macrosan.message.jsonmsg.EsMeta;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.jsonmsg.PartInfo;
+import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.storage.StorageOperate;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
@@ -57,6 +59,7 @@ import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.NFSACLType.*;
 import static com.macrosan.filesystem.FsConstants.NTStatus.*;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
+import static com.macrosan.filesystem.async.AsyncUtils.*;
 import static com.macrosan.filesystem.cache.Node.INODE_TIME_MAP;
 import static com.macrosan.filesystem.nfs.NFS.IDLE_TIMEOUT;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
@@ -272,12 +275,14 @@ public class InodeUtils {
                 });
     }
 
-    public static Mono<Inode> smbCreate(ReqInfo reqHeader, Inode dirInode, int mode, int cifsMode, String obj, CreateReply body, SMB2.SMB2Reply reply, CompoundRequest compoundRequest, int createOptions, String reqS3Id) {
+    public static Mono<Inode> smbCreate(ReqInfo reqHeader, Inode dirInode, int mode, int cifsMode, String obj, CreateReply body, SMB2.SMB2Reply reply, CompoundRequest compoundRequest,
+                                        int createOptions, String reqS3Id) {
         long id0 = SMB2FileId.getId();
         return smbCreate(reqHeader, dirInode, mode, cifsMode, obj, body, reply, compoundRequest, createOptions, id0, reqS3Id);
     }
 
-    public static Mono<Inode> smbCreate(ReqInfo reqHeader, Inode dirInode, int mode, int cifsMode, String obj, CreateReply body, SMB2.SMB2Reply reply, CompoundRequest compoundRequest, int createOptions, long id0, String reqS3Id) {
+    public static Mono<Inode> smbCreate(ReqInfo reqHeader, Inode dirInode, int mode, int cifsMode, String obj, CreateReply body, SMB2.SMB2Reply reply, CompoundRequest compoundRequest,
+                                        int createOptions, long id0, String reqS3Id) {
         String tmpName = new String(obj);
         String name = obj.substring(obj.lastIndexOf("/") + 1);
         if ((mode & S_IFMT) == S_IFDIR) {
@@ -535,7 +540,7 @@ public class InodeUtils {
         }
     }
 
-    public static Mono<Inode> createS3Inode(String bucket, String obj, String versionId, String metaHash, String dirDefACEs) {
+    public static Mono<Inode> createS3Inode(String bucket, String obj, String versionId, String metaHash, String dirDefACEs, SocketReqMsg msg) {
         StoragePool pool = StoragePoolFactory.getMetaStoragePool(bucket);
         String bucketVnode = pool.getBucketVnodeId(bucket);
         List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(bucketVnode).block();
@@ -543,24 +548,68 @@ public class InodeUtils {
         String key = Utils.getVersionMetaDataKey(bucketVnode, bucket, obj, versionId);
         return ErasureClient.getObjectMetaVersionResUnlimited(bucket, obj, versionId, nodeList, null, null, null)
                 .flatMap(tuple2 -> {
+                    // 0表示本地的，要走预提交流程的请求
+                    boolean isAsyncLoc = "0".equals(msg.get(ASYNC));
+                    // 1表明是对端发来的同步信息
+                    boolean isAsync = "1".equals(msg.get(ASYNC));
                     MetaData metaData = tuple2.var1;
+
+                    // 未创建inode的目录，同步opt11时这里会创建目录inode，导致两边目录的inode不一致。因此opt11的同步不会触发create。
+                    // 同时，需要解决两边站点同时调用lookup创建目录inode的情况。需要能够在链路恢复时更新inode，因此需要在本地create同步之后做额外处理，主动触发一次nodeId的比较和更新
                     if (!metaData.isAvailable()) {
-                        if (Utils.DEFAULT_META_HASH.equals(metaHash)) {
-                            return createDirMetaData(obj, bucket, dirDefACEs, metaData);
+                        if (Utils.DEFAULT_META_HASH.equals(metaHash) && !isAsync) {
+                            Mono<Inode> mono = createDirMetaData(obj, bucket, dirDefACEs, metaData);
+                            if (isAsyncLoc) {
+                                mono = mono.flatMap(i -> {
+                                    // 本地站点创建目录inode后写入一个opt11差异记录。在复制时，将在create同步之后立刻尝试统一两边的nodeId。
+                                    // todo f 如果createDirMetaData成功但是写差异记录失败，将无法再进入这里。更新inode不会更新syncStamp
+                                    msg.put(ASYNC_RECHECK, "1");
+                                    msg.put("commit", "1");
+                                    // 更新ASYNC_NODEID，目录的同步将使用该nodeId进行比较处理更新
+                                    msg.put(ASYNC_NODEID, String.valueOf(i.getNodeId()));
+                                    return AsyncUtils.beforeService(bucket, i.getNodeId(), msg.dataMap)
+                                            .flatMap(tuple21 -> {
+                                                if (!tuple21.getT1()) {
+                                                    log.info("write dir recheck async record failed. {} {} {}", bucket, obj, versionId);
+                                                    return Mono.just(ERROR_INODE);
+                                                }
+                                                return Mono.just(i);
+                                            });
+                                });
+                            }
+                            return mono;
+                        }
+                        if (isAsync) {
+                            // 站点BmetaData不存在，将由站点A后面的create差异记录去创建
+                            return Mono.just(DEL_SUCCESS_INODE);
                         }
                         return Mono.just(ERROR_INODE);
                     }
 
-                    if (!metaHash.equals(Utils.metaHash(metaData))) {
+                    if (!metaHash.equals(Utils.metaHash(metaData)) && !"1".equals(msg.get(ASYNC_RECHECK))) {
                         //当前元数据被覆盖
                         log.error("create s3 inode fail meta changed. old hash {}, cur meta {}", metaHash, metaData);
+                        if (isAsync) {
+                            return Mono.just(DEL_SUCCESS_INODE);
+                        }
                         return Mono.just(ERROR_INODE);
                     }
+                    long newNodeId = VersionUtil.newInode();
+                    if (msg.dataMap.containsKey(ASYNC_NODEID)) {
+                        // 文件复制使用，站点间需要metaData统一inode
+                        newNodeId = Long.parseLong(msg.dataMap.get(ASYNC_NODEID));
+                    }
 
+                    long oldNodeId = -1;
                     //已经创建过inode 不需要重复创建
                     if (metaData.inode > 0) {
                         if (StringUtils.isNotEmpty(metaData.tmpInodeStr)) {
-                            return Mono.just(Json.decodeValue(metaData.tmpInodeStr, Inode.class));
+                            // 文件复制如果两边站点都有inode时，保留大的inode。如果本地metadata.inode比对端更小，才会去覆盖。SERVER-3127
+                            if (isAsync && newNodeId > metaData.inode) {
+                                oldNodeId = metaData.inode;
+                            } else {
+                                return Mono.just(Json.decodeValue(metaData.tmpInodeStr, Inode.class));
+                            }
                         } else {
                             //未预期的错误
                             log.error("unkown error meta {}", metaData);
@@ -570,7 +619,7 @@ public class InodeUtils {
 
                     Inode inode = Inode.defaultInode(metaData);
                     inode.setCifsMode(CifsUtils.changeToHiddenCifsMode(obj, inode.getCifsMode(), false));
-                    inode.setNodeId(VersionUtil.newInode());
+                    inode.setNodeId(newNodeId);
                     inode.setCookie(VersionUtil.newInode());
                     ACLUtils.setIdWhenCreateS3Inode(inode, metaData, dirDefACEs);
 
@@ -581,11 +630,19 @@ public class InodeUtils {
                             .setInode(inode.getNodeId())
                             .setCookie(inode.getCookie());
 
+                    long finalOldNodeId = oldNodeId;
+                    long finalNewNodeId = metaData.getInode();
                     return ErasureClient.updateMetaDataAcl(key, metaData, nodeList, null, tuple2.var2, inode)
                             .map(r -> {
                                 if (r.var1 == 1) {
+                                    if (finalOldNodeId != -1) {
+                                        AsyncUtils.refreshFSQuota(bucket, finalOldNodeId, finalNewNodeId);
+                                    }
                                     return inode;
                                 } else if (r.var1 == 2) {
+                                    if (finalOldNodeId != -1) {
+                                        AsyncUtils.refreshFSQuota(bucket, finalOldNodeId, finalNewNodeId);
+                                    }
                                     return r.var2 == null ? inode : r.var2;
                                 } else {
                                     return ERROR_INODE;

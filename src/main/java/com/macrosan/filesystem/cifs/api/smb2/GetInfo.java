@@ -187,7 +187,7 @@ public class GetInfo {
                 FsQuotaInfo fsQuotaInfo = new FsQuotaInfo();
                 if (StringUtils.isNotBlank(fileInfo.obj) && fileInfo.obj.endsWith(SMB_CAP_QUOTA_FILE_NAME)) {
                     String dirName = CifsUtils.getParentDirName(fileInfo.obj);
-                    return FsUtils.lookup(bucketName, dirName, null, false, false, -1, null)
+                    return FsUtils.lookup(bucketName, dirName, null, false, -1, null)
                             .flatMap(inode -> {
                                 if (InodeUtils.isError(inode)) {
                                     body.setInfo(fsQuotaInfo);
@@ -532,7 +532,7 @@ public class GetInfo {
 
         switch (call.getFileInfoClass()) {
             case FSCC_FILE_QUOTA_INFORMATION:
-                return FsUtils.lookup(fileInfo.bucket, dirName, null, false, false, -1, null)
+                return FsUtils.lookup(fileInfo.bucket, dirName, null, false, -1, null)
                         .flatMap(inode -> {
                             if (InodeUtils.isError(inode)) {
                                 reply.getHeader().status = NTStatus.STATUS_IO_DEVICE_ERROR;

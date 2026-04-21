@@ -124,10 +124,15 @@ public class RabbitMqChannels {
         String thread = Thread.currentThread().getName();
         int index = thread.hashCode() % PUBLISH_CHANNEL_AMOUNT;
         Map<String, Channel> channelsMap = getChannelMap(type)
-                .getOrDefault(index, new ConcurrentHashMap<>(HEART_IP_LIST.size()));
+                .computeIfAbsent(index, k -> new ConcurrentHashMap<>(HEART_IP_LIST.size()));
+        Channel cachedChannel = channelsMap.get(ip);
+        // 检查缓存的 channel 是否有效，如果已关闭则移除并重新创建
+        if (cachedChannel != null && !cachedChannel.isOpen()) {
+            log.info(ip + "cachedChannel is not open, remove it and create a new one.");
+            channelsMap.remove(ip, cachedChannel);
+        }
         return channelsMap.computeIfAbsent(ip, key -> {
             Channel channel = initSingleChannel(ip, type);
-            getChannelMap(type).put(index, channelsMap);
             return channel;
         });
     }

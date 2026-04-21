@@ -1,7 +1,6 @@
 package com.macrosan.message.jsonmsg;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.*;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.io.BaseEncoding;
 import com.macrosan.constants.SysConstants;
@@ -54,25 +53,52 @@ import static com.macrosan.filesystem.utils.ChunkFileUtils.MAX_CHUNK_SIZE;
 @JsonInclude(JsonInclude.Include.NON_DEFAULT)
 @Log4j2
 public class Inode {
+    @JsonProperty("0")
+    @JsonAlias({"mode"})
     int mode;
+    @JsonProperty("1")
+    @JsonAlias({"cifsMode"})
     int cifsMode;
+    @JsonProperty("2")
+    @JsonAlias({"size"})
     long size;
+    @JsonProperty("3")
+    @JsonAlias({"nodeId"})
     long nodeId;
+    @JsonProperty("4")
+    @JsonAlias({"atime"})
     long atime;
+    @JsonProperty("5")
+    @JsonAlias({"mtime"})
     long mtime;
+    @JsonProperty("6")
+    @JsonAlias({"ctime"})
     long ctime;
+    @JsonProperty("7")
+    @JsonAlias({"createTime"})
     long createTime;
+    @JsonProperty("8")
+    @JsonAlias({"atimensec"})
     int atimensec;
+    @JsonProperty("9")
+    @JsonAlias({"mtimensec"})
     int mtimensec;
+    @JsonProperty("a")
+    @JsonAlias({"ctimensec"})
     int ctimensec;
-
+    @JsonProperty("b")
+    @JsonAlias({"linkN"})
     int linkN;
     int uid;
     int gid;
     int majorDev;
     int minorDev;
 
+    @JsonProperty("c")
+    @JsonAlias({"bucket"})
     String bucket;
+    @JsonProperty("d")
+    @JsonAlias({"objName"})
     String objName;
     String versionId = "null";
 
@@ -81,9 +107,13 @@ public class Inode {
     }
 
     //软连接
+    @JsonProperty("e")
+    @JsonAlias({"reference"})
     String reference;
     String versionNum;
     // 在create时记录存储池，确保多存储池上传情况中所有数据块在同一存储池中
+    @JsonProperty("f")
+    @JsonAlias({"storage"})
     String storage;
 
     /**
@@ -99,10 +129,14 @@ public class Inode {
     List<Inode.ACE> ACEs = null;
 
     //存放对象ACL的权限
+    @JsonProperty("g")
+    @JsonAlias({"objAcl"})
     String objAcl;
 
     Map<String, Boolean> updateInodeDataStatus = null; // 记录file的更新状态，true 更新成功，false 更新失败
 
+    @JsonProperty("h")
+    @JsonAlias({"cookie"})
     long cookie;
 
     // 统计升级前后当前inode含有的新版本createTime属性元数据的数量
@@ -112,6 +146,8 @@ public class Inode {
     //附加属性
     Map<String, String> xAttrMap = new HashMap<>();
 
+    @JsonProperty("i")
+    @JsonAlias({"inodeData"})
     List<InodeData> inodeData = new LinkedList<>();
     //InodeOperator的updateInode时临时使用, 一般情况下都是null
     Map<String, List<UpdateChunkOpt>> updateChunk = null;
@@ -120,6 +156,33 @@ public class Inode {
 
     //创建inode的moss账户若配置了uid；或者uid账户配置了moss账户，则该aclTag置为1；否则为0，用于标识未完成配置的旧文件，使旧文件仍旧可读
     int aclTag;
+
+
+    @JsonSetter(value = "objName")
+    public void setJsonObjectName(String objName) {
+        this.objName = objName;
+        if (reference == null) {
+            this.reference = objName;
+        }
+    }
+
+    @JsonSetter(value = "reference")
+    public void setJsonReference(String reference) {
+        if (reference == null) {
+            this.reference = this.objName;
+        } else {
+            this.reference = reference;
+        }
+    }
+
+    @JsonGetter(value = "reference")
+    public String getJsonReference() {
+        if (objName != null && objName.equals(reference)) {
+            return null;
+        } else {
+            return reference;
+        }
+    }
 
     public static void updateChunk(Inode inode, String chunkKey, UpdateChunkOpt opt) {
         if (inode.updateChunk == null) {
@@ -277,15 +340,29 @@ public class Inode {
      * 实际读取时，从原始文件的offset处，读取size个字节
      */
     public static class InodeData {
+        @JsonProperty("0")
+        @JsonAlias({"size"})
         public long size;
+        @JsonProperty("1")
+        @JsonAlias({"fileName"})
         public String fileName;
+        @JsonProperty("2")
+        @JsonAlias({"storage"})
         public String storage;
+        @JsonProperty("3")
+        @JsonAlias({"offset"})
         public long offset;
+        @JsonProperty("4")
+        @JsonAlias({"etag"})
         public String etag;
+        @JsonProperty("5")
+        @JsonAlias({"chunkNum"})
         public int chunkNum;
         //实际数据块的 fileSize = size + offset + size0
         // 减小size并且offset变时 通过修改size0，保持fileSize不变
         //chunk 不需要记录 size0
+        @JsonProperty("6")
+        @JsonAlias({"size0"})
         public long size0;
 
         @JsonIgnore

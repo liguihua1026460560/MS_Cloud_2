@@ -158,7 +158,7 @@ public class PutErrorHandler {
     @HandleErrorFunction(value = ERROR_PUT_OBJECT_FILE, timeout = 0L)
     public static Mono<Boolean> recoverPutFile(String lun, String bucket, String object, String fileName, String storage,
                                                String versionId, List<Integer> errorChunksList, String updateEC, String fileSize,
-                                               SocketReqMsg msg, String snapshotMark) {
+                                               SocketReqMsg msg, String snapshotMark, String doubleWriteRecover) {
         String fileOffset = msg.get("fileOffset");
         StoragePool bucketPool = StoragePoolFactory.getMetaStoragePool(bucket);
         String bucketVnode = InodeUtils.getVnodeFromObjectName(object, bucketPool, bucket);
@@ -232,8 +232,14 @@ public class PutErrorHandler {
                         String objVnode = objPool.getObjectVnodeId(curMeta);
                         String versionMetaKey = Utils.getVersionMetaDataKey(bucketVnode, bucket, object, versionId, snapshotMark);
 
-                        return objPool.mapToNodeInfo(objVnode).flatMap(nodeList -> recoverSpecificChunks(objPool, versionMetaKey,
-                                lun, errorChunksList, ERROR_PUT_OBJECT_FILE, fileName, curMeta.endIndex, msg, nodeList));
+                        return objPool.mapToNodeInfo(objVnode).flatMap(nodeList -> {
+                            if (StringUtils.isNotEmpty(doubleWriteRecover) && "1".equals(doubleWriteRecover)) {
+                                nodeList.get(errorChunksList.get(0)).var1 = CURRENT_IP;
+                                nodeList.get(errorChunksList.get(0)).var2 = lun;
+                            }
+                            return recoverSpecificChunks(objPool, versionMetaKey,
+                                    lun, errorChunksList, ERROR_PUT_OBJECT_FILE, fileName, curMeta.endIndex, msg, nodeList);
+                            });
                     } else if (curMeta.equals(ERROR_META)) {
                         ObjectPublisher.publish(CURRENT_IP, msg, ERROR_PUT_OBJECT_FILE);
                         return Mono.just(false);
@@ -281,7 +287,7 @@ public class PutErrorHandler {
 
     @HandleErrorFunction(value = ERROR_PART_UPLOAD_FILE, timeout = 0L)
     public static Mono<Boolean> recoverPartUploadFile(String storage, String lun, String bucket, String object, String versionId, String uploadId, String partNum,
-                                                      String fileName, String endIndex, List<Integer> errorChunksList, String updateEC, SocketReqMsg msg, String snapshotMark, String initSnapshotMark, String quotaDirList) {
+                                                      String fileName, String endIndex, List<Integer> errorChunksList, String updateEC, SocketReqMsg msg, String snapshotMark, String initSnapshotMark, String quotaDirList, String doubleWriteRecover) {
         StoragePool storagePool = StoragePoolFactory.getStoragePool(storage, bucket);
         String objVnode = storagePool.getObjectVnodeId(fileName);
         StoragePool bucketPool = StoragePoolFactory.getMetaStoragePool(bucket);
@@ -293,8 +299,14 @@ public class PutErrorHandler {
                             // 如果meta或partInfo含任意记录，则进行数据恢复。否则直接消费该条消息.
                             if (b) {
                                 return storagePool.mapToNodeInfo(objVnode)
-                                        .flatMap(nodeList -> recoverSpecificChunks(storagePool, null, lun, errorChunksList, ERROR_PART_UPLOAD_FILE,
-                                                fileName, Long.parseLong(endIndex), msg, nodeList));
+                                        .flatMap(nodeList -> {
+                                            if (StringUtils.isNotEmpty(doubleWriteRecover) && "1".equals(doubleWriteRecover)) {
+                                                nodeList.get(errorChunksList.get(0)).var1 = CURRENT_IP;
+                                                nodeList.get(errorChunksList.get(0)).var2 = lun;
+                                            }
+                                            return recoverSpecificChunks(storagePool, null, lun, errorChunksList, ERROR_PART_UPLOAD_FILE,
+                                                    fileName, Long.parseLong(endIndex), msg, nodeList);
+                                        });
                             } else if (snapshotMark != null) {
                                 return getDataMergeMapping(bucket)
                                         .map(mapping -> {

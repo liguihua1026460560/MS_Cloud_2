@@ -11,10 +11,7 @@ import lombok.extern.log4j.Log4j2;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,12 +64,13 @@ public class NFS4ClientControl {
     }
 
     public void removeClient(NFS4Client client) {
-        synchronized (this) {
-            clientMap.remove(client.getClientId());
-            //移除客户端对应的stateId以及lock
-            client.tryDispose().subscribe();
-//            clientOps.removeClient(client.getOwnerId());
-        }
+        clientMap.compute(client.getClientId(), (k, v) -> {
+            if (v != null) {
+                //移除客户端对应的stateId以及lock
+                client.tryDispose().subscribe();
+            }
+            return null;
+        });
     }
 
     private void addClient(NFS4Client newClient) {
@@ -81,7 +79,7 @@ public class NFS4ClientControl {
     }
 
 
-    public synchronized NFS4Client getConfirmedClient(long clientId) {
+    public NFS4Client getConfirmedClient(long clientId) {
         NFS4Client client = getValidClient(clientId);
         if (!client.getConfirmed()) {
             throw new NFSException(NFS4ERR_STALE_CLIENTID, "getConfirmedClient : client  not confirm");
@@ -90,7 +88,7 @@ public class NFS4ClientControl {
     }
 
 
-    public synchronized NFS4Client getValidClient(long clientId) {
+    public NFS4Client getValidClient(long clientId) {
         NFS4Client client = getClient(clientId);
         if (!client.leaseValid()) {
             throw new NFSException(NFS4ERR_STALE_CLIENTID, "getValidClient : client lease not valid");
@@ -108,11 +106,12 @@ public class NFS4ClientControl {
     }
 
     public NFS4Client getClient(long clientId) {
-        NFS4Client client = clientMap.get(clientId);
-        if (client == null) {
-            throw new NFSException(NFS4ERR_STALE_CLIENTID, "getClient : not exist clientId");
-        }
-        return client;
+        return clientMap.compute(clientId, (k, v) -> {
+            if (v == null) {
+                throw new NFSException(NFS4ERR_STALE_CLIENTID, "getClient : not exist clientId");
+            }
+            return v;
+        });
     }
 
     public NFS4Client getClient0(long clientId) {
@@ -142,10 +141,13 @@ public class NFS4ClientControl {
         return clientMap.get(clientId);
     }
 
-    public NFS4Client clientByOwner(byte[] ownerId) {
-        return clientMap.values().stream()
-                .filter(client -> Arrays.equals(client.getOwnerId(), ownerId))
-                .findAny()
+    public NFS4Client clientByOwner(byte[] ownerId, SocketAddress address, SocketAddress localAddress) {
+        List<NFS4Client> clients = new ArrayList<>(clientMap.values());
+        return clients.stream()
+                .filter(client -> Arrays.equals(client.getOwnerId(), ownerId)
+                        && address.host().equals(client.getClientAddress())
+                        && localAddress.host().equals(client.getLocalAddress()))
+                .findFirst()
                 .orElse(null);
     }
 
@@ -163,7 +165,7 @@ public class NFS4ClientControl {
         return new ArrayList<>(clientMap.values());
     }
 
-    public NFS4Client createClient(SocketAddress clientAddress,SocketAddress localAddress, int minorVersion,
+    public NFS4Client createClient(SocketAddress clientAddress, SocketAddress localAddress, int minorVersion,
                                    byte[] ownerID, byte[] verifier, Auth auth, NFSHandler nfsHandler) {
         NFS4Client client = new NFS4Client(this, createClientId(), minorVersion, clientAddress,
                 localAddress, ownerID, verifier, auth, TimeUnit.SECONDS.toMillis(leaseTime), nfsHandler);
@@ -177,15 +179,15 @@ public class NFS4ClientControl {
     }
 
 
-    public synchronized void reclaimComplete(byte[] owner) {
+    public void reclaimComplete(byte[] owner) {
 //        clientOps.reclaimClient(owner);
     }
 
-    public synchronized void wantReclaim(byte[] owner) {
+    public void wantReclaim(byte[] owner) {
 //        clientOps.wantReclaim(owner);
     }
 
-    private synchronized void clearClients() {
+    private void clearClients() {
         clientMap.values()
                 .forEach(c -> {
                     c.tryDispose().subscribe();

@@ -60,6 +60,9 @@ public class PartUtils {
 
     public static void init() {
         try {
+            String escapeFlag = RedisConnPool.getInstance().getShortMasterCommand(REDIS_SYSINFO_INDEX).hget(PART_CONFIG, ESCAPE_FLAG);
+            ETAG_ESCAPE_FLAG = Boolean.parseBoolean(escapeFlag);
+
             Long redisPartSize = getPartSizeFromRedis();
 
             if (redisPartSize != null && isValidPartSize(redisPartSize)) {

@@ -95,7 +95,8 @@ public class LengthFieldDecoder extends BaseSubscriber<Buffer> {
     }
 
     public Flux<Buffer> decode() {
-        return output;
+        // 收到下游cancel信号，则向上游发送cancel信号
+        return output.doOnCancel(this::cancel);
     }
 
 }

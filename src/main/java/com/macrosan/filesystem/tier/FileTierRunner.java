@@ -47,6 +47,7 @@ import static com.macrosan.ec.ECUtils.publishEcError;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_PUT_OBJECT_FILE;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.ERROR_ROLL_BACK_FILE;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
+import static com.macrosan.filesystem.tier.FileTierMove.ONCE;
 import static com.macrosan.filesystem.utils.FsTierUtils.FS_TIER_DEBUG;
 import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.storage.StorageOperate.PoolType.CACHE;
@@ -106,7 +107,6 @@ public class FileTierRunner {
                     FsUtils.fsExecutor.submit(this::run);
                 }
             } else {
-                total.incrementAndGet();
                 decrement.set(true);
                 runTask(task.var1, task.var2)
                         .timeout(Duration.ofMinutes(15))
@@ -210,7 +210,12 @@ public class FileTierRunner {
                     iterator.next();
                     if (!value.startsWith(ROCKS_OBJ_META_DELETE_MARKER)) {
                         queue.offer(new Tuple2<>(key, value));
+                        total.incrementAndGet();
                         if (queueSize.incrementAndGet() > 2000) {
+                            return;
+                        }
+                        if (total.get() >= ONCE) {
+                            scanEnd.set(true);
                             return;
                         }
                     }
@@ -477,7 +482,13 @@ public class FileTierRunner {
                             .put("vnode", t.var3)
                             .put("compression", cachePool.getCompression())
                             .put("fileOffset", String.valueOf(fileOffset))
-                            .put("metaKey", metaKey);
+                            .put("metaKey", metaKey)
+                            .put("bucket", inode.getBucket())
+                            .put("object", inode.getObjName())
+                            .put("versionId", inode.getVersionId())
+                            .put("storage", cachePool.getVnodePrefix())
+                            .put("fileSize", String .valueOf(fileSize));
+
 
                     if (isEnableCacheAccessTimeFlush(cachePool)) {
                         msg.put("lastAccessStamp", stamp);//将对象的get访问时间作为缓存池中该数据的访问记录
@@ -568,7 +579,7 @@ public class FileTierRunner {
                 .setStorage(targetPool.getVnodePrefix())
                 .setSize(fileSize);
 
-        return Node.getInstance().updateInodeData(inode.getBucket(), inode.getNodeId(), fileOffset, tmp, "", "oldInodeData")
+        return Node.getInstance().updateInodeData2(inode.getBucket(), inode.getNodeId(), fileOffset, tmp, "", "oldInodeData")
                 .flatMap(resInode -> {
                     if (resInode.getLinkN() == Inode.UPDATE_PROCESS_INODE.getLinkN()) {
                         updateProcess.set(true);

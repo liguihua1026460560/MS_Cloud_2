@@ -127,5 +127,5 @@ public class CreateCall extends SMB2Body {
     public static final int FILE_GENERIC_READ = 0x80000000;
     public static final int FILE_GENERIC_WRITE = 0x40000000;
 
-    public static final int FILE_WRITE_ACCESS = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_DAC | FILE_GENERIC_WRITE;
+    public static final int FILE_WRITE_ACCESS = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_GENERIC_WRITE;
 }

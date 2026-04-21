@@ -535,7 +535,9 @@ public class SMBHandler {
                                         }
 
                                         reply.getHeader().status = NTStatus.STATUS_TIMEOUT;
-
+                                        if (e instanceof NFSException && ((NFSException) e).getErrCode() == NFS3ERR_DQUOT) {
+                                            reply.getHeader().setStatus(STATUS_DISK_QUOTA_EXCEEDED);
+                                        }
 
                                         return Mono.just(reply);
                                     })

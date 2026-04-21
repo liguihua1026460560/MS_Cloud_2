@@ -493,6 +493,15 @@ public class SocketReqMsgBuilder {
             if (!StringUtils.isEmpty(paramMap.get("storageStrategy"))) {
                 msg.put("storageStrategy", paramMap.get("storageStrategy"));
             }
+            if (!StringUtils.isEmpty(paramMap.getOrDefault("AccountUid", ""))) {
+                msg.put("accountUid", paramMap.get("AccountUid"));
+            }
+            if (!StringUtils.isEmpty(paramMap.getOrDefault("AccountGid", ""))) {
+                msg.put("accountGid", paramMap.get("AccountGid"));
+            }
+            if (!StringUtils.isEmpty(paramMap.getOrDefault("AccountGids", ""))) {
+                msg.put("accountGids", paramMap.get("AccountGids"));
+            }
         } catch (UnsupportedEncodingException e) {
             e.printStackTrace();
         }

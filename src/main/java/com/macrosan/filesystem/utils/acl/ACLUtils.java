@@ -109,6 +109,48 @@ public class ACLUtils {
         }
     }
 
+    /**
+     * NT AUTHORITY (S-1-5-) Well-Known SIDs
+     * 来源：Microsoft [MS-DTYP] 2.4.2.4 Well-Known SID Structures
+     */
+    public enum NtAuthorityWellKnownSid {
+        // 常用系统账户
+        DIALUP("S-1-5-1"),
+        NETWORK("S-1-5-2"),
+        BATCH("S-1-5-3"),
+        INTERACTIVE("S-1-5-4"),
+        SERVICE("S-1-5-6"),
+        ANONYMOUS("S-1-5-7"),
+        PROXY("S-1-5-8"),
+        ENTERPRISE_DOMAIN_CONTROLLERS("S-1-5-9"),
+        PRINCIPAL_SELF("S-1-5-10"),
+        AUTHENTICATED_USERS("S-1-5-11"),
+        RESTRICTED_CODE("S-1-5-12"),
+        TERMINAL_SERVER_USER("S-1-5-13"),
+        REMOTE_INTERACTIVE_LOGON("S-1-5-14"),
+        THIS_ORGANIZATION("S-1-5-15"),
+        IUSR("S-1-5-17"),
+        LOCAL_SYSTEM("S-1-5-18"),
+        LOCAL_SERVICE("S-1-5-19"),
+        NETWORK_SERVICE("S-1-5-20");
+
+        public String sid;
+
+        NtAuthorityWellKnownSid(String sid) { this.sid = sid; }
+
+        /**
+         * 根据 SID 字符串查找枚举
+         */
+        public static NtAuthorityWellKnownSid fromSid(String sid) {
+            for (NtAuthorityWellKnownSid wks : values()) {
+                if (wks.sid.equals(sid)) {
+                    return wks;
+                }
+            }
+            return null;
+        }
+    }
+
     public static void init() {
         init(true);
     }
@@ -1813,6 +1855,9 @@ public class ACLUtils {
         if (isUser) {
             if (sid.startsWith(FSIdentity.USER_SID_PREFIX)) {
                 try {
+                    if (NtAuthorityWellKnownSid.fromSid(sid) != null) {
+                        return false;
+                    }
                     String uidStr = sid.substring(FSIdentity.USER_SID_PREFIX.length());
                     int uid = Integer.parseInt(uidStr);
                     if (uid >= 0) {

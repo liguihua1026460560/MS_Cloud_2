@@ -67,6 +67,12 @@ public class ControlHandler {
             session.close();
             session.releaseLock();
             // 释放数据连接端口号
+            try {
+                FTPPort.releasePort(session.clientIP, session.dataTransferport, session);
+            } catch (Exception e0) {
+                log.error("exception release error", e0);
+            }
+
             if (ftpDebug) {
                 log.info("data port rest: {}", session.calculateRestDataPortNum());
             }
@@ -75,6 +81,13 @@ public class ControlHandler {
         socket.closeHandler(v -> {
             session.close();
             session.releaseLock();
+            // 释放数据连接端口号
+            try {
+                FTPPort.releasePort(session.clientIP, session.dataTransferport, session);
+            } catch (Exception e) {
+                log.error("close release error", e);
+            }
+
             if (ftpDebug) {
                 log.info("data port rest: {}", session.calculateRestDataPortNum());
             }

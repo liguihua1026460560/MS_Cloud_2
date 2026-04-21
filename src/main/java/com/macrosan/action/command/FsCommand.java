@@ -11,8 +11,11 @@ import com.macrosan.filesystem.cifs.CIFS;
 import com.macrosan.filesystem.cifs.handler.SMBHandler;
 import com.macrosan.filesystem.cifs.lease.LeaseServer;
 import com.macrosan.filesystem.cifs.lock.CIFSLockServer;
+import com.macrosan.filesystem.cifs.notify.NotifyCache;
+import com.macrosan.filesystem.cifs.shareAccess.ShareAccessClient;
 import com.macrosan.filesystem.cifs.shareAccess.ShareAccessServer;
 import com.macrosan.filesystem.ftp.FTP;
+import com.macrosan.filesystem.ftp.FTPPort;
 import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.lock.redlock.RedLockServer;
 import com.macrosan.filesystem.nfs.NFS;
@@ -32,6 +35,7 @@ import com.macrosan.localtransport.Command;
 import com.macrosan.message.jsonmsg.CliResponse;
 import com.macrosan.message.jsonmsg.FSQuotaConfig;
 import com.macrosan.storage.move.CacheMove;
+import com.macrosan.utils.functional.Tuple2;
 import com.macrosan.utils.functional.Tuple3;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
@@ -48,6 +52,8 @@ import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 import static com.macrosan.filesystem.FsConstants.SMB2ACCESS_MASK.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEFlag.*;
 import static com.macrosan.filesystem.cache.Vnode.FS_VNODE_STATE_DEBUG;
+import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MAX_PORT;
+import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MIN_PORT;
 import static com.macrosan.filesystem.lock.Lock.*;
 import static com.macrosan.filesystem.quota.FSQuotaRealService.getQuotaConfigCache;
 
@@ -113,6 +119,14 @@ public class FsCommand extends Reusable {
                     boolean lockEnable = Boolean.parseBoolean(args[1]);
                     RedLockClient.LOCK_ENABLE = lockEnable;
                     break;
+                case "shareAccess":
+                    CliResponse shareAccessRes = new CliResponse();
+                    if (args.length > 1) {
+                        boolean shareAccessSwitch = Boolean.parseBoolean(args[1]);
+                        ShareAccessClient.shareAccessSwitch = shareAccessSwitch;
+                    }
+                    shareAccessRes.setStatus("shareAccessSwitch:" + ShareAccessClient.shareAccessSwitch);
+                    return shareAccessRes;
                 case "NLMDebug":
                     boolean NLMDebug = Boolean.parseBoolean(args[1]);
                     NLMLockClient.LOCK_DEBUG = NLMDebug;
@@ -225,6 +239,9 @@ public class FsCommand extends Reusable {
                 case "aclStart":
                     boolean aclStart = Boolean.parseBoolean(args[1]);
                     ACLUtils.NFS_ACL_START = aclStart;
+                    break;
+                case "notify":
+                    log.info("【notify Info:】" + NotifyCache.info());
                     break;
                 case "updateFsPort":
                     CliResponse updateFsPortRes = new CliResponse();
@@ -444,6 +461,29 @@ public class FsCommand extends Reusable {
                         default:
                             log.info("running {}", DelFileRunner.deleteRunning);
                             log.info("limit {}", DelFileRunner.deleteLimit);
+                    }
+                    break;
+                case "printIpMap":
+                    try {
+                        log.info("【printIpMap】 printIpMap: {}", Arrays.toString(FTPPort.IP_MAP));
+                        break;
+                    } catch (Exception e) {
+                        log.error("printIpMap:", e);
+                    }
+                    break;
+                case "printSpecialIp":
+                    try {
+                        String clientIP = args[1];
+                        int restPortNum = 0;
+                        for (int i = 0; i < FTPPort.IP_MAP.length; i++) {
+                            if (FTPPort.IP_MAP[i].get(clientIP) == null) {
+                                restPortNum++;
+                            }
+                        }
+
+                        log.info("【printSpecialIp】 restPortNum: {}", restPortNum);
+                    } catch (Exception e) {
+                        log.error("printSpecialIp:", e);
                     }
                     break;
                 default:
@@ -811,7 +851,27 @@ public class FsCommand extends Reusable {
             }
 
             if (isRestartFtp) {
-                FTP.restart();
+                FTP.restart(false);
+            }
+
+            boolean isRestartFtpDataPort = false;
+            Tuple2<Integer, Integer> minAndMax = FsUtils.getFsPortRange();
+            int min = minAndMax.var1;
+            int max = minAndMax.var2;
+            if (min > 0 && max > 0) {
+                if (min != FTP_DATA_MIN_PORT) {
+                    FTP_DATA_MIN_PORT = min;
+                    isRestartFtpDataPort = true;
+                }
+
+                if (max != FTP_DATA_MAX_PORT) {
+                    FTP_DATA_MAX_PORT = max;
+                    isRestartFtpDataPort = true;
+                }
+
+                if (isRestartFtpDataPort) {
+                    FTP.restart(true);
+                }
             }
 
             log.info("update fs port success");

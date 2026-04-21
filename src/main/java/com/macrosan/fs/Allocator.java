@@ -2,6 +2,7 @@ package com.macrosan.fs;
 
 import lombok.AllArgsConstructor;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 import lombok.extern.log4j.Log4j2;
 
 /**
@@ -23,6 +24,7 @@ public class Allocator {
      */
     @AllArgsConstructor
     @NoArgsConstructor
+    @ToString
     public static class Result {
         /**
          * allocator.allocate生成的offset：申请到的逻辑空间块是整个存储空间的第几个块
@@ -40,6 +42,10 @@ public class Allocator {
     }
 
     private long addr;
+
+    protected Allocator() {
+
+    }
 
     /**
      * @param diskSize  磁盘有多少个逻辑空间块

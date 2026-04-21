@@ -4,6 +4,7 @@ import com.google.common.net.InetAddresses;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.rsocket.client.RSocketClient;
+import com.macrosan.rsocket.data.DataServer;
 import io.rsocket.RSocketFactory;
 import io.rsocket.plugins.DuplexConnectionInterceptor;
 import io.rsocket.transport.netty.TcpDuplexConnection;
@@ -118,6 +119,7 @@ public class Rsocket {
 
     public static void init() {
         init(ServerConfig.getInstance().getHeartIp1(), BACK_END_PORT, false);
+        DataServer.start();
     }
 
     public static void initAsync() {

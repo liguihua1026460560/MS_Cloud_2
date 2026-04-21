@@ -77,6 +77,7 @@ import static com.macrosan.filesystem.cifs.reply.smb1.TreeConnectXReply.STANDARD
 import static com.macrosan.filesystem.cifs.reply.smb2.CreateReply.*;
 import static com.macrosan.filesystem.cifs.rpc.RPCConstants.*;
 import static com.macrosan.filesystem.cifs.shareAccess.ShareAccessLock.FILE_CHECK_SHAREACCESS;
+import static com.macrosan.filesystem.cifs.types.smb2.FileAttrTagInfo.FILE_ATTRIBUTE_READONLY;
 import static com.macrosan.filesystem.cifs.types.smb2.SMB2FileId.isFileNeedDelete;
 import static com.macrosan.filesystem.cifs.types.smb2.SMB2FileId.needDeleteSet;
 import static com.macrosan.filesystem.cifs.types.smb2.pipe.CreatePipe.createVirtualRpcPipeInode;
@@ -387,7 +388,8 @@ public class SMB2Proc {
             }
         }
 
-
+        String bucket = NFSBucketInfo.getBucketName(header.tid);
+        FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
         boolean[] caseSensitive = {SMB2.caseSensitive};
 
         // 检查桶是否开启文件共享，若已关闭则返错；创建inode需要用到父目录的nodeId，因此先lookup父目录
@@ -398,9 +400,6 @@ public class SMB2Proc {
                         return Mono.just(reply);
                     }
                     log.debug("caseSensitive public:bucket={}:{}", SMB2.caseSensitive, caseSensitive[0]);
-
-                    String bucket = NFSBucketInfo.getBucketName(header.tid);
-                    FSPerformanceService.addIp(bucket, header.getHandler().getClientAddress());
 
                     ReqInfo reqHeader = new ReqInfo();
                     reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(bucket);
@@ -459,6 +458,21 @@ public class SMB2Proc {
                                         .flatMap(inode -> {
                                             int cifsMode = CifsUtils.getCIFSMode(call.getCreateOptions(), call.getMode());
                                             int mode = CifsUtils.getNFSMode(call.getCreateOptions());
+
+                                            if (inode.getNodeId() > 0) {
+                                                int inodeSmb2Mode = inode.getCifsMode();
+
+                                                boolean isReadOnly = (inodeSmb2Mode & FILE_ATTRIBUTE_READONLY) != 0;
+                                                if (isReadOnly) {
+                                                    long accessMask = call.getAccess();
+
+                                                    // 检查是否有写权限
+                                                    if ((accessMask & FILE_WRITE_ACCESS) != 0) {
+                                                        reply.getHeader().setStatus(STATUS_ACCESS_DENIED);
+                                                        return Mono.just(reply);
+                                                    }
+                                                }
+                                            }
 
                                             boolean[] isReconnect = {false};
                                             SMB2FileId[] oldFileID = new SMB2FileId[1];
@@ -868,7 +882,7 @@ public class SMB2Proc {
                     if (!fileInfo.abandon.get()) {
                         if (header.getHandler().negprotInfo.getDialect() >= NegprotCall.SMB_3_0_0) {
 //                            call.writeFlags |= SMB2_WRITEFLAG_WRITE_THROUGH;
-                            writeRes = qosMono.flatMap(aLong -> WriteCacheClient.cifsWrite(smb2FileId, call.writeOffset, call.data, inode, call.writeFlags, fileInfo.allocationSize))
+                            writeRes = qosMono.flatMap(aLong -> WriteCacheClient.cifsWrite(smb2FileId, call.writeOffset, call.data, inode, call.writeFlags, fileInfo))
                                     .map(success -> success ? 0 : 1);
                         } else {
                             fileInfo.updateTimeOnClose = true;

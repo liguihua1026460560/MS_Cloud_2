@@ -6,7 +6,6 @@ import com.macrosan.filesystem.cifs.CIFS;
 import com.macrosan.filesystem.cifs.handler.SMBHandler;
 import com.macrosan.filesystem.cifs.types.smb2.SMB2FileId;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
-import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.storage.StorageOperate;
@@ -37,11 +36,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.macrosan.constants.SysConstants.ES_ON;
 import static com.macrosan.constants.SysConstants.ES_SWITCH;
-import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
 import static com.macrosan.filesystem.cache.BytesPool.MAX_BYTE_POOL_SIZE;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
 import static com.macrosan.filesystem.utils.InodeUtils.isError;
-import static com.macrosan.message.jsonmsg.Inode.*;
+import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.storage.StorageOperate.PoolType.DATA;
 
 @Log4j2
@@ -447,41 +445,10 @@ public class WriteCache {
                 });
     }
 
-
     private Mono<Inode> putObj(Encoder encoder0, Inode inode, long curOffset, int curSize, String md5, int updateTime, StoragePool dataPool) {
-        String fileName = Utils.getObjFileName(dataPool, bucket, inode.getObjName() + RandomStringUtils.randomAlphanumeric(4),
-                RandomStringUtils.randomAlphanumeric(32)) + '/';
-        String vnode = fileName.split(File.separator)[1].split("_")[0];
-        List<Tuple3<String, String, String>> nodeList = dataPool.mapToNodeInfo(vnode).block();
         encoder0.complete();
-
-        MonoProcessor<Boolean> rollBackProcessor = MonoProcessor.create();
-        return FsUtils.putObj(dataPool, encoder0, fileName, nodeList, inode, curOffset, rollBackProcessor)
-                .flatMap(b -> {
-                    if (!b) {
-                        log.error("put obj {} fail.", fileName);
-                        return Mono.just(ERROR_INODE);
-                    } else {
-                        Inode.InodeData inodeData = new Inode.InodeData()
-                                .setSize(curSize)
-                                .setStorage(dataPool.getVnodePrefix())
-                                .setOffset(0L)
-                                .setEtag(md5)
-                                .setFileName(fileName);
-                        return Node.getInstance().updateInodeData(bucket, nodeId, curOffset, inodeData, "", "", updateTime, inode.getXAttrMap().get(QUOTA_KEY))
-                                .flatMap(i -> {
-                                    if (!isError(i) && !i.isDeleteMark()) {
-                                        if (ES_ON.equals(NFSBucketInfo.getBucketInfo(i.getBucket()).get(ES_SWITCH))) {
-                                            return EsMetaTask.putEsMeta(i).map(f -> i);
-                                        }
-                                    } else if (i.isDeleteMark()) {
-                                        rollBackProcessor.onNext(b);
-                                    }
-
-                                    return Mono.just(i);
-                                });
-                    }
-                });
+        FsUtils.PutObjectFunction function = (p, list, msgs) -> FsUtils.sendEncode(p, encoder0, list, msgs);
+        return FsUtils.putObj(inode, function, curOffset, curSize, md5, updateTime, dataPool);
     }
 
     private Mono<Boolean> nfsPutObj(Encoder encoder0, Inode inode, long curOffset, int curSize, String md5, StoragePool dataPool) {

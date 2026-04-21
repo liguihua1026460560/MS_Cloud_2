@@ -57,25 +57,6 @@ public class ErrorRecordUtil {
     }
 
 
-    /**
-     * 任务级别失败记录--用于还没生成record时的错误记录
-     *
-     * @param errorEnum
-     * @param metaData
-     * @return
-     */
-    public static Mono<Boolean> putErrorRecord(ErrorEnum errorEnum, MetaData metaData, ComponentTask task) {
-        TaskErrorRecord taskErrorRecord = new TaskErrorRecord();
-        taskErrorRecord.setObject(metaData.getKey());
-        taskErrorRecord.setBucket(metaData.getBucket());
-        taskErrorRecord.setVersionId(metaData.getVersionId());
-        taskErrorRecord.setTaskName(task.taskName);
-        taskErrorRecord.setErrorMessage(errorEnum.getErrorMessage());
-        taskErrorRecord.setErrorTime(String.valueOf(System.currentTimeMillis()));
-        return putErrorRecord(taskErrorRecord);
-    }
-
-
     // 添加失败记录时需要进行数量限制 ，使用synchronized
     private static final Object PUT_ERROR_RECORD_LOCK = new Object();
 

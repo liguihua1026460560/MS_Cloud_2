@@ -69,7 +69,7 @@ public abstract class RpcHandler {
         return buf;
     }
 
-    public int getRealBufSize(RpcReply reply,int bufSize){
+    public int getRealBufSize(RpcReply reply, int bufSize) {
         if (reply instanceof ReadReply) {
             ReadReply readReply = ((ReadReply) reply);
             bufSize = SunRpcHeader.SIZE + RpcReply.SIZE + FAttr3.SIZE + 20 + (readReply.data != null ? (readReply.data.length + 3) / 4 * 4 : 0);
@@ -136,7 +136,7 @@ public abstract class RpcHandler {
         return buf;
     }
 
-    private void clear() {
+    private void clear(ByteBuf msg) {
         int clearLen = msgLen + 4;
         writeIndex -= clearLen;
 
@@ -145,13 +145,14 @@ public abstract class RpcHandler {
             ByteBuf buf = iterator.next();
             if (buf.readableBytes() <= clearLen) {
                 clearLen -= buf.readableBytes();
-                buf.release();
+//                buf.release();
                 iterator.remove();
             } else {
+                buf.retain();
                 buf.readerIndex(buf.readerIndex() + clearLen);
             }
         }
-
+        msg.release();
         msgLen = -1;
     }
 
@@ -287,7 +288,7 @@ public abstract class RpcHandler {
 
                     paddingLen = 0;
                     for (ByteBuf b : padding) {
-                        b.release();
+//                        b.release();
                     }
 
                     padding.clear();
@@ -295,7 +296,7 @@ public abstract class RpcHandler {
                     msg = Unpooled.wrappedBuffer(bufList.toArray(new ByteBuf[bufList.size()]));
                 }
                 readMsg(msg);
-                clear();
+                clear(msg);
                 loop();
             }
         }
@@ -307,7 +308,7 @@ public abstract class RpcHandler {
 
     public void handle(ByteBuf buf) {
         buf.retain();
-        bufList.add(buf.duplicate());
+        bufList.add(buf);
         writeIndex += buf.readableBytes();
         loop();
     }

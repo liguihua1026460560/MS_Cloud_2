@@ -21,6 +21,7 @@ import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.msutils.checksum.ChecksumProvider;
 import com.macrosan.utils.ratelimiter.RecoverLimiter;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.rsocket.Payload;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
@@ -303,6 +304,25 @@ public class AioUploadServerHandler implements RequestChannalHandler {
                 });
     }
 
+    protected ByteBuf dealCompressionBeforeWrite(ByteBuf data, AtomicReference<CompressionInfo> compressionInfo) {
+        if (CompressorUtils.checkCompressEnable(compression)) {
+            compressionInfo.set(new CompressionInfo());
+            compressionInfoList.add(compressionInfo.get());
+            compressionInfo.get().beforeLen = data.readableBytes();
+            try {
+                Tuple2<byte[], Boolean> res = CompressorUtils.compressDataCheckRatio(data.array(), compression, 1);
+                byte[] bs1 = res.var1;
+                compressionInfo.get().compressFlag = res.var2;
+                compressionFileSize += bs1.length;
+                compressionInfo.get().afterLen = bs1.length;
+                return Unpooled.wrappedBuffer(bs1);
+            } catch (Exception e) {
+                throw new MsException(ErrorNo.UNKNOWN_ERROR, "compression error:" + e.getMessage());
+            }
+        }
+        return data;
+    }
+
     protected byte[] dealCompressionBeforeWrite(byte[] data, AtomicReference<CompressionInfo> compressionInfo) {
         if (CompressorUtils.checkCompressEnable(compression)) {
             compressionInfo.set(new CompressionInfo());
@@ -344,6 +364,17 @@ public class AioUploadServerHandler implements RequestChannalHandler {
         }
     }
 
+    protected ByteBuf dealCryptoBeforeWrite(ByteBuf data, AtomicReference<CryptoInfo> cryptoInfo) {
+        if (CryptoUtils.checkCryptoEnable(crypto)) {
+            cryptoInfo.set(new CryptoInfo());
+            cryptoInfoList.add(cryptoInfo.get());
+            cryptoInfo.get().beforeLen = data.readableBytes();
+            byte[] data1 = CryptoUtils.encrypt(crypto, secretKey, data.array());
+            cryptoInfo.get().afterLen = data1.length;
+            return Unpooled.wrappedBuffer(data1);
+        }
+        return data;
+    }
 
     protected byte[] dealCryptoBeforeWrite(byte[] data, AtomicReference<CryptoInfo> cryptoInfo) {
         if (CryptoUtils.checkCryptoEnable(crypto)) {

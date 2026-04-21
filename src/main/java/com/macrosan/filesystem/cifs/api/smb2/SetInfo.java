@@ -182,8 +182,14 @@ public class SetInfo {
                                             boolean isRootReq = ownerSID.startsWith(FSIdentity.USER_SID_PREFIX)
                                                     && ADMIN_S3ID.equals(s3Id) && ACLUtils.checkSID(ownerSID, true);
                                             boolean isOwner = (inode.getUid() == identity.getUid()) && ACLUtils.checkSID(ownerSID, true);
+                                            boolean alreadyOwner = (inode.getUid() != identity.getUid())  //文件已经非当前挂载账户拥有
+                                                                    && ACLUtils.checkSID(ownerSID, true) //待更改的账户格式合法
+                                                                    && ((call.getAdditionalInfo() & OWNER_SECURITY_INFORMATION) == 1) //第二次请求依然仅存在修改ACL的请求
+                                                                    && (FSIdentity.getUserSIDByUid(inode.getUid()).equals(ownerSID)); //文件拥有者已经是将要修改的拥有者
 
                                             if (isRootReq || isOwner) {
+                                                update = true;
+                                            } else if (alreadyOwner) {
                                                 update = true;
                                             } else {
                                                 reply.getHeader().setStatus(FsConstants.NTStatus.STATUS_ACCESS_DENIED);

@@ -215,7 +215,7 @@ public class UnSynchronizedRecord implements Cloneable {
     /**
      * 文件专用
      */
-    public UnSynchronizedRecord(String bucket, int opt, String syncStamp, long nodeId) {
+    public UnSynchronizedRecord(String bucket, int opt, String syncStamp, long nodeId, String object) {
         this.bucket = bucket;
         this.opt = opt;
         this.syncStamp = syncStamp;
@@ -227,8 +227,9 @@ public class UnSynchronizedRecord implements Cloneable {
         this.commited = false;
         // rocksKey生成使用
         this.uri = File.separator + nodeId;
-        // 兼容差异记录扫描流程中的一些标识，record.object不能为空
-        this.object = String.valueOf(nodeId);
+        // 兼容差异记录扫描流程中的一些标识，record.object不能为空。
+        // 作为差异记录处理顺序的依据。非同名对象且inode不相同的差异记录才可以并发处理。
+        this.object = object == null ? "" : object;
     }
 
     public boolean isFSUnsyncRecord() {

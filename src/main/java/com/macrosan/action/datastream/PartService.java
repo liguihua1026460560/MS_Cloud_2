@@ -108,22 +108,6 @@ public class PartService extends BaseService {
         return instance;
     }
 
-    /**
-     * 初始化分段上传之前的检查
-     *
-     * @param objName 对象名
-     */
-    private void checkObjectName(String objName) {
-        Matcher matcher = OBJECT_NAME_PATTERN.matcher(objName);
-        if (!matcher.matches()) {
-            throw new MsException(ErrorNo.NAME_INPUT_ERR, "InitiateMultipartUpload obj name input error, obj_name:" + objName);
-        }
-
-        if (objName.getBytes(StandardCharsets.UTF_8).length > 1024) {
-            throw new MsException(ErrorNo.NAME_INPUT_ERR, "InitiateMultipartUpload obj name input error, obj_name:" + objName);
-        }
-    }
-
     private void checkPart(InitPartInfo info, String userId, String uploadId, String currentSnapshotMark) {
         if (info.equals(ERROR_INIT_PART_INFO)) {
             throw new MsException(ErrorNo.UNKNOWN_ERROR, "Get Upload Part fail");
@@ -149,18 +133,6 @@ public class PartService extends BaseService {
 
         if (!request.headers().contains(IS_SYNCING) && !userId.equalsIgnoreCase(bucketInfo.get(BUCKET_USER_ID)) && !userId.equalsIgnoreCase(info.initAccount)) {
             throw new MsException(ErrorNo.NO_BUCKET_PERMISSION, "No such bucket permission.userId: " + userId + ".");
-        }
-    }
-
-    private void quotaCheck(Map<String, String> bucketInfo, String accountQuotaFlag, String accountObjNumFlag) {
-        if ("1".equals(bucketInfo.get(QUOTA_FLAG))) {
-            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the bucket quota.");
-        } else if ("1".equals(bucketInfo.get(OBJNUM_FLAG))) {
-            throw new MsException(NO_ENOUGH_OBJECTS, "The hard-max-objects was exceeded.");
-        } else if ("2".equals(accountQuotaFlag)) {
-            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the account quota.");
-        } else if ("2".equals(accountObjNumFlag)) {
-            throw new MsException(NO_ENOUGH_OBJECTS, "The hard-max-objects was exceeded.");
         }
     }
 

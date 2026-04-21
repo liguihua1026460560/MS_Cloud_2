@@ -2,13 +2,11 @@ package com.macrosan.message.socketmsg;
 
 import com.dslplatform.json.CompiledJson;
 import com.dslplatform.json.JsonAttribute;
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.macrosan.utils.msutils.UnsafeUtils;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import lombok.Data;
 import lombok.experimental.Accessors;
-import sun.misc.Unsafe;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -76,6 +74,28 @@ public class SocketReqMsg {
         return copy;
     }
 
+    public ByteBuf toDirectBytes() {
+        int size = dataMap.size();
+        //不能超过4096
+        ByteBuf buf = PooledByteBufAllocator.DEFAULT.directBuffer(4096);
+        buf.writeInt(size);
+
+        for (Map.Entry<String, String> entry : dataMap.entrySet()) {
+            byte[] key = entry.getKey().getBytes();
+            buf.writeInt(key.length);
+            buf.writeBytes(key);
+
+            if (entry.getValue() == null) {
+                buf.writeInt(-1);
+            } else {
+                byte[] value = entry.getValue().getBytes();
+                buf.writeInt(value.length);
+                buf.writeBytes(value);
+            }
+        }
+
+        return buf;
+    }
 
     public ByteBuf toBytes() {
         int size = dataMap.size();

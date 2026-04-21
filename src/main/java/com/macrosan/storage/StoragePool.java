@@ -10,6 +10,9 @@ import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.jsonmsg.PartInfo;
 import com.macrosan.storage.codec.ErasureCodc;
 import com.macrosan.storage.coder.*;
+import com.macrosan.storage.coder.direct.DirectEncoder;
+import com.macrosan.storage.coder.direct.ECDirectEncoder;
+import com.macrosan.storage.coder.direct.ReplicaDirectEncoder;
 import com.macrosan.storage.coder.fs.LowPackageErasureEncoder;
 import com.macrosan.storage.coder.fs.LowPackageReplicaEncoder;
 import com.macrosan.storage.metaserver.BucketShardCache;
@@ -59,6 +62,7 @@ public class StoragePool {
     private PoolHealth.HealthState state;
 
     private Function<Long, Encoder> getEncoderFunction;
+    private Function<Integer, DirectEncoder> getDirectEncoderFunction;
     private Function<ReadStream, LimitEncoder> getLimitEncoderFunction;
     private Function<ReadStream, LimitEncoder> getPerfetchLimitEncoderFunction;
     private Function5<Flux<byte[]>[], Long, Long, MsHttpRequest, MsClientRequest, Decoder> getDecoderFunction;
@@ -102,11 +106,13 @@ public class StoragePool {
             getLimitEncoderFunction = r -> new ErasureLimitEncoder(k, m, packageSize, codc, r);
             getPerfetchLimitEncoderFunction = r -> new ErasurePrefetchLimitEncoder(k, m, packageSize, codc, r);
             getDecoderFunction = (flux, len, fileLen, request, clientRequest) -> new ErasureDecoder(k, m, packageSize, codc, flux, len, request, clientRequest);
+            getDirectEncoderFunction = size-> new ECDirectEncoder(k, m, packageSize, codc, size);
         } else {
             getEncoderFunction = size -> size > 0 && size < packageSize ? new LowPackageReplicaEncoder(k, m, Math.toIntExact(size)) : new ReplicaEncoder(k, m, packageSize);
             getLimitEncoderFunction = r -> new ReplicaLimitEncoder(k, m, packageSize, r);
             getPerfetchLimitEncoderFunction = r -> new ReplicaPrefetchLimitEncoder(k, m, packageSize, r);
             getDecoderFunction = (flux, len, fileLen, request, clientRequest) -> new ReplicaDecoder(k, m, flux, fileLen, request, clientRequest);
+            getDirectEncoderFunction = size-> new ReplicaDirectEncoder(k, m, packageSize, null, size);
         }
 
         if (vnodePrefix.startsWith("meta")) {
@@ -386,7 +392,7 @@ public class StoragePool {
             cache.updateVnodeNode(vnode, node, disk, vnodeNum);
             String mapV = cache.hget(vnode, "map");
             if (mapV != null) {
-                cache.updateVnodeNode(vnode, node, disk, vnodeNum);
+                cache.updateVnodeNode(mapV, node, disk, vnodeNum);
                 log.info("update cache {} {} {} {} ", vnode, mapV, node, disk);
             } else {
                 log.info("update cache {} {} {} ", vnode, node, disk);
@@ -400,6 +406,10 @@ public class StoragePool {
 
     public Encoder getEncoder(long size) {
         return getEncoderFunction.apply(size);
+    }
+
+    public DirectEncoder getDirectEncoder(int size) {
+        return getDirectEncoderFunction.apply(size);
     }
 
     public LimitEncoder getLimitEncoder(ReadStream request) {

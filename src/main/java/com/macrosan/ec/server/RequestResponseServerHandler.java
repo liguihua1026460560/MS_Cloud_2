@@ -4,6 +4,7 @@ package com.macrosan.ec.server;
 import com.alibaba.fastjson.JSON;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.collect.Sets;
+import com.macrosan.component.trigger.DicomScanMetaTrigger;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.database.rocksdb.MSRocksIterator;
 import com.macrosan.database.rocksdb.MossMergeOperator;
@@ -2121,7 +2122,8 @@ public class RequestResponseServerHandler {
             } else {
                 inode[0] = "";
             }
-            boolean renamedMeta = metaData.deleteMark && metaData.partInfos != null && metaData.partInfos.length == 0 && "inode".equals(metaData.partUploadId);
+            boolean renamedMeta = metaData.deleteMark && metaData.partInfos != null && metaData.partInfos.length == 0 &&
+                    metaData.partUploadId != null && metaData.partUploadId.contains("inode");
             Inode.reduceMeta(metaData);
             if (renamedMeta) {
                 metaData.partInfos = new PartInfo[0];
@@ -2893,6 +2895,7 @@ public class RequestResponseServerHandler {
 
     /**
      * 更新fileMeta中的最后访问时间
+     *
      * @param payload
      * @return
      */
@@ -6040,5 +6043,52 @@ public class RequestResponseServerHandler {
         }
 
         return Mono.just(SUCCESS_PAYLOAD);
+    }
+
+    /**
+     * 统计指定桶下面dicom压缩记录的数量
+     * @param payload 请求
+     * @return dicom压缩记录的数量
+     */
+    public static Mono<Payload> countBucketDicomRecord(Payload payload) {
+        SocketReqMsg msg = Json.decodeValue(payload.getDataUtf8(), SocketReqMsg.class);
+        String prefix = msg.get("prefix");
+        String lun = msg.get("lun");
+        MSRocksDB rocksDB = getRocksDB(lun);
+        if (rocksDB == null) {
+            return Mono.just(ERROR_PAYLOAD);
+        }
+        try (MSRocksIterator keyIterator = rocksDB.newIterator()) {
+            keyIterator.seek(prefix.getBytes());
+            int count = 0;
+            while (count <= DicomScanMetaTrigger.MAX_BUCKET_PENDING_THRESHOLD && keyIterator.isValid() && new String(keyIterator.key()).startsWith(prefix)) {
+                keyIterator.next();
+                count++;
+            }
+            return Mono.just(DefaultPayload.create(String.valueOf(count), PayloadMetaType.SUCCESS.name()));
+        } catch (Exception e) {
+            log.error("count bucket dicom record error, ", e);
+            return Mono.just(ERROR_PAYLOAD);
+        }
+
+    }
+
+    public static Mono<Payload> checkFileExists(Payload payload) {
+        try {
+            SocketReqMsg msg = Json.decodeValue(payload.getDataUtf8(), SocketReqMsg.class);
+            String fileName = msg.get("fileName");
+            String lun = msg.get("lun");
+            int splitIndex = fileName.indexOf(File.separator);
+            String path = fileName.substring(splitIndex);
+            MSRocksDB rocksDB = getRocksDB(lun);
+            if (rocksDB == null) {
+                return Mono.just(ERROR_PAYLOAD);
+            }
+            byte[] bytes = rocksDB.get(FileMeta.getKey(path).getBytes());
+            return Mono.just(DefaultPayload.create(String.valueOf(bytes != null), PayloadMetaType.SUCCESS.name()));
+        } catch (Exception e) {
+            return Mono.just(ERROR_PAYLOAD);
+        }
+
     }
 }

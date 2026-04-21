@@ -55,8 +55,7 @@ import static com.macrosan.filesystem.FsConstants.NFS4_CALLBACK_PROGRAM;
 import static com.macrosan.filesystem.FsConstants.NFSACLOpCode.*;
 import static com.macrosan.filesystem.FsConstants.NFSQuotaOpCode.NFSQUOTAPROC_GETQUOTA;
 import static com.macrosan.filesystem.FsConstants.NFSQuotaOpCode.NFSQUOTAPROC_SETQUOTA;
-import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_I0;
-import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3_OK;
+import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
 import static com.macrosan.filesystem.cifs.handler.SMBHandler.localIpDebug;
 import static com.macrosan.filesystem.nfs.NFSV3.Opcode.*;
 import static com.macrosan.filesystem.nfs.NFSV4.CBOpcode.NFS4PROC_CB_COMPOUND;
@@ -763,8 +762,8 @@ public class NFSHandler extends RpcHandler {
                         log.error("NFS PROCESS timeout opt:{}", opcode);
                     } else if (e instanceof NFSException && ((NFSException) e).nfsError) {
                         CompoundReply reply = new CompoundReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
-                        if (NFS4Proc.errorDebug) {
-                           log.info("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
+                        if (NFS4Proc.errorDebug ||  ((NFSException) e).getErrCode() == NFS3ERR_DQUOT) {
+                           log.error("NFS PROCESS error.opt:{},{}", opcode, ((NFSException) e).getMessage());
                         }
                         reply.opt = opt;
                         reply.status = ((NFSException) e).getErrCode();
@@ -952,8 +951,8 @@ public class NFSHandler extends RpcHandler {
     }
 
     private void recordTrafficStatistics(RpcReply nfs4Reply, AtomicLong startTime, ReqInfo reqHeader, NFSV4.Opcode opcode) {
-        if (opcode.opcode != NFSV4.Opcode.NFS4PROC_WRITE.opcode
-                && opcode.opcode != NFSV4.Opcode.NFS4PROC_READ.opcode) {
+        if (!(nfs4Reply instanceof WriteV4Reply)
+                && !(nfs4Reply instanceof ReadV4Reply)) {
             return;
         }
 

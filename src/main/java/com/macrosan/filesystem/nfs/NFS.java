@@ -10,8 +10,6 @@ import com.macrosan.filesystem.nfs.lock.NFS4LockServer;
 import com.macrosan.filesystem.nfs.shareAccess.ShareAccessServer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.buffer.UnpooledByteBufAllocator;
-import io.netty.buffer.UnpooledUnsafeHeapByteBuf;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.DeploymentOptions;
 import io.vertx.core.VertxOptions;
@@ -27,9 +25,6 @@ import io.vertx.reactivex.core.net.NetServer;
 import lombok.extern.log4j.Log4j2;
 
 import java.lang.reflect.Field;
-import java.util.Map;
-
-import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
 
 @Log4j2
 public class NFS {
@@ -242,19 +237,14 @@ public class NFS {
                         impl.messageHandler(event -> {
                             if (event instanceof ByteBuf) {
                                 ByteBuf byteBuf = (ByteBuf) event;
-                                if (byteBuf != Unpooled.EMPTY_BUFFER) {
-                                    int read = byteBuf.readableBytes();
-                                    ByteBuf buffer = new UnpooledUnsafeHeapByteBuf(UnpooledByteBufAllocator.DEFAULT, read, read);
-                                    buffer.writeBytes(byteBuf);
-                                    byteBuf.release();
-                                    byteBuf = buffer;
-                                }
 
                                 try {
                                     handler.handle(byteBuf);
                                 } catch (Exception e) {
                                     log.error("", e);
                                     socket.close();
+                                } finally {
+                                    byteBuf.release();
                                 }
                             }
                         });

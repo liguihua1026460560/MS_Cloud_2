@@ -7,6 +7,7 @@ import com.macrosan.ec.*;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.ErasureServer.PayloadMetaType;
 import com.macrosan.filesystem.cache.Node;
+import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.utils.*;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.message.jsonmsg.ChunkFile;
@@ -19,6 +20,7 @@ import com.macrosan.rsocket.LocalPayload;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.client.ClientTemplate;
+import com.macrosan.storage.client.ClientTemplate.ResponseInfo;
 import com.macrosan.storage.client.channel.Channel;
 import com.macrosan.storage.coder.Encoder;
 import com.macrosan.utils.essearch.EsMetaTask;
@@ -34,6 +36,7 @@ import io.rsocket.util.DefaultPayload;
 import io.vertx.core.json.Json;
 import lombok.Data;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
@@ -42,6 +45,7 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 import reactor.util.concurrent.Queues;
 
+import java.io.File;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -58,6 +62,7 @@ import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.filesystem.nfs.call.ReNameCall.RENAME_NOT_FOUND;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
+import static com.macrosan.filesystem.utils.InodeUtils.isError;
 import static com.macrosan.message.jsonmsg.ChunkFile.ERROR_CHUNK;
 import static com.macrosan.message.jsonmsg.Inode.*;
 import static com.macrosan.message.jsonmsg.MetaData.NOT_FOUND_META;
@@ -72,44 +77,13 @@ public class FsUtils {
 
     public static final byte[] EMPTY_BYTE = new byte[0];
 
-    public static Mono<Boolean> putObj(StoragePool pool, Encoder encoder, String fileName,
-                                       List<Tuple3<String, String, String>> nodeList, Inode inode, long curOffset, MonoProcessor<Boolean> rollBackProcessor) {
+    public interface PutObjectFunction {
+        ResponseInfo<String> sendData(StoragePool pool,
+                                      List<Tuple3<String, String, String>> nodeList, List<SocketReqMsg> msgs);
+    }
 
-        String bucketVnode = pool.getBucketVnodeId(inode.getBucket());
-        // versionNum 必须为"null字符串"，null时metakey=*22490/test/2.txt\u0000null，非null时22490/test/2.txt
-        String[] metaKey = new String[1];
-        if (pool.getVnodePrefix().startsWith("cache")) {
-            StoragePool metaPool = StoragePoolFactory.getMetaStoragePool(inode.getBucket());
-            String metaVnode = metaPool.getBucketVnodeId(inode.getBucket());
-            metaKey[0] = Inode.getKey(metaVnode, inode.getBucket(), inode.getNodeId());
-        } else {
-            metaKey[0] = Utils.getVersionMetaDataKey(bucketVnode, inode.getBucket(), inode.getObjName(), inode.getVersionId() == null ? "null" : inode.getVersionId());
-        }
-
-        SocketReqMsg msg = new SocketReqMsg("", 0)
-                .put("noGet", "1")
-                .put("fileName", fileName)
-                .put("compression", pool.getCompression())
-                .put("metaKey", metaKey[0])
-                .put("fileOffset", String.valueOf(curOffset));
-
-        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", Inode.getLastAccessTime(inode), isEnableCacheAccessTimeFlush(pool));
-        if (FsTierUtils.isFsEnableCacheAccessTimeFlush(inode, pool)) {
-            //这里应该要和上面按上传时间下刷的配置互斥
-            msg.put("lastAccessStamp", String.valueOf(System.currentTimeMillis()));
-        }
-        // 判断是否开启缓冲池 按序下刷
-        if (isEnableCacheOrderFlush(pool)) {
-            long timeMs = inode.getCreateTime() * 1000L;
-            msg.put("flushStamp", String.valueOf(timeMs));
-        }
-
-        List<SocketReqMsg> msgs = nodeList.stream()
-                .map(tuple -> msg.copy()
-                        .put("lun", tuple.var2)
-                        .put("vnode", tuple.var3))
-                .collect(Collectors.toList());
-
+    public static ResponseInfo<String> sendEncode(StoragePool pool, Encoder encoder,
+                                                  List<Tuple3<String, String, String>> nodeList, List<SocketReqMsg> msgs) {
         List<UnicastProcessor<Payload>> publisher = nodeList.stream()
                 .map(t -> UnicastProcessor.<Payload>create())
                 .collect(Collectors.toList());
@@ -157,7 +131,52 @@ public class FsUtils {
             );
         }
 
-        ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, nodeList);
+        return ClientTemplate.multiResponse(publisher, String.class, nodeList);
+    }
+
+    public static Mono<Boolean> putObj(StoragePool pool, long size, PutObjectFunction putObjectFunction, String fileName,
+                                       List<Tuple3<String, String, String>> nodeList, Inode inode, long curOffset, MonoProcessor<Boolean> rollBackProcessor) {
+        String bucketVnode = pool.getBucketVnodeId(inode.getBucket());
+        // versionNum 必须为"null字符串"，null时metakey=*22490/test/2.txt\u0000null，非null时22490/test/2.txt
+        String[] metaKey = new String[1];
+        if (pool.getVnodePrefix().startsWith("cache")) {
+            StoragePool metaPool = StoragePoolFactory.getMetaStoragePool(inode.getBucket());
+            String metaVnode = metaPool.getBucketVnodeId(inode.getBucket());
+            metaKey[0] = Inode.getKey(metaVnode, inode.getBucket(), inode.getNodeId());
+        } else {
+            metaKey[0] = Utils.getVersionMetaDataKey(bucketVnode, inode.getBucket(), inode.getObjName(), inode.getVersionId() == null ? "null" : inode.getVersionId());
+        }
+
+        SocketReqMsg msg = new SocketReqMsg("", 0)
+                .put("noGet", "1")
+                .put("fileName", fileName)
+                .put("compression", pool.getCompression())
+                .put("metaKey", metaKey[0])
+                .put("fileOffset", String.valueOf(curOffset))
+                .put("bucket", inode.getBucket())
+                .put("object", inode.getObjName())
+                .put("versionId", inode.getVersionId())
+                .put("storage", pool.getVnodePrefix())
+                .put("fileSize", String.valueOf(curOffset));
+
+        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", Inode.getLastAccessTime(inode), isEnableCacheAccessTimeFlush(pool));
+        if (FsTierUtils.isFsEnableCacheAccessTimeFlush(inode, pool)) {
+            //这里应该要和上面按上传时间下刷的配置互斥
+            msg.put("lastAccessStamp", String.valueOf(System.currentTimeMillis()));
+        }
+        // 判断是否开启缓冲池 按序下刷
+        if (isEnableCacheOrderFlush(pool)) {
+            long timeMs = inode.getCreateTime() * 1000L;
+            msg.put("flushStamp", String.valueOf(timeMs));
+        }
+
+        List<SocketReqMsg> msgs = nodeList.stream()
+                .map(tuple -> msg.copy()
+                        .put("lun", tuple.var2)
+                        .put("vnode", tuple.var3))
+                .collect(Collectors.toList());
+
+        ResponseInfo<String> responseInfo = putObjectFunction.sendData(pool, nodeList, msgs);
         MonoProcessor<Boolean> res = MonoProcessor.create();
         List<Integer> errorChunksList = new ArrayList<>(pool.getM());
         String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(pool.getVnodePrefix());
@@ -182,7 +201,7 @@ public class FsUtils {
                                 .put("versionId", inode.getVersionId())
                                 .put("storage", pool.getVnodePrefix())
                                 .put("nodeId", String.valueOf(inode.getNodeId()))
-                                .put("fileSize", String.valueOf(encoder.size()))
+                                .put("fileSize", String.valueOf(size))
                                 .put("poolQueueTag", poolQueueTag)
                                 .put("fileOffset", String.valueOf(curOffset));
                         log.debug("【publishFix】 res:{} >>>>>> errorMsg:{}", responseInfo.res, errorMsg);
@@ -217,6 +236,49 @@ public class FsUtils {
                 });
 
         return res;
+    }
+
+    public static Mono<Inode> putObj(Inode inode, FsUtils.PutObjectFunction function, long curOffset, int curSize, String md5, int updateTime, StoragePool dataPool) {
+        String bucket = inode.getBucket();
+        String o = inode.getObjName() + RandomStringUtils.randomAlphanumeric(32);
+        String fileName = Utils.getObjFileName(dataPool, bucket, o, "") + '/';
+        String vnode = fileName.split(File.separator)[1].split("_")[0];
+        List<Tuple3<String, String, String>> nodeList = dataPool.mapToNodeInfo(vnode).block();
+
+        MonoProcessor<Boolean> rollBackProcessor = MonoProcessor.create();
+
+        return FsUtils.putObj(dataPool, curSize, function, fileName, nodeList, inode, curOffset, rollBackProcessor)
+                .flatMap(b -> {
+                    if (!b) {
+                        log.error("put obj {} fail.", fileName);
+                        return Mono.just(ERROR_INODE);
+                    } else {
+                        Inode.InodeData inodeData = new Inode.InodeData()
+                                .setSize(curSize)
+                                .setStorage(dataPool.getVnodePrefix())
+                                .setOffset(0L)
+                                .setEtag(md5)
+                                .setFileName(fileName);
+                        return Node.getInstance().updateInodeData(bucket, inode.getNodeId(), curOffset, inodeData, "", "", updateTime, inode.getXAttrMap().get(QUOTA_KEY), inode.getObjName())
+                                .flatMap(i -> {
+                                    if (!isError(i) && !i.isDeleteMark()) {
+                                        if (ES_ON.equals(NFSBucketInfo.getBucketInfo(i.getBucket()).get(ES_SWITCH))) {
+                                            return EsMetaTask.putEsMeta(i).map(f -> i);
+                                        }
+                                    } else if (i.isDeleteMark()) {
+                                        rollBackProcessor.onNext(b);
+                                    }
+
+                                    return Mono.just(i);
+                                });
+                    }
+                });
+    }
+
+    public static Mono<Boolean> putObj(StoragePool pool, Encoder encoder, String fileName,
+                                       List<Tuple3<String, String, String>> nodeList, Inode inode, long curOffset, MonoProcessor<Boolean> rollBackProcessor) {
+        PutObjectFunction function = (p, list, msgs) -> sendEncode(p, encoder, list, msgs);
+        return putObj(pool, encoder.size(), function, fileName, nodeList, inode, curOffset, rollBackProcessor);
     }
 
     public static Mono<Inode> lookup(String bucket, String objName, ReqInfo reqHeader, boolean isReName, long dirInode, List<Inode.ACE> dirACEs) {
@@ -298,7 +360,7 @@ public class FsUtils {
                 .collect(Collectors.toList());
 
         MonoProcessor<Integer> res = MonoProcessor.create();
-        ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, RENAME, String.class, nodeList);
+        ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, RENAME, String.class, nodeList);
 
         AtomicInteger notFoundNum = new AtomicInteger(0);
 
@@ -371,7 +433,7 @@ public class FsUtils {
                 .collect(Collectors.toList());
 
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, type, String.class, nodeList);
+        ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, type, String.class, nodeList);
 
         Disposable subscribe = responseInfo.responses.subscribe(s -> {
 
@@ -426,7 +488,7 @@ public class FsUtils {
                         .put("lun", t.var2))
                 .collect(Collectors.toList());
 
-        ClientTemplate.ResponseInfo<Tuple2<String, Inode>[]> responseInfo =
+        ResponseInfo<Tuple2<String, Inode>[]> responseInfo =
                 ClientTemplate.oneResponse(msg, LIST_DIR_PLUS, reference, nodeList);
 
         ListDirPlus clientHandler = new ListDirPlus(pool, responseInfo, nodeList);
@@ -464,7 +526,7 @@ public class FsUtils {
                         .put("lun", t.var2))
                 .collect(Collectors.toList());
 
-        ClientTemplate.ResponseInfo<Tuple2<String, Inode>[]> responseInfo =
+        ResponseInfo<Tuple2<String, Inode>[]> responseInfo =
                 ClientTemplate.oneResponse(msg, LIST_DIR_PLUS, reference, nodeList);
 
         ListDirPlus clientHandler = new ListDirPlus(pool, responseInfo, nodeList);
@@ -565,7 +627,7 @@ public class FsUtils {
     private static class ListDirPlus {
         private List<Inode> list = new LinkedList<>();
         protected List<Tuple3<String, String, String>> nodeList;
-        public ClientTemplate.ResponseInfo<Tuple2<String, Inode>[]> responseInfo;
+        public ResponseInfo<Tuple2<String, Inode>[]> responseInfo;
         public MonoProcessor<Boolean> res = MonoProcessor.create();
         protected UnicastProcessor<Integer> repairFlux = UnicastProcessor.create(Queues.<Integer>unboundedMultiproducer().get());
         private boolean repairEnd = false;
@@ -605,7 +667,7 @@ public class FsUtils {
             }
         }
 
-        protected ListDirPlus(StoragePool pool, ClientTemplate.ResponseInfo<Tuple2<String, Inode>[]> responseInfo, List<Tuple3<String, String, String>> nodeList) {
+        protected ListDirPlus(StoragePool pool, ResponseInfo<Tuple2<String, Inode>[]> responseInfo, List<Tuple3<String, String, String>> nodeList) {
             this.pool = pool;
             this.responseInfo = responseInfo;
             this.nodeList = nodeList;
@@ -1039,7 +1101,7 @@ public class FsUtils {
                 .flatMap(zip -> {
                     StoragePool dataPool = zip.getT2();
                     String f = zip.getT1();
-                    return deleteChunkFile0(dataPool, bucket, new String[]{f}, needCheck0);
+                    return deleteChunkFile0(dataPool, 0, bucket, new String[]{f}, needCheck0, true);
                 }, 24)
                 .collectList()
                 .map(l -> true)
@@ -1055,14 +1117,31 @@ public class FsUtils {
      * @param bucket    存储桶
      * @param fileNames chunk文件名
      **/
-    public static Mono<Boolean> deleteChunkFile0(StoragePool dataPool, String bucket, String[] fileNames, boolean needCheck) {
+
+    public static Mono<Boolean> deleteChunkFile0(StoragePool dataPool, int n, String bucket, String[] fileNames, boolean needCheck, boolean async) {
         return Flux.fromArray(fileNames)
                 .flatMap(f -> {
                     if (StringUtils.isBlank(f)) {
                         return Mono.just(true);
                     } else if (f.startsWith(ROCKS_CHUNK_FILE_KEY)) {
                         Tuple3<Long, String, String> chunk0 = ChunkFile.getChunkFromFileName(f);
+                        StoragePool metaPool = StoragePoolFactory.getMetaStoragePool(bucket);
+
+                        if (async) {
+                            if (!DelFileRunner.tryRun(metaPool.getVnodePrefix())) {
+                                DelFileRunner.addChunkFileTask(metaPool.getVnodePrefix(), bucket, chunk0.var3, n, needCheck);
+                                return Mono.just(true);
+                            }
+                        }
+
+                        AtomicBoolean end = new AtomicBoolean(false);
+
                         return ChunkFileUtils.getChunk(bucket, chunk0.var3)
+                                .doFinally(s -> {
+                                    if (async && end.compareAndSet(false, true)) {
+                                        DelFileRunner.endRun(metaPool.getVnodePrefix());
+                                    }
+                                })
                                 .flatMap(chunk -> {
                                     // 处理不同池（缓存池、数据池）文件
                                     Map<String, List<String>> map = new HashMap<>();
@@ -1100,7 +1179,7 @@ public class FsUtils {
                                                             .collectList()
                                                             .map(results -> results.stream().allMatch(Boolean::booleanValue));
                                                 }
-                                                return deleteChunkFile0(storagePool, bucket, fs, false);
+                                                return deleteChunkFile0(storagePool, n + 1, bucket, fs, false, true);
                                             });
 
                                     return deleteResults
@@ -1175,13 +1254,23 @@ public class FsUtils {
 
     }
 
-
     public static Mono<Boolean> deleteChunkMeta(String chunkFileName) {
         return deleteChunkMeta(chunkFileName, ChunkFile.getChunkFromFileName(chunkFileName).var2);
     }
 
+    /**
+     * 删除chunkMeta的流程强制走async删除。避免deleteChunkFile在async中没有执行完，就删除chunkMeta。
+     */
     public static Mono<Boolean> deleteChunkMeta(String chunkFileName, String bucket) {
         String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(bucket, chunkFileName);
+        StoragePool metaPool = StoragePoolFactory.getMetaStoragePool(bucket);
+        DelFileRunner.addChunkMetaTask(metaPool.getVnodePrefix(), bucket, chunkKey);
+        return Mono.just(true);
+    }
+
+    public static Mono<Boolean> realDeleteChunkMeta(String chunkFileName, String bucket) {
+        String chunkKey = ChunkFile.getChunkKeyFromChunkFileName(bucket, chunkFileName);
+
         return ChunkFileUtils.getChunk(bucket, chunkKey)
                 .flatMap(chunkFile -> {
                     if (chunkFile.equals(ERROR_CHUNK)) {
@@ -1226,7 +1315,7 @@ public class FsUtils {
                 )
                 .collect(Collectors.toList());
         MonoProcessor<Boolean> res = MonoProcessor.create();
-        ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, DEL_CHUNK, String.class, nodeList);
+        ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, DEL_CHUNK, String.class, nodeList);
         responseInfo.responses.subscribe(r -> {
 
                 },
@@ -1416,7 +1505,7 @@ public class FsUtils {
                         .put("key", checkKey)
                 )
                 .collect(Collectors.toList());
-        ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, CHECK_DIR, String.class, nodeList);
+        ResponseInfo<String> responseInfo = ClientTemplate.oneResponse(msgs, CHECK_DIR, String.class, nodeList);
 
         MonoProcessor<Integer> res = MonoProcessor.create();
         responseInfo.responses.subscribe(s -> {
@@ -1506,5 +1595,30 @@ public class FsUtils {
         }
 
         return port;
+    }
+
+    /**
+     * 从redis里面获取ftp 被动端口的范围
+     *
+     * @return <下限，上限>
+     **/
+    public static Tuple2<Integer, Integer> getFsPortRange() {
+        Tuple2<Integer, Integer> res = new Tuple2<>(-1, -1);
+        try {
+            //min_max
+            String rangeValue = RedisConnPool.getInstance().getCommand(REDIS_SYSINFO_INDEX).get("ftp_pasv_range");
+            if (StringUtils.isNotBlank(rangeValue)) {
+                String[] rangeStr = rangeValue.split("_");
+                int min = Integer.parseInt(rangeStr[0]);
+                int max = Integer.parseInt(rangeStr[1]);
+                res.var1 = min;
+                res.var2 = max;
+            }
+        } catch (Exception e) {
+            log.error("get ftp pasv port range error", e);
+            return new Tuple2<>(-1, -1);
+        }
+
+        return res;
     }
 }

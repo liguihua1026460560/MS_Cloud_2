@@ -264,23 +264,18 @@ public class BucketSyncSwitchCache {
         return bucketInfo.getOrDefault(DATA_SYNC_SWITCH, "off");
     }
 
-    public static String getBucketArchiveStatus(Map<String, String> bucketInfo) {
-        return bucketInfo.getOrDefault(ARCHIVE_SWITCH, "off");
+    public static boolean isSwitchOff(Map<String, String> bucketInfo) {
+        String status = getBucketSyncStatus(bucketInfo);
+        return SWITCH_OFF.equals(status);
     }
 
     public static boolean isSwitchSuspend(Map<String, String> bucketInfo) {
         String status = getBucketSyncStatus(bucketInfo);
-        if (SWITCH_SUSPEND.equals(status)) {
-            return true;
-        }
-        return false;
+        return SWITCH_SUSPEND.equals(status);
     }
 
     public static boolean isSwitchClose(Map<String, String> bucketInfo) {
         String status = getBucketSyncStatus(bucketInfo);
-        if (SWITCH_CLOSED.equals(status)) {
-            return true;
-        }
-        return false;
+        return SWITCH_CLOSED.equals(status);
     }
 }

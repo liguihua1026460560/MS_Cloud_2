@@ -35,6 +35,7 @@ public class ShareAccessLock extends Lock {
     public int stateIdType;
     public String versionNum;
     public boolean init;
+    public long verifier;
 
     //    public static final ShareAccessLock EMPTY_SHARE = new ShareAccessLock().setShareAccess(0);
     public static final ShareAccessLock ERROR_SHARE = new ShareAccessLock().setShareAccess(-1).setVersionNum("")
@@ -49,6 +50,7 @@ public class ShareAccessLock extends Lock {
     public static final int GET_SHARE_TYPE = 3;
     public static final int OPEN_SHARE_CONFLICT_TYPE = 4;
     public static final int OPEN_DENY_CONFLICT_TYPE = 5;
+    public static final int OPEN_CHECK_VERIFIER_TYPE = 6;
 
 
 
@@ -83,7 +85,7 @@ public class ShareAccessLock extends Lock {
         return new ShareAccessLock()
                 .setBucket(bucket).setObjName(objName).setNodeId(nodeId).setStateId(stateId)
                 .setShareAccess(shareAccess).setShareDeny(shareDeny).setNode(node).setClientId(clientId)
-                .setSessionId(sessionId).setOwner(owner).setType(type).setStateIdType(stateIdType).setVersionNum(versionNum).setInit(init);
+                .setSessionId(sessionId).setOwner(owner).setType(type).setStateIdType(stateIdType).setVersionNum(versionNum).setInit(init).setVerifier(verifier);
     }
 
     @Override

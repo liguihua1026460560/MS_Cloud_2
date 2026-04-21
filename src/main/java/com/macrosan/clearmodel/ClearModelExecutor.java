@@ -89,6 +89,10 @@ public class ClearModelExecutor implements Job {
             ScanIterator<String> scan = ScanIterator.scan(command, scanArgs);
             while (scan.hasNext()) {
                 String bucketName = scan.next();
+                String bucketKeyType = pool.getCommand(REDIS_BUCKETINFO_INDEX).type(bucketName);
+                if (!"hash".equals(bucketKeyType)) {
+                    continue;
+                }
                 if (NODE_NAME.equals(getExecuteNode(bucketName,getNodesState()))) {
                     String originalNode = String.format("%04d", Math.abs(bucketName.hashCode() % nodesState.size()) + 1);
                     if (!NODE_NAME.equals(originalNode)){

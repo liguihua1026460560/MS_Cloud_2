@@ -22,6 +22,8 @@ import com.macrosan.filesystem.nfs.reply.NullReply;
 import com.macrosan.filesystem.nfs.reply.v4.*;
 import com.macrosan.filesystem.nfs.types.*;
 import com.macrosan.filesystem.utils.*;
+import com.macrosan.filesystem.utils.acl.ACLUtils;
+import com.macrosan.filesystem.utils.acl.NFSACL;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.utils.essearch.EsMetaTask;
@@ -47,14 +49,18 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static com.macrosan.action.managestream.FSPerformanceService.Instance_Type.fs_create;
 import static com.macrosan.action.managestream.FSPerformanceService.Instance_Type.fs_read;
 import static com.macrosan.action.managestream.FSPerformanceService.getAddressPerfRedisKey;
 import static com.macrosan.constants.SysConstants.*;
+import static com.macrosan.filesystem.FsConstants.ACLConstants.NFS_DIR_SUB_DEL_ACL;
+import static com.macrosan.filesystem.FsConstants.ACLConstants.NOT_CONTAIN_ACL;
 import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.NFS4Type.*;
 import static com.macrosan.filesystem.FsConstants.NFSACLType.NFS_ACE;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.*;
 import static com.macrosan.filesystem.FsConstants.RpcAuthType.*;
+import static com.macrosan.filesystem.cache.ReadObjCache.readCacheDebug;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.FSID_BUCKET;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.getBucketName;
 import static com.macrosan.filesystem.nfs.call.v4.CreateSessionCall.CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
@@ -66,11 +72,11 @@ import static com.macrosan.filesystem.nfs.call.v4.SecInfoNoNameCall.SECINFO_STYL
 import static com.macrosan.filesystem.nfs.call.v4.SecInfoNoNameCall.SECINFO_STYLE4_PARENT;
 import static com.macrosan.filesystem.nfs.delegate.DelegateLock.unDelegateMap;
 import static com.macrosan.filesystem.nfs.types.FAttr4.*;
-import static com.macrosan.filesystem.nfs.types.NFS4Session.SessionConnection.DEFAULT_ADDRESS;
 import static com.macrosan.filesystem.nfs.types.StateId.*;
-import static com.macrosan.filesystem.utils.FsTierUtils.*;
+import static com.macrosan.filesystem.utils.FsTierUtils.fileFsAccessHandle;
 import static com.macrosan.filesystem.utils.InodeUtils.*;
 import static com.macrosan.filesystem.utils.Nfs4Utils.*;
+import static com.macrosan.filesystem.utils.acl.ACLUtils.DEFAULT_ANONY_UID;
 import static com.macrosan.message.jsonmsg.Inode.*;
 
 @Log4j2
@@ -120,7 +126,9 @@ public class NFS4Proc {
             return Mono.just(reply);
         }
         CompoundContext context = call.context;
-        NFS4Client client = clientControl.clientByOwner(call.clientOwner);
+        SocketAddress localAddress = reqHeader.nfsHandler.socket.localAddress();
+        SocketAddress address = reqHeader.nfsHandler.socket.remoteAddress();
+        NFS4Client client = clientControl.clientByOwner(call.clientOwner, address, localAddress);
         boolean update = (call.flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
         //更新confirm的客户端
         if (update) {
@@ -134,11 +142,10 @@ public class NFS4Proc {
             }
             if (!client.checkAuth(callHeader.auth)) {
                 reply.status = NFS3ERR_PERM;
+                return Mono.just(reply);
             }
             client.refreshLeaseTime();
         } else {
-            SocketAddress address = reqHeader.nfsHandler.address;
-            SocketAddress localAddress = reqHeader.nfsHandler.socket.localAddress();
             if (client == null) {
                 client = clientControl.createClient(address, localAddress, context.getMinorVersion(), call.clientOwner, call.verifier,
                         callHeader.auth, reqHeader.nfsHandler);
@@ -193,7 +200,9 @@ public class NFS4Proc {
             reply.status = NFS3ERR_NOTSUPP;
             return Mono.just(reply);
         }
-        NFS4Client client = clientControl.clientByOwner(call.clientOwner);
+        SocketAddress localAddress = reqHeader.nfsHandler.socket.localAddress();
+        SocketAddress address = reqHeader.nfsHandler.socket.remoteAddress();
+        NFS4Client client = clientControl.clientByOwner(call.clientOwner, address, localAddress);
         if (client != null) {
             if (client.getConfirmed()) {
                 if (!client.checkAuth(callHeader.auth)) {
@@ -207,14 +216,14 @@ public class NFS4Proc {
                 } else {
                     //重启 释放所有锁?
                     clientControl.removeClient(client);
-                    client = clientControl.createClient(reqHeader.nfsHandler.address, reqHeader.nfsHandler.socket.localAddress(), context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
+                    client = clientControl.createClient(address, localAddress, context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
                 }
             } else {
                 clientControl.removeClient(client);
-                client = clientControl.createClient(reqHeader.nfsHandler.address, reqHeader.nfsHandler.socket.localAddress(), context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
+                client = clientControl.createClient(address, localAddress, context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
             }
         } else {
-            client = clientControl.createClient(reqHeader.nfsHandler.address, reqHeader.nfsHandler.socket.localAddress(), context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
+            client = clientControl.createClient(address, localAddress, context.getMinorVersion(), call.clientOwner, call.verifier, callHeader.auth, reqHeader.nfsHandler);
         }
         reply.verifier = client.getVerifier();
         reply.clientId = client.getClientId();
@@ -302,7 +311,9 @@ public class NFS4Proc {
         reply.opt = NFSV4.Opcode.NFS4PROC_SEQUENCE.opcode;
         NFS4Client client = clientControl.getClient(call.sessionId);
         NFS4Session session = client.getSession(call.sessionId);
-        session.bindIfNeeded(new NFS4Session.SessionConnection(DEFAULT_ADDRESS, reqHeader.nfsHandler.address));
+        SocketAddress localAddress = reqHeader.nfsHandler.socket.localAddress();
+        SocketAddress address = reqHeader.nfsHandler.socket.remoteAddress();
+        session.bindIfNeeded(new NFS4Session.SessionConnection(localAddress, address));
         context.sessionId = call.sessionId;
         context.clientId = client.getClientId();
         client.updateLeaseTime();
@@ -543,6 +554,10 @@ public class NFS4Proc {
             }
             reqHeader.bucket = getBucketName(call.fh.fsid);
             reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
+            if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+                reply.status = NFS3ERR_STALE;
+                return Mono.just(reply);
+            }
             return CheckUtils.nfsOpenCheck(call.fh.fsid, reqHeader)
                     .flatMap(res -> {
                         if (!res) {
@@ -578,18 +593,21 @@ public class NFS4Proc {
         }
         reqHeader.bucket = getBucketName(fsid);
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         return Mono.just(context.getCurrentInode())
-                .map(inode -> {
+                .flatMap(inode -> {
                     reply.status = OK;
                     reply.accessRights = call.access;
-                    if (inode.getNodeId() > 1 && callHeader.auth.flavor == RPC_AUTH_UNIX) {
-                        int uid = ((AuthUnix) (callHeader.auth)).getUid();
-                        if (inode.getUid() != 0 && uid != 0 && uid != inode.getUid()) {
-                            reply.accessRights = NFSAccessAcl.READ;
-                        }
-                    }
-                    reply.supportedTypes = call.access;
-                    return reply;
+                    callHeader.opt = NFSV3.Opcode.NFS3PROC_ACCESS.opcode;
+                    return NFSACL.getNFSAccess0(inode, reqHeader, callHeader)
+                            .flatMap(right -> {
+                                reply.accessRights = call.access & right;
+                                reply.supportedTypes = call.access;
+                                return Mono.just(reply);
+                            });
                 });
     }
 
@@ -599,7 +617,9 @@ public class NFS4Proc {
         reply.opt = NFSV4.Opcode.NFS4PROC_DESTROY_SESSION.opcode;
         NFS4Client client = clientControl.getClient(call.sessionId);
         NFS4Session session = client.getSession(call.sessionId);
-        NFS4Session.SessionConnection sessionConnection = new NFS4Session.SessionConnection(DEFAULT_ADDRESS, reqHeader.nfsHandler.address);
+        SocketAddress localAddress = reqHeader.nfsHandler.socket.localAddress();
+        SocketAddress address = reqHeader.nfsHandler.socket.remoteAddress();
+        NFS4Session.SessionConnection sessionConnection = new NFS4Session.SessionConnection(localAddress, address);
         if (!session.isReleasableBy(sessionConnection)) {
             reply.status = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
             return Mono.just(reply);
@@ -634,12 +654,17 @@ public class NFS4Proc {
         AtomicInteger dirBytesLength = new AtomicInteger();
         int minorVersion = context.minorVersion;
         reply.follows = 0;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         if (ROOT_INODE.equals(context.getCurrentInode())) {
-            if (pool.getCommand(REDIS_SYSINFO_INDEX).exists(FSID_BUCKET) > 0) {
                 Mono<List<reactor.util.function.Tuple2<Inode, Map<String, String>>>> res =
                         pool.getReactive(REDIS_SYSINFO_INDEX).hgetall(FSID_BUCKET)
+                                .defaultIfEmpty(new HashMap<>())
                                 .flatMapMany(fsidToBucket -> Flux.fromIterable(fsidToBucket.values()))
                                 .flatMap(bucket -> pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(bucket))
+                                .defaultIfEmpty(new HashMap<>())
                                 .filter(bucketInfo -> StringUtils.isNotBlank(bucketInfo.get("nfs")) && bucketInfo.get("nfs").equals("1")
                                         && StringUtils.isNotBlank(bucketInfo.get("fsid")) && Long.parseLong(bucketInfo.get("fsid")) > call.cookie)
                                 .flatMap(bucketInfo -> nodeInstance.getInode(bucketInfo.get("bucket_name"), 1L).zipWith(Mono.just(bucketInfo)))
@@ -659,7 +684,7 @@ public class NFS4Proc {
                                 long bucketFsid = Long.parseLong(bucketInfo.get("fsid"));
                                 clone.setCookie(bucketFsid);
 //                        clone.setNodeId(bucketFsid);
-                                DirEntV4 entry = DirEntV4.mapDirEnt(clone, ROOT_FSID, call.mask, follows, minorVersion, dirBytesLength.get());
+                                DirEntV4 entry = DirEntV4.mapDirEnt(clone, ROOT_FSID, call.mask, follows, minorVersion, 0);
                                 if (replySize.get() + entry.size() >= call.maxCount - SunRpcHeader.SIZE) {
                                     overMax.set(true);
                                     return Mono.empty();
@@ -675,10 +700,6 @@ public class NFS4Proc {
                                 }
                             }).map(v -> reply);
                 });
-            } else {
-                reply.eof = 1;
-                return Mono.just(reply);
-            }
         }
         reqHeader.bucket = getBucketName(context.currFh.fsid);
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
@@ -692,49 +713,57 @@ public class NFS4Proc {
                     dirLength.set(dirInode.getObjName().length());
                     dirBytesLength.set(dirInode.getObjName().getBytes(StandardCharsets.UTF_8).length);
                     String prefix = dirInode.getObjName();
-                    return ReadDirCache.listAndCache(reqHeader.bucket, prefix, call.cookie, call.maxCount, reqHeader.nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs());
-                })
-                .flatMap(inodeList -> {
-                    AtomicLong replySize = new AtomicLong(reply.size());
-                    AtomicBoolean overMax = new AtomicBoolean();
-                    return Flux.fromIterable(inodeList)
-                            .takeWhile(v -> !overMax.get())
-                            .concatMap(inode -> {
-                                int limitFileNameLength = 255;
-                                if (inode.getObjName().endsWith("/")) {
-                                    limitFileNameLength = 256;
+                    callHeader.opt = NFSV3.Opcode.NFS3PROC_READDIR.opcode;
+                    return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, false, null, 0)
+                            .flatMap(pass -> {
+                                if (!pass) {
+                                    reply.status = NFS3ERR_ACCES;
+                                    return Mono.just((RpcReply) reply);
                                 }
-                                int follows = 1;
-                                if (inode.getObjName().getBytes(StandardCharsets.UTF_8).length - dirBytesLength.get() <= limitFileNameLength) {
-                                    DirEntV4 entry = DirEntV4.mapDirEnt(inode, fsid, call.mask, follows, minorVersion, dirBytesLength.get());
-                                    if (replySize.get() + entry.size() >= call.maxCount - SunRpcHeader.SIZE) {
-                                        overMax.set(true);
-                                        return Mono.just(true);
-                                    }
-                                    return entry.fAttr4.setSpaceTotal().doOnNext(v -> {
-                                        reply.entryList.add(entry);
-                                        replySize.addAndGet(entry.size());
-                                    });
+                                return ReadDirCache.listAndCache(reqHeader.bucket, prefix, call.cookie, call.maxCount, reqHeader.nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
+                                        .flatMap(inodeList -> {
+                                            AtomicLong replySize = new AtomicLong(reply.size());
+                                            AtomicBoolean overMax = new AtomicBoolean();
+                                            return Flux.fromIterable(inodeList)
+                                                    .takeWhile(v -> !overMax.get())
+                                                    .concatMap(inode -> {
+                                                        int limitFileNameLength = 255;
+                                                        if (inode.getObjName().endsWith("/")) {
+                                                            limitFileNameLength = 256;
+                                                        }
+                                                        int follows = 1;
+                                                        if (inode.getObjName().getBytes(StandardCharsets.UTF_8).length - dirBytesLength.get() <= limitFileNameLength) {
+                                                            DirEntV4 entry = DirEntV4.mapDirEnt(inode, fsid, call.mask, follows, minorVersion, dirLength.get());
+                                                            if (replySize.get() + entry.size() >= call.maxCount - SunRpcHeader.SIZE) {
+                                                                overMax.set(true);
+                                                                return Mono.just(true);
+                                                            }
+                                                            return entry.fAttr4.setSpaceTotal().doOnNext(v -> {
+                                                                reply.entryList.add(entry);
+                                                                replySize.addAndGet(entry.size());
+                                                            });
+                                                        }
+                                                        return Mono.just(true);
+                                                    }).collectList()
+                                                    .doOnNext(v -> {
+                                                        if (reply.entryList.isEmpty()) {
+                                                            reply.eof = 1;
+                                                        }
+                                                        if (!InodeUtils.isError(dirInodes[0]) && Inode.isRelaUpdate(dirInodes[0])) {
+                                                            dirInodes[0].setAtime(System.currentTimeMillis() / 1000);
+                                                            dirInodes[0].setAtimensec((int) (System.nanoTime() % ONE_SECOND_NANO));
+                                                            isUpAtime[0] = true;
+                                                        }
+                                                    }).map(v -> (RpcReply) reply);
+                                        });
+                            })
+                            .doOnNext(reply0 -> {
+                                if (isUpAtime[0]) {
+                                    nodeInstance.updateInodeTime(dirInodes[0].getNodeId(), bucket, dirInodes[0].getAtime(), dirInodes[0].getAtimensec(), true, false, false);
                                 }
-                                return Mono.just(true);
-                            }).collectList()
-                            .doOnNext(v -> {
-                                if (reply.entryList.isEmpty()) {
-                                    reply.eof = 1;
-                                }
-                                if (!InodeUtils.isError(dirInodes[0]) && Inode.isRelaUpdate(dirInodes[0])) {
-                                    dirInodes[0].setAtime(System.currentTimeMillis() / 1000);
-                                    dirInodes[0].setAtimensec((int) (System.nanoTime() % ONE_SECOND_NANO));
-                                    isUpAtime[0] = true;
-                                }
-                            }).map(v -> (RpcReply) reply);
-                })
-                .doOnNext(reply0 -> {
-                    if (isUpAtime[0]) {
-                        nodeInstance.updateInodeTime(dirInodes[0].getNodeId(), bucket, dirInodes[0].getAtime(), dirInodes[0].getAtimensec(), true, false, false);
-                    }
-                })
-                .doOnError(e -> log.error("", e));
+                            })
+                            .doOnError(e -> log.error("", e));
+                });
     }
 
 
@@ -747,33 +776,38 @@ public class NFS4Proc {
         Nfs4Utils.checkDirAndNameAndSym(currentInode, call.name);
         String name = new String(call.name);
         if (ROOT_INODE.equals(currentInode)) {
-            if (RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).exists(name) != 0
-                    && (RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hexists(name, "nfs"))
-                    && "1".equals(RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hget(name, "nfs"))) {
-                int fsid = Integer.parseInt(RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hget(name, "fsid"));
-                Map<String, String> bucketInfo = RedisConnPool.getInstance().getCommand(REDIS_BUCKETINFO_INDEX).hgetall(name);
-                if (!CheckUtils.siteCanAccess(bucketInfo)) {
-                    reply.status = NFS3ERR_ACCES;
-                    return Mono.just(reply);
-                }
-                NFSBucketInfo.FsInfo fsInfo = new NFSBucketInfo.FsInfo();
-                fsInfo.setBucket(name);
-                NFSBucketInfo.bucketInfo.put(name, bucketInfo);
-                NFSBucketInfo.fsToBucket.put(fsid, fsInfo);
-                Inode rootInode = InodeUtils.getAndPutRootInode(name);
-                context.currFh = FH2.mapToFH2(rootInode, fsid);
-                context.currStateId = StateId.zeroStateId();
-                context.setCurrentInode(rootInode);
-                return Mono.just(reply);
-            }
-            reply.status = ENOENT;
-            return Mono.just(reply);
+            return Mono.just(true).flatMap(b -> pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(name))
+                    .defaultIfEmpty(new HashMap<>())
+                    .flatMap(bucketInfo -> {
+                        if (bucketInfo != null && !bucketInfo.isEmpty() && "1".equals(bucketInfo.get("nfs"))) {
+                            if ((!CheckUtils.siteCanAccess(bucketInfo)) || !IpWhitelistUtils.checkNFSWhitelist(bucketInfo.get("bucket_name"), reqHeader.nfsHandler.getClientAddress())) {
+                                reply.status = NFS3ERR_ACCES;
+                                return Mono.just(reply);
+                            }
+                            int fsid = Integer.parseInt(bucketInfo.get("fsid"));
+                            NFSBucketInfo.FsInfo fsInfo = new NFSBucketInfo.FsInfo();
+                            fsInfo.setBucket(name);
+                            NFSBucketInfo.bucketInfo.put(name, bucketInfo);
+                            NFSBucketInfo.fsToBucket.put(fsid, fsInfo);
+                            Inode rootInode = InodeUtils.getAndPutRootInode(name);
+                            context.currFh = FH2.mapToFH2(rootInode, fsid);
+                            context.currStateId = StateId.zeroStateId();
+                            context.setCurrentInode(rootInode);
+                            return Mono.just(reply);
+                        }
+                        reply.status = ENOENT;
+                        return Mono.just(reply);
+                    });
         }
         int fsid = context.currFh.fsid;
         reqHeader.bucket = getBucketName(context.currFh.fsid);
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
         if (!CheckUtils.siteCanAccess(reqHeader.bucketInfo)) {
             reply.status = NFS3ERR_ACCES;
+            return Mono.just(reply);
+        }
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
             return Mono.just(reply);
         }
         return Mono.just(currentInode).flatMap(dirInode -> {
@@ -785,13 +819,23 @@ public class NFS4Proc {
                 objName = dirName + objName;
             }
             String finalObjName = objName;
-            return RedLockClient.lock(reqHeader, objName, LockType.READ, true, false)
-                    .flatMap(lockRes -> FsUtils.lookup(reqHeader.bucket, finalObjName, reqHeader, false, dirInode.getNodeId(), dirInode.getACEs()));
+            callHeader.opt = NFSV3.Opcode.NFS3PROC_LOOKUP.opcode;
+            return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, false, null, 0)
+                    .flatMap(pass -> {
+                        if (!pass) {
+                            return Mono.just(NO_PERMISSION_INODE);
+                        }
+                        return RedLockClient.lock(reqHeader, finalObjName, LockType.READ, true, false)
+                                .flatMap(lockRes -> FsUtils.lookup(reqHeader.bucket, finalObjName, reqHeader, false, dirInode.getNodeId(), dirInode.getACEs()));
+                    });
+
         }).flatMap(inode -> {
             if (NOT_FOUND_INODE.equals(inode)) {
                 reply.status = ENOENT;
             } else if (ERROR_INODE.equals(inode)) {
                 reply.status = EIO;
+            } else if (NO_PERMISSION_INODE.equals(inode)) {
+                reply.status = NFS3ERR_ACCES;
             } else {
                 reply.status = OK;
                 context.currFh = FH2.mapToFH2(inode, fsid);
@@ -819,6 +863,10 @@ public class NFS4Proc {
         } else if (StringUtils.isBlank(currentInode.getObjName()) && currentInode.getNodeId() == 1) {
             context.currFh = FH2.mapToFH2(ROOT_INODE, ROOT_FSID);
             context.setCurrentInode(ROOT_INODE);
+            return Mono.just(reply);
+        }
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
             return Mono.just(reply);
         }
         return Mono.just(currentInode).flatMap(childNode -> {
@@ -857,6 +905,10 @@ public class NFS4Proc {
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
         reply.mask = call.mask;
         ObjAttr objAttr = call.fAttr4.objAttr;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         int defaultMode = 0644;
         switch (call.fType) {
             case NF4DIR:
@@ -891,67 +943,72 @@ public class NFS4Proc {
             mkNodCall.specData2 = call.specData2;
         }
         MkNodCall finalMkNodCall = mkNodCall;
-        return CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
-                .flatMap(res -> {
-                    return NFSBucketInfo.getBucketInfoReactive(reqHeader.bucket)
-                            .map(map -> {
-                                reqHeader.bucketInfo = map;
-                                return res;
-                            });
+        return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L)
+                .flatMap(waitMillis -> {
+                    String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
+                    return AddressFSPerfLimiter.getInstance().limits(redisKey, fs_create.name() + "-" + THROUGHPUT_QUOTA, 1L).map(waitMillis2 -> waitMillis + waitMillis2);
                 })
-                .flatMap(res -> {
-                    if (!res) {
-                        return Mono.just(NO_PERMISSION_INODE);
-                    }
-                    return Mono.just(currentInode);
-                })
-                .flatMap(dirInode -> {
-                    int cifsMode = FILE_ATTRIBUTE_ARCHIVE;
-                    String callName = new String(call.name);
-                    if (callName.endsWith("/")) {
-                        cifsMode = FILE_ATTRIBUTE_DIRECTORY;
-                    }
-                    Map<String, String> parameter = new HashMap<>();
-                    if (null != dirInode.getACEs() && !dirInode.getACEs().isEmpty()) {
-                        parameter.put(NFS_ACE, Json.encode(dirInode.getACEs()));
-                    }
-                    return call.fType == NF4LNK ?
-                            InodeUtils.create(reqHeader, objAttr.mode | S_IFLNK, cifsMode, dirInode.getObjName() + new String(call.name), new String(call.linkName), -1, "", null, parameter, callHeader) :
-                            InodeUtils.nfsCreate(reqHeader, dirInode, objAttr.mode, call.name, entryOutReply, call.context.currFh.fsid, callHeader, finalMkNodCall);
-                })
-                .flatMap(inode -> {
-                    if (entryOutReply.status != 0) {
-                        reply.status = entryOutReply.status;
-                        return Mono.just(inode);
-                    }
-                    if (InodeUtils.isError(inode) || checkSetAttr(objAttr)) {
-                        return Mono.just(inode);
-                    }
-                    return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, objAttr, null)
-                            .doOnNext(i -> {
-                                if (InodeUtils.isError(i)) {
-                                    log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
-                                }
-                            });
-                })
-                .flatMap(i -> Node.getInstance().updateInodeTime(currentInode.getNodeId(), reqHeader.bucket, i.getMtime(), i.getMtimensec(), false, true, true)
-                        .map(f -> i))
-                .map(inode -> {
-                    if (reply.status != 0) {
-                        return reply;
-                    }
-                    if (InodeUtils.isError(inode)) {
-                        reply.status = EIO;
-                    } else {
-                        context.currFh = FH2.mapToFH2(inode, context.currFh.fsid);
-                        context.setCurrentInode(inode);
-                        context.setCurrStateId(StateId.zeroStateId());
-                        reply.changeInfo.atomic = 1;
-                        reply.changeInfo.beforeChangeId = inode.getMtime();
-                        reply.changeInfo.afterChangeId = System.currentTimeMillis();
-                    }
-                    return reply;
-                });
+                .flatMap(waitMillis -> Mono.delay(Duration.ofMillis(waitMillis))
+                        .flatMap(v -> Mono.just(currentInode))
+                        .flatMap(dirInode -> {
+                            callHeader.opt = NFSV3.Opcode.NFS3PROC_CREATE.opcode;
+                            return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, true, null, 0)
+                                    .flatMap(pass -> {
+                                        if (!pass) {
+                                            reply.status = NFS3ERR_ACCES;
+                                            return Mono.just(reply);
+                                        }
+                                        int cifsMode = FILE_ATTRIBUTE_ARCHIVE;
+                                        String callName = new String(call.name);
+                                        if (callName.endsWith("/")) {
+                                            cifsMode = FILE_ATTRIBUTE_DIRECTORY;
+                                        }
+                                        Map<String, String> parameter = new HashMap<>();
+                                        if (null != dirInode.getACEs() && !dirInode.getACEs().isEmpty()) {
+                                            parameter.put(NFS_ACE, Json.encode(dirInode.getACEs()));
+                                        }
+                                        Mono<Inode> createMono = call.fType == NF4LNK ?
+                                                InodeUtils.create(reqHeader, objAttr.mode | S_IFLNK, cifsMode, dirInode.getObjName() + new String(call.name), new String(call.linkName), -1, "", null, parameter, callHeader) :
+                                                InodeUtils.nfsCreate(reqHeader, dirInode, objAttr.mode, call.name, entryOutReply, call.context.currFh.fsid, callHeader, finalMkNodCall);
+                                        return createMono.flatMap(inode -> {
+                                                    if (entryOutReply.status != 0) {
+                                                        reply.status = entryOutReply.status;
+                                                        return Mono.just(inode);
+                                                    }
+                                                    if (InodeUtils.isError(inode) || checkSetAttr(objAttr)) {
+                                                        return Mono.just(inode);
+                                                    }
+                                                    return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, objAttr, null)
+                                                            .doOnNext(i -> {
+                                                                if (InodeUtils.isError(i)) {
+                                                                    log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
+                                                                }
+                                                            });
+                                                })
+                                                .flatMap(i -> Node.getInstance().updateInodeTime(currentInode.getNodeId(), reqHeader.bucket, i.getMtime(), i.getMtimensec(), false, true, true)
+                                                        .map(f -> new Tuple2<>(i, f)))
+                                                .map(tuple2 -> {
+                                                    Inode inode = tuple2.var1;
+                                                    Inode dirInode0 = tuple2.var2;
+                                                    if (reply.status != 0) {
+                                                        return reply;
+                                                    }
+                                                    if (InodeUtils.isError(inode)) {
+                                                        reply.status = EIO;
+                                                    } else {
+                                                        context.currFh = FH2.mapToFH2(inode, context.currFh.fsid);
+                                                        context.setCurrentInode(inode);
+                                                        context.setCurrStateId(StateId.zeroStateId());
+                                                        reply.changeInfo.atomic = 1;
+                                                        reply.changeInfo.beforeChangeId = currentInode.getCtime() * ONE_SECOND_NANO + currentInode.getCtimensec();
+                                                        reply.changeInfo.afterChangeId = dirInode0.getCtime() * ONE_SECOND_NANO + dirInode0.getCtimensec();
+                                                    }
+                                                    return reply;
+                                                });
+
+                                    });
+                        }));
+
     }
 
 
@@ -967,7 +1024,6 @@ public class NFS4Proc {
         reply.maskLen = call.maskLen;
         reply.mask = call.mask;
         int minorVersion = context.minorVersion;
-        MonoProcessor<RpcReply> res = MonoProcessor.create();
         int shareAccess = call.shareAccess;
         int shareDeny = call.shareDeny;
         NFS4Client client;
@@ -995,155 +1051,42 @@ public class NFS4Proc {
 //            reply.status = NFS4ERR_NO_GRACE;
 //            return Mono.just(reply);
 //        }
-
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         StateOwner owner = client.getOrCreateOwner(call.owner, call.seqId, false);
-        Mono<Boolean> preMono = CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
-                .flatMap(result ->
-                        NFSBucketInfo.getBucketInfoReactive(reqHeader.bucket)
-                                .map(map -> {
-                                    reqHeader.bucketInfo = map;
-                                    return result;
-                                }));
+        boolean needWrite = shareAccess == OPEN_SHARE_ACCESS_BOTH || shareAccess == OPEN_SHARE_ACCESS_WRITE;
+        callHeader.opt = needWrite ? NFSV3.Opcode.NFS3PROC_CREATE.opcode : NFSV3.Opcode.NFS3PROC_READ.opcode;
+        Mono<Boolean> preMono = NFSACL.judgeNFSOptAccess0(currentInode, reqHeader, callHeader, needWrite, null, 0);
+
+        Mono<RpcReply> claimMono;
         switch (call.claimType) {
             case NFS4_OPEN_CLAIM_NULL:
-                Nfs4Utils.checkDirAndName(currentInode, call.name);
-                preMono.flatMap(result -> {
-                    if (!result) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
-                        res.onNext(reply);
-                        return Mono.empty();
-                    }
-
-                    String objName = new String(call.name);
-                    if (currentInode.getNodeId() != 1) {
-                        String dirName = currentInode.getObjName();
-                        dirName = dirName.substring(0, dirName.lastIndexOf("/") + 1);
-                        objName = dirName + objName;
-                    }
-                    String finalObjName = objName;
-                    return RedLockClient.lock(reqHeader, objName, LockType.READ, true, false)
-                            .flatMap(lockRes -> FsUtils.lookup(reqHeader.bucket, finalObjName, reqHeader, false, currentInode.getNodeId(), currentInode.getACEs()))
-                            .zipWith(Mono.just(currentInode));
-                }).doOnNext(tuple2 -> {
-                    Inode createNode = tuple2.getT1();
-                    Inode dirNode = tuple2.getT2();
-                    if (ERROR_INODE.equals(createNode)) {
-                        reply.status = EIO;
-                        res.onNext(reply);
-                        return;
-                    }
-                    if (call.openType == OPEN_CREATE) {
-                        if (call.createMode != CREATE_UNCHECKED && !NOT_FOUND_INODE.equals(createNode)) {
-                            reply.status = EEXIST;
-                            res.onNext(reply);
-                            return;
-                        }
-                        if (call.createMode == CREATE_UNCHECKED && !NOT_FOUND_INODE.equals(createNode)) {
-                            //todo 检查acl
-                            ObjAttr objAttr = new ObjAttr();
-                            if (call.fAttr4.objAttr.hasSize != 0 && call.fAttr4.objAttr.size == 0) {
-                                objAttr.hasSize = 1;
-                                objAttr.size = 0;
-                            }
-                            call.fAttr4.objAttr = objAttr;
-                        }
-                        int mode = 0;
-                        if (call.createMode != CREATE_EXCLUSIVE) {
-                            if (call.fAttr4.objAttr.hasMode != 0) {
-                                mode = call.fAttr4.objAttr.mode;
-                            }
-                        }
-                        mode = mode == 0 ? 0755 | S_IFREG : mode | S_IFREG;
-                        EntryOutReply entryOutReply = new EntryOutReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
-                        InodeUtils.nfsCreate(reqHeader, dirNode, mode | S_IFREG, call.name, entryOutReply, fsid, callHeader, null)
-                                .flatMap(inode -> {
-                                    if (entryOutReply.status != 0) {
-                                        reply.status = entryOutReply.status;
-                                        return Mono.just(inode);
-                                    }
-                                    if (!InodeUtils.isError(inode) && call.createMode != CREATE_EXCLUSIVE && !checkSetAttr(call.fAttr4.objAttr)) {
-                                        return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, call.fAttr4.objAttr, null)
-                                                .doOnNext(i -> {
-                                                    if (InodeUtils.isError(i)) {
-                                                        log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
-                                                    }
-                                                });
-                                    }
-                                    return Mono.just(inode);
-                                })
-                                .subscribe(inode -> {
-                                    if (reply.status != 0) {
-                                        res.onNext(reply);
-                                        return;
-                                    }
-                                    if (InodeUtils.isError(inode)) {
-                                        reply.status = EIO;
-                                        res.onNext(reply);
-                                        return;
-                                    }
-                                    context.currFh = FH2.mapToFH2(inode, fsid);
-                                    context.setCurrentInode(inode);
-                                    res.onNext(reply);
-                                });
-                    } else {
-                        Nfs4Utils.checkCanAccess(reply, context, createNode, call.shareAccess);
-                        if (NOT_FOUND_INODE.equals(createNode)) {
-                            reply.status = ENOENT;
-                            res.onNext(reply);
-                            return;
-                        }
-                        context.currFh = FH2.mapToFH2(createNode, fsid);
-                        context.currStateId = reply.stateId;
-                        context.setCurrentInode(createNode);
-                        res.onNext(reply);
-                    }
-                }).subscribe();
+                claimMono = claimNull(call, reply, context, client, reqHeader,callHeader, fsid, preMono);
                 break;
             case NFS4_OPEN_CLAIM_PREVIOUS:
-                //todo 客户端重启
-                client.wantReclaim();
-                res.onNext(reply);
+                claimMono = claimPrevious(reply, client, preMono);
                 break;
             case NFS4_OPEN_CLAIM_FH:
-
-                if (context.minorVersion == 0) {
-                    reply.status = NFS4ERR_BADXDR;
-                    res.onNext(reply);
-                    break;
-                }
-                preMono.subscribe(result -> {
-                    if (!result) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
-                        res.onNext(reply);
-                        return;
-                    }
-                    context.currFh = FH2.mapToFH2(context.getCurrentInode(), fsid);
-                    res.onNext(reply);
-                });
+                claimMono = claimFH(reply, context, fsid, preMono);
                 break;
-            //todo 委托操作暂时不支持,c语言中部分不支持
             case NFS4_OPEN_CLAIM_DELEG_PREV_FH:
             case NFS4_OPEN_CLAIM_DELEG_CUR_FH:
                 //原生不支持4.0
-                if (context.minorVersion == 0) {
-                    reply.status = NFS4ERR_BADXDR;
-                    res.onNext(reply);
-                    break;
-                } else {
-                    reply.status = NFS3ERR_NOTSUPP;
-                    res.onNext(reply);
-                    break;
-                }
+                reply.status = (minorVersion == 0) ? NFS4ERR_BADXDR : NFS3ERR_NOTSUPP;
+                claimMono = Mono.just(reply);
+                break;
             case NFS4_OPEN_CLAIM_DELEGATE_PREV:
             case NFS4_OPEN_CLAIM_DELEGATE_CUR:
                 reply.status = NFS3ERR_NOTSUPP;
-                res.onNext(reply);
+                claimMono = Mono.just(reply);
                 break;
             default:
                 reply.status = NFS3ERR_INVAL;
-                res.onNext(reply);
+                claimMono = Mono.just(reply);
         }
-        return res.flatMap(r -> {
+        return claimMono.flatMap(r -> {
             StateIdOps stateIdOps = clientControl.getStateIdOps();
             OpenV4Reply openReply = (OpenV4Reply) r;
             if (openReply.status == 0) {
@@ -1153,10 +1096,7 @@ public class NFS4Proc {
                                 reply.status = NFS4ERR_DELAY;
                                 return Mono.just(reply);
                             }
-//                            if (call.claimType == NFS4_OPEN_CLAIM_DELEG_CUR_FH){
-//                                stateIdOps.
-//                            }
-                            return stateIdOps.addOpen(client, owner, context, shareAccess, shareDeny, NFS4_OPEN_STID, openReply)
+                            return stateIdOps.addOpen(client, owner, context, shareAccess, shareDeny, NFS4_OPEN_STID, openReply, call)
                                     .flatMap(state -> {
                                         if (openReply.status == 0) {
                                             //todo 未实现宽限期不可委托
@@ -1185,6 +1125,147 @@ public class NFS4Proc {
         });
     }
 
+    private Mono<RpcReply> claimNull(OpenV4Call call, OpenV4Reply reply, CompoundContext context, NFS4Client client,
+                                     ReqInfo reqHeader, RpcCallHeader callHeader, int fsid, Mono<Boolean> preCheckMono) {
+        Inode currentInode = context.getCurrentInode();
+        Nfs4Utils.checkDirAndName(currentInode, call.name);
+
+        return preCheckMono.flatMap(pass -> {
+            if (!pass) {
+                reply.status = NFS3ERR_ACCES;
+                return Mono.just(reply);
+            }
+            String objName = new String(call.name);
+            if (currentInode.getNodeId() != 1) {
+                String dirName = currentInode.getObjName();
+                dirName = dirName.substring(0, dirName.lastIndexOf("/") + 1);
+                objName = dirName + objName;
+            }
+            String finalObjName = objName;
+            return RedLockClient.lock(reqHeader, objName, LockType.READ, true, false)
+                    .flatMap(lock -> FsUtils.lookup(reqHeader.bucket, finalObjName, reqHeader, false, currentInode.getNodeId(), currentInode.getACEs()))
+                    .flatMap(targetInode -> {
+                        if (ERROR_INODE.equals(targetInode)) {
+                            reply.status = EIO;
+                            return Mono.just(reply);
+                        }
+                        if (call.openType == OPEN_CREATE) {
+                            return doOpenCreate(call, reply, context, currentInode, targetInode, reqHeader,callHeader, fsid);
+                        } else {
+                            return doOpenNormal(reply, context, targetInode);
+                        }
+                    });
+        });
+    }
+
+    private Mono<RpcReply> claimPrevious(OpenV4Reply reply, NFS4Client client, Mono<Boolean> preMono) {
+        return preMono.flatMap(pass -> {
+            if (!pass) {
+                reply.status = NFS3ERR_ACCES;
+                return Mono.just(reply);
+            }
+            client.wantReclaim();
+            return Mono.just(reply);
+        });
+    }
+
+    private Mono<RpcReply> claimFH(OpenV4Reply reply, CompoundContext context, int fsid, Mono<Boolean> preCheckMono) {
+        if (context.getMinorVersion() == 0) {
+            reply.status = NFS4ERR_BADXDR;
+            return Mono.just(reply);
+        }
+        return preCheckMono.flatMap(pass -> {
+            if (!pass) {
+                reply.status = NFS3ERR_ACCES;
+            } else {
+                context.currFh = FH2.mapToFH2(context.getCurrentInode(), fsid);
+            }
+            return Mono.just(reply);
+        });
+    }
+
+    private Mono<RpcReply> doOpenCreate(OpenV4Call call, OpenV4Reply reply, CompoundContext context, Inode dirNode, Inode existNode,
+                                        ReqInfo reqHeader, RpcCallHeader callHeader, int fsid) {
+        long beforeChangeId = dirNode.getCtime() * ONE_SECOND_NANO + dirNode.getCtimensec();
+        if (call.createMode == CREATE_UNCHECKED && !NOT_FOUND_INODE.equals(existNode)) {
+            ObjAttr objAttr = new ObjAttr();
+            if (call.fAttr4.objAttr.hasSize != 0 && call.fAttr4.objAttr.size == 0) {
+                objAttr.hasSize = 1;
+                objAttr.size = 0;
+            }
+            call.fAttr4.objAttr = objAttr;
+        }
+        int mode = 0;
+        if (call.createMode != CREATE_EXCLUSIVE) {
+            if (call.fAttr4.objAttr.hasMode != 0) {
+                mode = call.fAttr4.objAttr.mode;
+            }
+        }
+        mode = mode == 0 ? 0755 | S_IFREG : mode | S_IFREG;
+        if (call.createMode != CREATE_UNCHECKED && !NOT_FOUND_INODE.equals(existNode)) {
+            return clientControl.getStateIdOps().checkVerifier(existNode, call.verifier)
+                    .flatMap(exist0 -> {
+                        if (exist0){
+                            return afterCreate(call, reqHeader, context, fsid, existNode, reply, beforeChangeId, dirNode);
+                        }else {
+                            reply.status = EEXIST;
+                            return Mono.just(reply);
+                        }
+                    });
+        }
+        EntryOutReply entryReply = new EntryOutReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
+        return InodeUtils.nfsCreate(reqHeader, dirNode, mode, call.name, entryReply, fsid, callHeader, null)
+                .flatMap(newInode -> {
+                    if (entryReply.status != 0) {
+                        reply.status = entryReply.status;
+                        return Mono.just(newInode);
+                    }
+                    if (InodeUtils.isError(newInode)) {
+                        reply.status = EIO;
+                        return Mono.just(newInode);
+                    }
+                    return afterCreate(call, reqHeader, context, fsid, newInode, reply, beforeChangeId, dirNode);
+                }).thenReturn(reply);
+    }
+
+    private Mono<RpcReply> afterCreate(OpenV4Call call, ReqInfo reqHeader, CompoundContext context, int fsid, Inode newInode, OpenV4Reply reply, long beforeChangeId, Inode dirNode) {
+        Mono<Inode> processMono;
+        if (call.createMode != CREATE_EXCLUSIVE && !checkSetAttr(call.fAttr4.objAttr)) {
+            processMono = nodeInstance.setAttr(newInode.getNodeId(), reqHeader.bucket, call.fAttr4.objAttr, null)
+                    .flatMap(i -> {
+                        if (InodeUtils.isError(i)) {
+                            log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
+                        }
+                        return Mono.just(i);
+                    })
+                    .defaultIfEmpty(newInode);
+        } else {
+            processMono = Mono.just(newInode);
+        }
+        return processMono.doOnNext(inode -> {
+            if (!InodeUtils.isError(inode)) {
+                context.currFh = FH2.mapToFH2(inode, fsid);
+                context.setCurrentInode(inode);
+                reply.changeInfo.atomic = 1;
+                reply.changeInfo.beforeChangeId = beforeChangeId;
+                reply.changeInfo.afterChangeId = dirNode.getCtime() * ONE_SECOND_NANO + dirNode.getCtimensec();
+            }
+            if (InodeUtils.isError(inode)) {
+                reply.status = EIO;
+            }
+        }).thenReturn(reply);
+    }
+
+    private Mono<RpcReply> doOpenNormal(OpenV4Reply reply, CompoundContext context, Inode targetNode) {
+        if (NOT_FOUND_INODE.equals(targetNode)) {
+            reply.status = ENOENT;
+            return Mono.just(reply);
+        }
+        context.currFh = FH2.mapToFH2(targetNode, context.currFh.fsid);
+        context.setCurrentInode(targetNode);
+        return Mono.just(reply);
+    }
+
 
     @NFSV4.Opt(value = NFSV4.Opcode.NFS4PROC_OPEN_DOWNGRADE)
     public Mono<RpcReply> openDownGrade(RpcCallHeader callHeader, ReqInfo reqHeader, OpenDownGradeCall call) {
@@ -1200,6 +1281,10 @@ public class NFS4Proc {
                 || ((shareAccess & ~OPEN_SHARE_ACCESS_BOTH) != 0)
                 || (shareDeny & ~OPEN_SHARE_DENY_BOTH) != 0) {
             reply.status = NFS3ERR_INVAL;
+            return Mono.just(reply);
+        }
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
             return Mono.just(reply);
         }
 //        Inode currentInode = context.getCurrentInode();
@@ -1225,6 +1310,10 @@ public class NFS4Proc {
             reply.status = NFS3ERR_NOTSUPP;
             return Mono.just(reply);
         }
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Inode currentInode = context.getCurrentInode();
         Nfs4Utils.checkNotDirAndSym(currentInode);
         StateId stateId = call.stateId;
@@ -1245,51 +1334,112 @@ public class NFS4Proc {
         int[] mask = call.fAttr4.mask;
         reply.mask = mask;
         reqHeader.bucketInfo = NFSBucketInfo.getBucketInfo(reqHeader.bucket);
-        return CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
-                .flatMap(res -> {
-                    if (!res) {
-                        return Mono.just(NO_PERMISSION_INODE);
-                    }
-                    return Mono.just(context.getCurrentInode());
-                }).flatMap(i -> {
-                    //stateId不是特殊id,open时检查了lock和delegation,此处不检查
-                    if (!StateId.isStateLess(call.stateId)) {
-                        StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
-                        NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
-
-                        NFS4State state = client.state(stateId, reply);
-                        if (reply.status != 0) {
-                            return Mono.just(i);
-                        }
-                        if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
-                            reply.status = NFS4ERR_OPENMODE;
-                        }
-                        return Mono.just(i);
-                    } else {
-                        return clientControl.getStateIdOps().hasDelegateConflict(i, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
-                                .flatMap(b -> {
-                                    if (b) {
-                                        reply.status = NFS4ERR_DELAY;
-                                    }
-                                    return Mono.just(i);
-                                });
-                    }
-                })
-                .flatMap(inode -> {
-                    if (reply.status != 0) {
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
+        Map<String, String> extraParam = new HashMap<>();
+        extraParam.put("objAttr", Json.encode(call.fAttr4.objAttr));
+        callHeader.opt = NFSV3.Opcode.NFS3PROC_SETATTR.opcode;
+        Inode currentInode = context.getCurrentInode();
+        return NFSACL.judgeNFSOptAccess0(context.getCurrentInode(), reqHeader, callHeader, true, extraParam, 0)
+                .flatMap(pass -> {
+                    int uid = ACLUtils.getUidAndGid(callHeader)[0];
+                    int gid = ACLUtils.getUidAndGid(callHeader)[1];
+                    int[] gids = callHeader.auth.flavor == 1 ? ((AuthUnix) (callHeader.auth)).getGids() : new int[]{0};
+                    List<Integer> gidList = Arrays.stream(gids)
+                            .boxed()
+                            .collect(Collectors.toList());
+                    if (!pass) {
+                        reply.status = NFS3ERR_ACCES;
+                        log.error("permission denied. ino: {}, obj: {}:{}:{}, req: {}:{}", currentInode.getNodeId(), currentInode.getUid(), currentInode.getGid(), currentInode.getObjName(), uid, gid);
                         return Mono.just(reply);
                     }
-                    return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, call.fAttr4.objAttr, reqHeader.bucketInfo.get(BUCKET_USER_ID))
-                            .map(i -> {
-                                if (!InodeUtils.isError(i)) {
-                                    reply.status = 0;
-                                } else {
-                                    reply.status = EIO;
-                                    log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
-                                }
-                                return reply;
-                            });
+                    if (ACLUtils.NFS_ACL_START) {
+                        boolean processOldInode = false;
+                        //兼容旧版本数据，判断是否进行身份的权限提升
+                        if (!ACLUtils.checkNewInode(currentInode) && ACLUtils.isOldInodeOwner(currentInode, uid)) {
+                            processOldInode = true;
+                        }
 
+                        boolean changeOwn = false;
+                        boolean changeGrp = false;
+                        boolean changeModeRoot = false;
+                        boolean changeMode = false;
+                        ObjAttr attr = call.fAttr4.objAttr;
+                        if (!processOldInode || uid == 0 || uid == DEFAULT_ANONY_UID) {
+                            // 非root用户不允许更改文件或者目录的属主
+                            changeOwn = attr.hasUid != 0 && uid != 0;
+                            // 非root和owner用户不可以更改文件或者目录的属组，owner只可以更改自身所在的组
+                            changeGrp = attr.hasGid != 0 && (uid != 0 && (uid != currentInode.getUid() || (gid != attr.gid && !gidList.contains(attr.gid))));
+                            // 非root用户不允许更改根目录的ugo权限
+                            changeModeRoot = (context.currFh.ino == 1 && uid != 0 && attr.hasMode != 0);
+                            // 非root和owner用户不可以更改ugo权限
+                            changeMode = ((uid != 0 && uid != currentInode.getUid()) && attr.hasMode != 0);
+                        } else {
+                            // 非root用户不允许更改文件或者目录的属主
+                            changeOwn = attr.hasUid != 0 && uid != 0;
+                            // 非root和owner用户不可以更改文件或者目录的属组，owner只可以更改自身所在的组
+                            changeGrp = attr.hasGid != 0 && uid != 0 && (gid != attr.gid && !gidList.contains(attr.gid));
+                            // 非root用户不允许更改根目录的ugo权限
+                            changeModeRoot = (context.currFh.ino == 1 && uid != 0 && attr.hasMode != 0);
+                        }
+
+                        boolean existSpecMode = ACLUtils.checkSpecMode(attr);
+                        if (changeOwn || changeGrp || changeModeRoot || changeMode || existSpecMode) {
+                            boolean printLog = changeOwn && (!changeGrp && !changeModeRoot && !changeMode);
+                            if (existSpecMode) {
+                                log.error("Currently prohibited from setting special permission bits: {}", attr.mode);
+                            } else if (!printLog) {
+                                //只有changeOwn触发时，消除打印；原生nfs执行vi时，中间过渡文件4913可能无权限，但不影响vi，因此
+                                //消除该情况下的报错
+                                log.error("user {} is attempting to modify the owner or group of {}:{}, chgOwn: {}, chgGrp: {}, chgRoot: {}, chgMode: {}", uid, reqHeader.bucket, currentInode.getObjName(), changeOwn, changeGrp, changeModeRoot, changeMode);
+                            }
+
+                            reply.status = NFS3ERR_PERM;
+                            return Mono.just(reply);
+                        }
+                    }
+                    return Mono.just(context.getCurrentInode()).flatMap(i -> {
+                                //stateId不是特殊id,open时检查了lock和delegation,此处不检查
+                                if (!StateId.isStateLess(call.stateId)) {
+                                    StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
+                                    NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
+
+                                    NFS4State state = client.state(stateId, reply);
+                                    if (reply.status != 0) {
+                                        return Mono.just(i);
+                                    }
+                                    if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
+                                        reply.status = NFS4ERR_OPENMODE;
+                                    }
+                                    return Mono.just(i);
+                                } else {
+                                    return clientControl.getStateIdOps().hasDelegateConflict(i, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true)
+                                            .flatMap(b -> {
+                                                if (b) {
+                                                    reply.status = NFS4ERR_DELAY;
+                                                }
+                                                return Mono.just(i);
+                                            });
+                                }
+                            })
+                            .flatMap(inode -> {
+                                if (reply.status != 0) {
+                                    return Mono.just(reply);
+                                }
+                                return nodeInstance.setAttr(inode.getNodeId(), reqHeader.bucket, call.fAttr4.objAttr, reqHeader.bucketInfo.get(BUCKET_USER_ID))
+                                        .map(i -> {
+                                            if (!InodeUtils.isError(i)) {
+                                                context.setCurrentInode(i);
+                                                reply.status = 0;
+                                            } else {
+                                                reply.status = EIO;
+                                                log.error("update inode fail.....bucket:{},nodeId:{}", reqHeader.bucket, context.currFh.ino);
+                                            }
+                                            return reply;
+                                        });
+                            });
                 });
     }
 
@@ -1302,6 +1452,10 @@ public class NFS4Proc {
         StateIdReply reply = new StateIdReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_CLOSE.opcode;
 //        Inode currentInode = context.getCurrentInode();
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         StateId stateId = StateId.getCurrStateIdIfNeeded(context, call.stateId);
         NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(stateId);
         //释放所有stateId以及关联lockStateId和lock
@@ -1323,12 +1477,18 @@ public class NFS4Proc {
         String bucketName = reqHeader.bucket;
         String[] objName = new String[1];
         Inode[] dirInodes = new Inode[1];
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Inode currentInode = context.getCurrentInode();
         Nfs4Utils.checkDirAndName(currentInode, call.name);
         String name = new String(call.name);
         boolean esSwitch = ES_ON.equals(reqHeader.bucketInfo.get(ES_SWITCH));
         boolean[] isRmDirErr = new boolean[1];
         boolean[] isRepeat = new boolean[1];
+        Map<String, String> removeAclParam = new HashMap<>(1);
+        removeAclParam.put(NFS_DIR_SUB_DEL_ACL, NOT_CONTAIN_ACL);
         long optTime = System.currentTimeMillis();
         return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, name + "-" + THROUGHPUT_QUOTA, 1L)
                 .flatMap(waitMillis -> {
@@ -1353,20 +1513,23 @@ public class NFS4Proc {
                     dirInodes[0] = dirInode;
                     objName[0] = dirInode.getObjName() + new String(call.name, 0, call.name.length);
                     isRepeat[0] = isRequestRepeat(objName[0], optTime);
-                    return RedLockClient.lock(reqHeader, objName[0], LockType.WRITE, true, false)
-                            .flatMap(lock -> FsUtils.lookup(bucketName, objName[0], reqHeader, false, -1, null));
-                })
-                .flatMap(newInode -> {
-                    if (!(isError(newInode) || newInode.getLinkN() == NO_PERMISSION_INODE.getLinkN())) {
-                        return clientControl.getStateIdOps().removeCheck(newInode, context);
-                    }
-                    return Mono.just(newInode);
+                    callHeader.opt = NFSV3.Opcode.NFS3PROC_REMOVE.opcode;
+                    return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, true, removeAclParam, 0)
+                            .flatMap(pass -> {
+                                if (!pass) {
+                                    return Mono.just(NO_PERMISSION_INODE);
+                                }
+                                return RedLockClient.lock(reqHeader, objName[0], LockType.WRITE, true, false)
+                                        .flatMap(lock -> FsUtils.lookup(bucketName, objName[0], reqHeader, false, -1, null));
+                            });
                 })
                 .flatMap(newInode -> {
                     if (isError(newInode) || newInode.getLinkN() == NO_PERMISSION_INODE.getLinkN()) {
                         return Mono.just(newInode);
                     }
-
+                    if (NOT_CONTAIN_ACL.equals(removeAclParam.get(NFS_DIR_SUB_DEL_ACL)) && !NFSACL.judgeCifsRemove(reqHeader.bucketInfo, newInode, callHeader)) {
+                        return Mono.just(NO_PERMISSION_INODE);
+                    }
                     if (newInode.getObjName().endsWith("/")) {
                         objName[0] = objName[0] + "/";
                         String prefix = newInode.getObjName();
@@ -1395,7 +1558,7 @@ public class NFS4Proc {
                         }
                         return Mono.just(reply);
                     } else if (inode.getLinkN() == NO_PERMISSION_INODE.getLinkN()) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
+                        reply.status = NfsErrorNo.NFS3ERR_ACCES;
                         return Mono.just(reply);
                     } else {
 //                        if (clientControl.getStateIdOps().existOpen(context.getCurrentInode().getNodeId())) {
@@ -1414,6 +1577,9 @@ public class NFS4Proc {
                                                         .map(i0 -> {
                                                             if (isError(inode1)) {
                                                                 reply.status = EIO;
+                                                                if (inode1.getLinkN() == NOT_FOUND_INODE.getLinkN()) {
+                                                                    reply.status = ENOENT;
+                                                                }
                                                             } else {
                                                                 long end = System.currentTimeMillis();
                                                                 if (end - start > 55_000L) {
@@ -1446,6 +1612,10 @@ public class NFS4Proc {
         reply.opt = NFSV4.Opcode.NFS4PROC_WRITE.opcode;
         String bucketName = reqHeader.bucket;
         long nodeId = context.currFh.ino;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Inode[] inodes = new Inode[1];
         Inode currentInode = context.getCurrentInode();
         Nfs4Utils.checkNotDirAndSym(context.getCurrentInode());
@@ -1453,81 +1623,94 @@ public class NFS4Proc {
             reply.status = NfsErrorNo.NFS3ERR_FBIG;
             return Mono.just(reply);
         }
-        return CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
-                .flatMap(res -> {
-                    if (!res) {
-                        return Mono.just(NO_PERMISSION_INODE);
+        return Mono.just(currentInode).flatMap(i -> {
+            if (!StateId.isStateLess(call.stateId)) {
+                NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(call.stateId);
+                NFS4State state = client.state(call.stateId);
+                if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
+                    return Mono.error(new NFSException(NFS4ERR_OPENMODE, "shareAccess not support this opt "));
+                }
+                if (context.getMinorVersion() == 0) {
+                    clientControl.updateClientLeaseTime(call.stateId);
+                }
+                return Mono.just(i);
+            } else {
+                StateIdOps stateIdOps = clientControl.getStateIdOps();
+                return stateIdOps.checkDeny(currentInode, OPEN_SHARE_DENY_WRITE).flatMap(b -> {
+                    if (!b) {
+                        return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not read , share deny write"));
                     }
-                    return Mono.just(currentInode);
-                }).flatMap(i -> {
-                    if (!StateId.isStateLess(call.stateId)) {
-                        NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(call.stateId);
-                        NFS4State state = client.state(call.stateId);
-                        if (!Nfs4Utils.checkOpenMode(true, state.getShareAccess(), state.type())) {
-                            return Mono.error(new NFSException(NFS4ERR_OPENMODE, "shareAccess not support this opt "));
-                        }
-                        if (context.getMinorVersion() == 0) {
-                            clientControl.updateClientLeaseTime(call.stateId);
-                        }
-                        return Mono.just(i);
-                    } else {
-                        StateIdOps stateIdOps = clientControl.getStateIdOps();
-                        return stateIdOps.checkDeny(currentInode, OPEN_SHARE_DENY_WRITE).flatMap(b -> {
-                            if (!b) {
-                                return Mono.error(new NFSException(NFS4ERR_LOCKED, "can not read , share deny write"));
-                            }
-                            return stateIdOps.hasDelegateConflict(currentInode, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true);
-                        }).flatMap(b -> {
-                            if (b) {
-                                return Mono.error(new NFSException(NFS4ERR_DELAY, "can not write , exist delegation"));
-                            }
-                            return Mono.just(i);
-                        });
+                    return stateIdOps.hasDelegateConflict(currentInode, OPEN_SHARE_ACCESS_WRITE, OPEN_SHARE_DENY_NONE, context, null, true);
+                }).flatMap(b -> {
+                    if (b) {
+                        return Mono.error(new NFSException(NFS4ERR_DELAY, "can not write , exist delegation"));
                     }
-                }).flatMap(inode -> {
-                    if (reply.status != 0) {
-                        return Mono.just(reply);
-                    }
-                    if (NO_PERMISSION_INODE.getLinkN() == inode.getLinkN()) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
-                        return Mono.just(reply);
-                    }
-                    if (InodeUtils.isError(inode)) {
-                        reply.status = NfsErrorNo.NFS3ERR_I0;
-                        log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, nodeId, inode.getLinkN());
-                        return Mono.just(reply);
-                    }
-                    inodes[0] = inode;
-                    return FSQuotaUtils.checkFsQuota(inode)
-                            .flatMap(i -> {
-                                return WriteCache.getCache(bucketName, context.currFh.ino, call.stable, inode.getStorage())
-                                        .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.contents, inode, call.stable))
-                                        .map(b -> {
-                                            reply.count = call.writeLen;
-                                            reply.committed = call.stable;
-
-                                            if (!b) {
-                                                reply.status = NfsErrorNo.NFS3ERR_I0;
-                                            } else {
-                                                reply.status = 0;
-                                                inode.setSize(call.offset + call.writeLen);
-                                            }
-                                            return (RpcReply) reply;
-                                        }).onErrorResume(e -> {
-                                            log.error("", e);
-                                            reply.status = NfsErrorNo.NFS3ERR_I0;
-                                            if (e instanceof NFSException) {
-                                                int stat = ((NFSException) e).getErrCode();
-                                                if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
-                                                    reply.status = NfsErrorNo.NFS3ERR_DQUOT;
-                                                }
-                                            }
-                                            return Mono.just(reply);
-                                        });
-                            });
-
-
+                    return Mono.just(i);
                 });
+            }
+        }).flatMap(inode -> {
+            if (reply.status != 0) {
+                return Mono.just(reply);
+            }
+            if (InodeUtils.isError(inode)) {
+                reply.status = NfsErrorNo.NFS3ERR_I0;
+                log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, nodeId, inode.getLinkN());
+                return Mono.just(reply);
+            }
+            inodes[0] = inode;
+            return FSQuotaUtils.checkFsQuota(inode)
+                    .flatMap(i -> {
+                        return WriteCache.getCache(bucketName, context.currFh.ino, call.stable, inode.getStorage())
+                                .flatMap(fileCache -> fileCache.nfsWrite(call.offset, call.contents, inode, call.stable))
+                                .map(b -> {
+                                    reply.count = call.writeLen;
+                                    reply.committed = call.stable;
+
+                                    if (!b) {
+                                        reply.status = NfsErrorNo.NFS3ERR_I0;
+                                    } else {
+                                        reply.status = 0;
+                                        inode.setSize(call.offset + call.writeLen);
+                                    }
+                                    return (RpcReply) reply;
+                                }).onErrorResume(e -> {
+                                    log.error("", e);
+                                    reply.status = NfsErrorNo.NFS3ERR_I0;
+                                    if (e instanceof NFSException) {
+                                        int stat = ((NFSException) e).getErrCode();
+                                        if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                            reply.status = NfsErrorNo.NFS3ERR_DQUOT;
+                                        }
+                                    }
+                                    return Mono.just(reply);
+                                });
+                    })
+                    .onErrorResume(e -> {
+                        if (inodes[0] != null) {
+                            if (e instanceof NFSException) {
+                                int stat = ((NFSException) e).getErrCode();
+                                if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                    FSQuotaUtils.logQuotaExceeded(inodes[0], e);
+                                } else {
+                                    log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                                }
+                            } else {
+                                log.error("obj:{},nodeId:{}", inodes[0].getObjName(), inodes[0].getNodeId(), e);
+                            }
+                        } else {
+                            log.error("", e);
+                        }
+                        reply.status = NfsErrorNo.NFS3ERR_I0;
+                        if (e instanceof NFSException) {
+                            int stat = ((NFSException) e).getErrCode();
+                            if (stat == NfsErrorNo.NFS3ERR_DQUOT) {
+                                reply.status = NfsErrorNo.NFS3ERR_DQUOT;
+                            }
+                        }
+                        return Mono.just(reply);
+                    });
+
+        });
     }
 
     @NFSV4.Opt(value = NFSV4.Opcode.NFS4PROC_READ, buf = 1 << 21)
@@ -1539,7 +1722,11 @@ public class NFS4Proc {
         reply.opt = NFSV4.Opcode.NFS4PROC_READ.opcode;
         Nfs4Utils.checkNotDirAndSym(context.getCurrentInode());
         Inode currentInode = context.getCurrentInode();
-        Inode[] accessInode = new  Inode[1];
+        Inode[] accessInode = new Inode[1];
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         return BucketFSPerfLimiter.getInstance().limits(reqHeader.bucket, fs_read.name() + "-" + THROUGHPUT_QUOTA, 1L)
                 .flatMap(waitMillis -> {
                     String redisKey = getAddressPerfRedisKey(reqHeader.nfsHandler.getClientAddress(), reqHeader.bucket);
@@ -1571,7 +1758,7 @@ public class NFS4Proc {
                                 });
                     }
                 })
-                .flatMap(lock -> nodeInstance.getInode(reqHeader.bucket, context.currFh.ino)
+                .flatMap(lock -> Mono.just(context.getCurrentInode())
                         .flatMap(inode -> {
                             if (isError(inode)) {
                                 log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, context.currFh.ino, inode.getLinkN());
@@ -1683,16 +1870,13 @@ public class NFS4Proc {
         String bucket = reqHeader.bucket;
         Inode[] inodes = new Inode[]{ERROR_INODE, ERROR_INODE};
         boolean[] isDirInode = new boolean[]{false};
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Nfs4Utils.checkDirAndNotDir(context.getCurrentInode(), context.savedInode);
+        Inode currentInode = context.getCurrentInode();
         return RedLockClient.lockDir(reqHeader, context.currFh.ino, LockType.WRITE, true)
-                .flatMap(l -> CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt))
-                .flatMap(res -> {
-                    return NFSBucketInfo.getBucketInfoReactive(reqHeader.bucket)
-                            .map(map -> {
-                                reqHeader.bucketInfo = map;
-                                return res;
-                            });
-                })
                 .flatMap(res -> {
                     if (!res) {
                         return Mono.just(NO_PERMISSION_INODE);
@@ -1700,30 +1884,37 @@ public class NFS4Proc {
                     return Mono.just(context.getCurrentInode());
                 })
                 .flatMap(dirInode -> {
-                    if (InodeUtils.isError(dirInode)) {
-                        log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, context.currFh.ino, dirInode.getLinkN());
-                        return Mono.just(dirInode);
-                    }
-                    if (dirInode.getLinkN() == NO_PERMISSION_INODE.getLinkN()) {
-                        return Mono.just(dirInode);
-                    }
-                    return nodeInstance.getInode(bucket, context.saveFh.ino)
-                            .flatMap(oldInode -> {
-                                if (isError(oldInode)) {
-                                    return Mono.just(oldInode);
+                    callHeader.opt = NFSV3.Opcode.NFS3PROC_LINK.opcode;
+                    return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, true, null, 0)
+                            .flatMap(pass -> {
+                                if (!pass) {
+                                    return Mono.just(NO_PERMISSION_INODE);
                                 }
-                                inodes[0] = oldInode;
-                                byte[] buf = call.name;
-                                String name = dirInode.getObjName() + new String(buf, 0, buf.length);
 
-                                if (name.getBytes(StandardCharsets.UTF_8).length > NFS_MAX_NAME_LENGTH) {
-                                    return Mono.just(NAME_TOO_LONG_INODE);
-                                }
-                                if (inodes[0].getObjName().endsWith("/") || (inodes[0].getMode() & S_IFMT) == S_IFDIR) {
-                                    isDirInode[0] = true;
-                                    return Mono.just(oldInode);
-                                }
-                                return nodeInstance.createHardLink(bucket, oldInode.getNodeId(), name);
+                                return nodeInstance.getInode(bucket, context.saveFh.ino)
+                                        .flatMap(oldInode -> {
+                                            if (isError(oldInode)) {
+                                                return Mono.just(oldInode);
+                                            }
+                                            inodes[0] = oldInode;
+                                            byte[] buf = call.name;
+                                            String name = dirInode.getObjName() + new String(buf, 0, buf.length);
+
+                                            if (name.getBytes(StandardCharsets.UTF_8).length > NFS_MAX_NAME_LENGTH) {
+                                                return Mono.just(NAME_TOO_LONG_INODE);
+                                            }
+                                            if (inodes[0].getObjName().endsWith("/") || (inodes[0].getMode() & S_IFMT) == S_IFDIR) {
+                                                isDirInode[0] = true;
+                                                return Mono.just(oldInode);
+                                            }
+                                            return NFSACL.judgeUGOAndACL(oldInode, callHeader, reqHeader.bucketInfo, null)
+                                                    .flatMap(pass0 ->{
+                                                        if (!pass0) {
+                                                            return Mono.just(NO_PERMISSION_INODE);
+                                                        }
+                                                        return nodeInstance.createHardLink(bucket, oldInode.getNodeId(), name);
+                                                    });
+                                        });
                             });
                 })
                 .flatMap(inode -> {
@@ -1732,7 +1923,7 @@ public class NFS4Proc {
                         log.error("create hard link inode fail... {}", inode.getLinkN());
                         reply.status = EIO;
                     } else if (inode.getLinkN() == NO_PERMISSION_INODE.getLinkN()) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
+                        reply.status = NFS3ERR_ACCES;
                     } else if (NAME_TOO_LONG_INODE.equals(inode)) {
                         reply.status = NfsErrorNo.NFS3ERR_NAMETOOLONG;
                     } else if (FILES_QUOTA_EXCCED_INODE.getLinkN() == inode.getLinkN()) {
@@ -1743,7 +1934,12 @@ public class NFS4Proc {
                         reply.status = OK;
                     }
                     if (reply.status == NfsErrorNo.NFS3_OK) {
-                        return nodeInstance.updateInodeTime(call.context.currFh.ino, bucket, System.currentTimeMillis() / 1000, (int) (System.nanoTime() % ONE_SECOND_NANO), false, true, true);
+                        return nodeInstance.updateInodeTime(call.context.currFh.ino, bucket, System.currentTimeMillis() / 1000, (int) (System.nanoTime() % ONE_SECOND_NANO), false, true, true)
+                                .doOnNext(dirInode -> {
+                                    reply.changeInfo.atomic = 1;
+                                    reply.changeInfo.beforeChangeId = currentInode.getCtime() * ONE_SECOND_NANO + currentInode.getCtimensec();
+                                    reply.changeInfo.afterChangeId = dirInode.getCtime() * ONE_SECOND_NANO + dirInode.getCtimensec();
+                                });
                     }
                     return Mono.just(inode);
                 }).flatMap(i -> {
@@ -1797,21 +1993,17 @@ public class NFS4Proc {
         CommitV4Reply reply = new CommitV4Reply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_COMMIT.opcode;
         long nodeId = context.currFh.ino;
+        Inode inode = context.getCurrentInode();
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Inode[] inodes = new Inode[1];
-        return CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
-                .flatMap(res -> {
-                    if (!res) {
-                        return Mono.just(NO_PERMISSION_INODE);
-                    }
-                    return Mono.just(context.getCurrentInode());
-                }).flatMap(inode -> {
-                    if (NO_PERMISSION_INODE.getLinkN() == inode.getLinkN()) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
-                        return Mono.just(reply);
-                    }
-                    if (InodeUtils.isError(inode)) {
-                        reply.status = NfsErrorNo.NFS3ERR_I0;
-                        log.info("get inode fail.bucket:{}, nodeId:{}: {}", reqHeader.bucket, nodeId, inode.getLinkN());
+        callHeader.opt = NFSV3.Opcode.NFS3PROC_COMMIT.opcode;
+        return NFSACL.judgeNFSOptAccess0(inode, reqHeader, callHeader, true, null, 0)
+                .flatMap(pass -> {
+                    if (!pass) {
+                        reply.status = NFS3ERR_ACCES;
                         return Mono.just(reply);
                     }
                     inodes[0] = inode;
@@ -1847,19 +2039,32 @@ public class NFS4Proc {
         ReadLinkV4Reply reply = new ReadLinkV4Reply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_READLINK.opcode;
         String bucket = reqHeader.bucket;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Nfs4Utils.checkNotSymlink(context.getCurrentInode());
         return Mono.just(context.getCurrentInode())
-                .map(inode -> {
+                .flatMap(inode -> {
                     if ((inode.getMode() & S_IFMT) == S_IFLNK) {
-                        String link = inode.getReference();
-                        reply.status = NfsErrorNo.NFS3_OK;
-                        reply.link = link.getBytes();
+                        callHeader.opt = NFSV3.Opcode.NFS3PROC_READLINK.opcode;
+                        return NFSACL.judgeNFSOptAccess0(inode, reqHeader, callHeader, false, null, 0)
+                                .flatMap(pass -> {
+                                    if (!pass) {
+                                        reply.status = NFS3ERR_ACCES;
+                                        return Mono.just(reply);
+                                    }
+                                    String link = inode.getReference();
+                                    reply.status = NfsErrorNo.NFS3_OK;
+                                    reply.link = link.getBytes();
+                                    return Mono.just(reply);
+                                });
                     } else {
                         log.error("create symlink inode fail...bucket:{},dirInodeId:{}", bucket, context.currFh.ino);
                         reply.status = NfsErrorNo.NFS3ERR_I0;
                         reply.link = new byte[0];
                     }
-                    return reply;
+                    return Mono.just(reply);
                 });
     }
 
@@ -1885,7 +2090,11 @@ public class NFS4Proc {
 //            reply.status = NFS4ERR_FILE_OPEN;
 //            return Mono.just(reply);
 //        }
-
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
+        long[] beforeChangeId = new long[2];
         return Flux.just(new Tuple2<>(true, context.saveFh.ino), new Tuple2<>(false, context.currFh.ino))
                 .flatMap(t -> CheckUtils.writePermissionCheckReactive(reqHeader.bucket, callHeader.opt)
                         .flatMap(res -> {
@@ -1908,18 +2117,32 @@ public class NFS4Proc {
                                 dirInodes[0] = dirInode;
                                 oldObjectName.set(objName);
                                 isReqRepeat[0] = isRequestRepeat(objName, optTime);
+                                beforeChangeId[0] = (dirInode.getCtime() * ONE_SECOND_NANO + dirInode.getCtimensec());
                             } else {
                                 dirInodes[1] = dirInode;
                                 newObjName.set(objName);
+                                beforeChangeId[1] = (dirInode.getCtime() * ONE_SECOND_NANO + dirInode.getCtimensec());
                             }
-                            return RedLockClient.lock(reqHeader, objName, LockType.WRITE, true, t.var1)
-                                    .flatMap(lock -> FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs()))
-                                    .map(inode -> {
-                                        //mv dir
-                                        if (t.var1 && StringUtils.isNotEmpty(inode.getObjName()) && inode.getObjName().endsWith("/")) {
-                                            dir.set(true);
+                            callHeader.opt = NFSV3.Opcode.NFS3PROC_RENAME.opcode;
+                            return NFSACL.judgeNFSOptAccess0(dirInode, reqHeader, callHeader, true, null, 0)
+                                    .flatMap(pass -> {
+                                        if (!pass) {
+                                            if (t.var1) {
+                                                log.error("obj: {} rename fail, fromDir: {} has no permission", oldObjectName.get(), dirInode.getObjName());
+                                            } else {
+                                                log.error("obj: {} rename fail, toDir: {} has no permission", newObjName.get(), dirInode.getObjName());
+                                            }
+                                            return Mono.just(new Tuple2<>(t.var1, NO_PERMISSION_INODE));
                                         }
-                                        return new Tuple2<>(t.var1, inode);
+                                        return RedLockClient.lock(reqHeader, objName, LockType.WRITE, true, t.var1)
+                                                .flatMap(lock -> FsUtils.lookup(bucket, objName, reqHeader, true, dirInode.getNodeId(), dirInode.getACEs()))
+                                                .map(inode -> {
+                                                    //mv dir
+                                                    if (t.var1 && StringUtils.isNotEmpty(inode.getObjName()) && inode.getObjName().endsWith("/")) {
+                                                        dir.set(true);
+                                                    }
+                                                    return new Tuple2<>(t.var1, inode);
+                                                });
                                     });
                         })).collectList()
                 .flatMap(list -> {
@@ -1948,8 +2171,8 @@ public class NFS4Proc {
                         return Mono.just(reply)
                                 .doOnNext(r2 -> releaseLock(reqHeader, r2));
                     }
-                    if (oldInode[0].getLinkN() == NO_PERMISSION_INODE.getLinkN()) {
-                        reply.status = NfsErrorNo.NFS3ERR_ROFS;
+                    if (oldInode[0].getLinkN() == NO_PERMISSION_INODE.getLinkN() || newInode[0].getLinkN() == NO_PERMISSION_INODE.getLinkN() || !NFSACL.judgeCifsRename(reqHeader.bucketInfo, oldInode[0], dirInodes[0], dirInodes[1], callHeader, dir.get())) {
+                        reply.status = NFS3ERR_ACCES;
                         return Mono.just(reply)
                                 .doOnNext(r2 -> releaseLock(reqHeader, r2));
                     }
@@ -2075,7 +2298,17 @@ public class NFS4Proc {
 
                     }
                 })
-                .map(res -> (RpcReply) res)
+                .map(res -> {
+                    if (reply.status == 0){
+                        reply.sourceChangeInfo.atomic = 1;
+                        reply.sourceChangeInfo.beforeChangeId = beforeChangeId[0];
+                        reply.sourceChangeInfo.afterChangeId = (dirInodes[0].getCtime() * ONE_SECOND_NANO + dirInodes[0].getCtimensec());
+                        reply.targetChangeInfo.atomic = 1;
+                        reply.targetChangeInfo.beforeChangeId = beforeChangeId[1];
+                        reply.targetChangeInfo.afterChangeId = (dirInodes[1].getCtime() * ONE_SECOND_NANO + dirInodes[1].getCtimensec());
+                    }
+                    return (RpcReply) res;
+                })
                 .doFinally(s -> {
                     if (reqHeader.optCompleted && !reqHeader.repeat) {
                         deleteRequestInodeTimeMap(oldObjectName.get(), optTime);
@@ -2124,7 +2357,8 @@ public class NFS4Proc {
         }
     }
 
-    public Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String bucket, boolean isOverWrite, AtomicInteger renameNum) {
+    public Mono<Inode> renameFile(long oldNodeId, Inode newInode, String oldObjName, String newObjName, String
+            bucket, boolean isOverWrite, AtomicInteger renameNum) {
         if (renameNum != null) {
             int num = renameNum.incrementAndGet();
             if ((num % 100000) == 0) {
@@ -2181,7 +2415,8 @@ public class NFS4Proc {
      * @param bucket     桶名
      * @param count      offset
      **/
-    public Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler nfsHandler, AtomicInteger renameNum) {
+    public Mono<Inode> scanAndReName(Inode dirInode, String bucket, String newObjName, long count, NFSHandler
+            nfsHandler, AtomicInteger renameNum) {
         MonoProcessor<Boolean> res = MonoProcessor.create();
         AtomicLong offset = new AtomicLong(count);
         UnicastProcessor<Boolean> listController = UnicastProcessor.create(Queues.<Boolean>unboundedMultiproducer().get());
@@ -2213,7 +2448,8 @@ public class NFS4Proc {
                 .onErrorResume(throwable -> Mono.just(ERROR_INODE));
     }
 
-    public Mono<ReNameV4Reply> scanAndReName0(Inode oldInode, String bucket, String newObjName, long offset, ReqInfo reqHeader, ReNameV4Reply reNameReply, Inode[] dirInodes, long fsid) {
+    public Mono<ReNameV4Reply> scanAndReName0(Inode oldInode, String bucket, String newObjName, long offset, ReqInfo
+            reqHeader, ReNameV4Reply reNameReply, Inode[] dirInodes, long fsid) {
         AtomicInteger renameNum = new AtomicInteger();
         return scanAndReName(oldInode, bucket, newObjName, offset, reqHeader.nfsHandler, renameNum)
                 .flatMap(inode -> {
@@ -2229,7 +2465,8 @@ public class NFS4Proc {
                 });
     }
 
-    public Mono<List<Inode>> scanAndReNamePart(Inode dirInode, String bucket, String newObjName, AtomicLong offset, NFSHandler nfsHandler, AtomicInteger renameNum) {
+    public Mono<List<Inode>> scanAndReNamePart(Inode dirInode, String bucket, String newObjName, AtomicLong
+            offset, NFSHandler nfsHandler, AtomicInteger renameNum) {
         String prefix = dirInode.getObjName();
         return ReadDirCache.listAndCache(bucket, prefix, offset.get(), 1 << 20, nfsHandler, dirInode.getNodeId(), null, dirInode.getACEs())
                 .flatMap(list -> {
@@ -2277,6 +2514,10 @@ public class NFS4Proc {
         LockV4Reply reply = new LockV4Reply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_LOCK.opcode;
         Inode inode = context.getCurrentInode();
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         if (call.length == 0) {
             reply.status = NFS3ERR_INVAL;
             return Mono.just(reply);
@@ -2332,6 +2573,10 @@ public class NFS4Proc {
         Inode inode = context.getCurrentInode();
         NFS4Client client = context.getMinorVersion() > 0 ? context.getSession().getClient() : clientControl.getClient(call.stateId);
         NFS4State lockState = client.state(call.stateId);
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         if (lockState.type() != NFS4_LOCK_STID) {
             reply.status = NFS4ERR_BAD_STATEID;
             return Mono.just(reply);
@@ -2428,6 +2673,10 @@ public class NFS4Proc {
 //            reply.status = NFS3ERR_NOTSUPP;
 //            return Mono.just(reply);
 //        }
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         Inode inode = context.getCurrentInode();
         Nfs4Utils.checkNotDir(inode);
         NFS4Client client = clientControl.getClient(call.stateId);
@@ -2455,9 +2704,14 @@ public class NFS4Proc {
     public Mono<RpcReply> verify(RpcCallHeader callHeader, ReqInfo reqHeader, VerifyCall call) {
         EmptyReply reply = new EmptyReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_VERIFY.opcode;
-        String bucket = reqHeader.bucket;
         CompoundContext context = call.context;
+        reqHeader.bucket = getBucketName(context.currFh.fsid);
+        String bucket = reqHeader.bucket;
         int fsid = context.currFh.fsid;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         FAttr4 fAttr4 = call.fAttr4;
         if (fAttr4.mask.length > 0 && (fAttr4.mask[0] & Mask1.rDAttrError.mask) != 0) {
             reply.status = NFS3ERR_INVAL;
@@ -2483,8 +2737,13 @@ public class NFS4Proc {
         EmptyReply reply = new EmptyReply(SunRpcHeader.newReplyHeader(callHeader.getHeader().id));
         reply.opt = NFSV4.Opcode.NFS4PROC_NVERIFY.opcode;
         CompoundContext context = call.context;
+        reqHeader.bucket = getBucketName(context.currFh.fsid);
         String bucket = reqHeader.bucket;
         int fsid = context.currFh.fsid;
+        if (!IpWhitelistUtils.checkNFSWhitelist(reqHeader.bucket, reqHeader.nfsHandler.getClientAddress())) {
+            reply.status = NFS3ERR_STALE;
+            return Mono.just(reply);
+        }
         FAttr4 fAttr4 = call.fAttr4;
         if (fAttr4.mask.length > 0 && (fAttr4.mask[0] & Mask1.rDAttrError.mask) != 0) {
             reply.status = NFS3ERR_INVAL;

@@ -964,10 +964,6 @@ public class DataSynChecker {
             if (LOCAL_CLUSTER_INDEX.equals(clusterIndex)) {
                 continue;
             }
-            syncSuspendMap.computeIfAbsent(clusterIndex, b -> new AtomicBoolean());
-            if (syncSuspendMap.get(clusterIndex).get()) {
-                continue;
-            }
             String[] syncBuckets = syncBucketSet.toArray(new String[0]);
             List<Disposable> disposables = new LinkedList<>();
             AtomicInteger lastBucketIndex = clusterDeletelastIMap.computeIfAbsent(clusterIndex, k -> new AtomicInteger());
@@ -991,8 +987,8 @@ public class DataSynChecker {
                     }
                     String bucketName = tempBucketName;
                     Map<String, String> bucketInfo = pool.getCommand(REDIS_BUCKETINFO_INDEX).hgetall(bucketName);
-                    // 只扫描桶开关关闭的桶
-                    if (!isSwitchClose(bucketInfo)) {
+                    // 桶开关on/suspend的桶不进行扫描
+                    if (isSwitchOn(bucketInfo)) {
                         lastBucketIndex.set((lastBucketIndex.get() + 1) % syncBuckets.length);
                         continue;
                     }
@@ -1049,10 +1045,6 @@ public class DataSynChecker {
         Set<String> syncBucketSet = pool.getCommand(REDIS_SYSINFO_INDEX).smembers(SYNC_BUCKET_SET);
         for (Integer clusterIndex : INDEX_IPS_ENTIRE_MAP.keySet()) {
             if (!LOCAL_CLUSTER_INDEX.equals(clusterIndex)) {
-                continue;
-            }
-            syncSuspendMap.computeIfAbsent(clusterIndex, b -> new AtomicBoolean());
-            if (syncSuspendMap.get(clusterIndex).get()) {
                 continue;
             }
             String[] syncBuckets = syncBucketSet.toArray(new String[0]);
@@ -1219,24 +1211,27 @@ public class DataSynChecker {
                         return Mono.just(false);
                     }
                     if (!hasUnsyncRecord) {
-                        // 无record，且桶已不存在，将该桶从待同步桶移除。
-                        if (bucketMap.isEmpty() || switchClose.get()) {
-                            SYNC_BUCKET_STATE_MAP.get(clusterIndex).remove(bucketName);
-                            return Mono.just(false);
+                        if (onlyDelete) {
+                            // 无record，且桶已不存在，或者又立刻创建了一个未开同步的桶名桶，将该桶从待同步桶移除。
+                            if (isSwitchOff(bucketMap) || switchClose.get()) {
+                                SYNC_BUCKET_STATE_MAP.get(clusterIndex).remove(bucketName);
+                                return Mono.just(false);
+                            }
+                        } else {
+                            // 历史数据或桶复制差异还未生成，
+                            return pool.getReactive(REDIS_SYSINFO_INDEX).sismember(NEED_SYNC_BUCKETS, bucketName)
+                                    .defaultIfEmpty(false)
+                                    .flatMap(b -> {
+                                        if (b) {
+                                            updateBucSyncState(clusterIndex, bucketName, SYNCING);
+                                        } else {
+                                            updateBucSyncState(clusterIndex, bucketName, SYNCED);
+                                        }
+                                        return Mono.just(false);
+                                    });
                         }
-                        // 历史数据或桶复制差异还未生成，
-                        return pool.getReactive(REDIS_SYSINFO_INDEX).sismember(NEED_SYNC_BUCKETS, bucketName)
-                                .defaultIfEmpty(false)
-                                .flatMap(b -> {
-                                    if (b) {
-                                        updateBucSyncState(clusterIndex, bucketName, SYNCING);
-                                    } else {
-                                        updateBucSyncState(clusterIndex, bucketName, SYNCED);
-                                    }
-                                    return Mono.just(false);
-                                });
                     }
-                    if (switchClose.get()) {
+                    if (isSwitchOff(bucketMap) || switchClose.get()) {
                         updateBucSyncState(clusterIndex, bucketName, SYNCED);
                         if (onlyDelete) {
                             return Mono.just(true);
@@ -3259,6 +3254,11 @@ public class DataSynChecker {
                             }
                         },
                         cause -> {
+                            if (cause instanceof TimeoutException) {
+                                res.onNext(true);
+                                return;
+                            }
+
                             if (!"sync data error!".equals(cause.getMessage())) {
                                 log.error("list record err, {} {}", bucket, clusterIndex, cause);
                             }

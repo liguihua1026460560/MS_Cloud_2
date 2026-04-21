@@ -1863,6 +1863,9 @@ public class ListServerHandler {
                             inode.setObjName(metaData.getKey());
                             inode.setVersionId(metaData.getVersionId());
                             inode.getInodeData().clear();
+                            if (inode.getUpdateInodeDataStatus() != null && !inode.getUpdateInodeDataStatus().isEmpty()) {
+                                inode.getUpdateInodeDataStatus().clear();
+                            }
                             CifsUtils.setDefaultCifsMode(inode);
                             newObjInode = false;
                         } else {

@@ -117,6 +117,9 @@ public class FAttr3 {
             case FsConstants.S_IFFIFO:
                 attr.type = fType.NF_FIFO.type;
                 break;
+            case FsConstants.S_IFSOCK:
+                attr.type = fType.NF_SOCK.type;
+                break;
             default:
                 attr.type = fType.NF_BAD.type;
                 break;

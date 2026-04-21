@@ -267,7 +267,7 @@ public class FSPerformanceService extends BaseService {
             throw new MsException(ErrorNo.INPUT_EMPTY_OBJECT, "no body content in multiFSPerf request");
         }
 
-        DoubleActiveUtil.siteConstraintCheck(bucketInfo, paramMap.containsKey(SITE_FLAG) || paramMap.containsKey(SITE_FLAG.toLowerCase()));
+        DoubleActiveUtil.siteConstraintCheck(bucketInfo, paramMap.containsKey(SITE_FLAG.toLowerCase()));
         String localCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(LOCAL_CLUSTER, CLUSTER_NAME);
         String masterCluster = pool.getCommand(REDIS_SYSINFO_INDEX).hget(MASTER_CLUSTER, CLUSTER_NAME);
         if (!DoubleActiveUtil.dealSiteSyncRequest(new UnifiedMap<>(paramMap), MSG_TYPE_PUT_MULTi_FS_PERFORMANCE_QUOTA, localCluster, masterCluster)) {
@@ -281,7 +281,7 @@ public class FSPerformanceService extends BaseService {
             if (instance == null) {
                 throw new MsException(ErrorNo.NO_SUCH_PERF_TYPE, "This instance is not supported QoS: " + instance0);
             }
-            if (StringUtils.isNotBlank(address)) {
+            if (StringUtils.isNotBlank(address) && !"1".equals(paramMap.getOrDefault(SITE_FLAG.toLowerCase(), "0"))) {
                 checkMountRecord(bucketName, address);
             }
             dealSingleInstanceQuota(bucketName, instancePerformanceQuota, instance, THROUGHPUT_QUOTA, address);

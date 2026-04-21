@@ -5,7 +5,7 @@ import lombok.ToString;
 
 @ToString
 public class ChangeInfo {
-    public int atomic = 1;
+    public int atomic = 0;
     public long beforeChangeId = 0;
     public long afterChangeId = 0;
 

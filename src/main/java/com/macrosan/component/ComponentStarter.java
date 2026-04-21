@@ -2,6 +2,8 @@ package com.macrosan.component;
 
 import com.macrosan.component.compression.CompressionServerManager;
 import com.macrosan.component.scanners.ComponentScanner;
+import com.macrosan.component.trigger.DicomScanMetaTrigger;
+import com.macrosan.component.trigger.DicomScanRecordTrigger;
 import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.utils.msutils.MsExecutor;
@@ -124,6 +126,8 @@ public class ComponentStarter {
         startPeriodicRefreshConfig();
         ComponentScanner.getInstance().init();
         CompressionServerManager.getInstance().init();
+        DicomScanMetaTrigger.getInstance().init();
+        DicomScanRecordTrigger.getInstance().init();
     }
 
     public static void startPeriodicRefreshConfig() {

@@ -2,6 +2,7 @@ package com.macrosan.utils.serialize;
 
 import com.macrosan.message.xmlmsg.Error;
 import com.macrosan.message.xmlmsg.ListBucketResult;
+import com.macrosan.message.xmlmsg.ListPartsResult;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.macrosan.constants.ServerConstants.XML_PACKAGE_NAME;
+import static com.macrosan.constants.SysConstants.ETAG_ESCAPE_FLAG;
 import static com.macrosan.utils.cache.ClassUtils.getClassFlux;
 import static com.macrosan.utils.functional.exception.ThrowingConsumer.throwingConsumerWrapper;
 
@@ -41,6 +43,9 @@ public class JaxbUtils {
 
     private static JAXBContext jaxbContext;
     private static JAXBContext errorJaxContext;
+    private static String ENCODING_HANDLER = "com.sun.xml.internal.bind.characterEscapeHandler";
+    private static String XML_HEADERS = "com.sun.xml.internal.bind.xmlHeaders";
+    private static String headers = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
     public static void initJaxb() {
         List<? extends Class<?>> classList = getClassFlux(XML_PACKAGE_NAME, ".class")
@@ -65,8 +70,10 @@ public class JaxbUtils {
             ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
             m.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, Boolean.TRUE);
             m.setProperty(Marshaller.JAXB_FRAGMENT, Boolean.TRUE);
-            m.setProperty("com.sun.xml.internal.bind.xmlHeaders",
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            if (ETAG_ESCAPE_FLAG && msg instanceof ListPartsResult){
+                m.setProperty(ENCODING_HANDLER, new CustomEscapeHandler());
+            }
+            m.setProperty(XML_HEADERS, headers);
             m.setListener(new Marshaller.Listener() {
                 @Override
                 public void beforeMarshal(Object source) {

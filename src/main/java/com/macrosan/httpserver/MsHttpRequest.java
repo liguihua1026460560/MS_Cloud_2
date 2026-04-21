@@ -130,6 +130,10 @@ public class MsHttpRequest implements HttpServerRequest {
         }
     }
 
+    public Map<String, String> getMembers() {
+        return members;
+    }
+
     public String getMember(String key, String def) {
         return members.getOrDefault(key, def);
     }

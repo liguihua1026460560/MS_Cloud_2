@@ -198,7 +198,7 @@ public class FsQuotaService extends BaseService {
             int[] quotaType = new int[]{-1};
             checkQuotaTypeAndId(paramMap.get(QUOTA_TYPE), paramMap.get(UID), quotaType, id_);
 
-            FsUtils.lookup(bucketName, dirName, null, false, false, -1, null)
+            FsUtils.lookup(bucketName, dirName, null, false, -1, null)
                     .onErrorReturn(ERROR_INODE)
                     .subscribe(inode -> {
                         if (inode.getLinkN() == NOT_FOUND_INODE.getLinkN()) {

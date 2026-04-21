@@ -4,9 +4,8 @@ import com.macrosan.database.redis.RedisConnPool;
 import com.macrosan.database.rocksdb.MSRocksDB;
 import com.macrosan.database.rocksdb.MSRocksIterator;
 import com.macrosan.ec.ErasureClient;
-import com.macrosan.filesystem.FsUtils;
+import com.macrosan.ec.Utils;
 import com.macrosan.filesystem.cache.Node;
-import com.macrosan.filesystem.utils.InodeUtils;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.storage.StoragePool;
@@ -20,6 +19,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
 
 import java.io.File;
+import java.time.Duration;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -205,48 +205,63 @@ public class ClearTaskRunner {
                 })) : Mono.just(new Tuple3<>(false, true, true));
         if (!isInodeKey) {
             return bucketPool.mapToNodeInfo(bucketVnodeId)
-                    .flatMap(nodeList -> ErasureClient.getObjectMetaVersion(bucekt, object[0], versionId[0], nodeList, null, oldSnapshotMark[0], null).zipWith(Mono.just(nodeList)))
-                    .flatMap(tuple2 -> {
-                        if (StringUtils.isBlank(oldSnapshotMark[0]) || (!tuple2.getT1().deleteMark && !tuple2.getT1().equals(NOT_FOUND_META))) {
-                            return Mono.just(tuple2.getT1());
-                        }
-                        // 获取迁移映射
-                        return RedisConnPool.getInstance().getReactive(REDIS_BUCKETINFO_INDEX).hget(bucekt, DATA_MERGE_MAPPING)
-                                .flatMap(dataMapping -> {
-                                    if (oldSnapshotMark[0].compareTo(dataMapping) >= 0) {
-                                        return Mono.just(tuple2.getT1());
+//                    .flatMap(nodeList -> ErasureClient.getObjectMetaVersion(bucekt, object[0], versionId[0], nodeList, null, oldSnapshotMark[0], null).zipWith(Mono.just(nodeList)))
+                    .flatMap(nodeList -> ErasureClient.getObjectMetaVersionRes(bucekt, object[0], versionId[0], nodeList, null, oldSnapshotMark[0], null).zipWith(Mono.just(nodeList)))
+                    .flatMap(tuple -> {
+                        String vnode1 = tuple.getT2().get(0).var3;
+                        String versionKey = Utils.getVersionMetaDataKey(vnode1, bucekt, object[0], versionId[0], oldSnapshotMark[0]);
+                        return ErasureClient.updateMetaData(versionKey, tuple.getT1().var1, tuple.getT2(), null, tuple.getT1().var2)
+                                .timeout(Duration.ofSeconds(60))
+                                .flatMap(n -> {
+                                    if (n == 1) {
+                                        return Mono.just(tuple.getT1().var1).zipWith(Mono.just(tuple.getT2()))
+                                                .flatMap(tuple2 -> {
+                                                    if (StringUtils.isBlank(oldSnapshotMark[0]) || (!tuple2.getT1().deleteMark && !tuple2.getT1().equals(NOT_FOUND_META))) {
+                                                        return Mono.just(tuple2.getT1());
+                                                    }
+                                                    // 获取迁移映射
+                                                    return RedisConnPool.getInstance().getReactive(REDIS_BUCKETINFO_INDEX).hget(bucekt, DATA_MERGE_MAPPING)
+                                                            .flatMap(dataMapping -> {
+                                                                if (oldSnapshotMark[0].compareTo(dataMapping) >= 0) {
+                                                                    return Mono.just(tuple2.getT1());
+                                                                }
+                                                                // 查询迁移后的对象元数据
+                                                                return ErasureClient.getObjectMetaVersion(bucekt, object[0], versionId[0], tuple2.getT2(), null, dataMapping, null);
+                                                            }).switchIfEmpty(Mono.just(tuple2.getT1()));
+                                                })
+                                                .zipWith(migrationResults)
+                                                .flatMap(tuple2 -> {
+                                                    MetaData metaData = tuple2.getT1();
+                                                    boolean error = metaData.equals(ERROR_META);
+                                                    boolean normalMove = !metaData.deleteMark && fileName.equals(metaData.fileName)
+                                                            && !pool.getVnodePrefix().equalsIgnoreCase(metaData.storage);
+                                                    boolean overWrite = !fileName.equals(metaData.fileName);
+
+                                                    // 桶散列迁移开启双写过程中，综合新旧分片上元数据的更新结果来判断是否需要将数据块删除
+                                                    error = error || tuple2.getT2().var1;
+                                                    normalMove = normalMove && tuple2.getT2().var2;
+                                                    overWrite = overWrite && tuple2.getT2().var3;
+
+                                                    if (!error && (overWrite || normalMove)) {
+                                                        return ErasureClient.deleteObjectFile(pool, new String[]{fileName}, null)
+                                                                .doOnNext(b -> {
+                                                                    if (b) {
+                                                                        deleteMq(taskKey);
+                                                                    }
+                                                                });
+                                                    } else {
+                                                        if (!error) {
+                                                            deleteMq(taskKey);
+                                                        }
+
+                                                        return Mono.just(false);
+                                                    }
+                                                });
+                                    } else {
+//                                        log.info("can not update metaData versionNum");
+                                        return Mono.just(false);//更新versionNum失败不再删除，说明此时存在其他更新元数据的操作，暂不删除等待下次删除
                                     }
-                                    // 查询迁移后的对象元数据
-                                    return ErasureClient.getObjectMetaVersion(bucekt, object[0], versionId[0], tuple2.getT2(), null, dataMapping, null);
-                                }).switchIfEmpty(Mono.just(tuple2.getT1()));
-                    })
-                    .zipWith(migrationResults)
-                    .flatMap(tuple2 -> {
-                        MetaData metaData = tuple2.getT1();
-                        boolean error = metaData.equals(ERROR_META);
-                        boolean normalMove = !metaData.deleteMark && fileName.equals(metaData.fileName)
-                                && !pool.getVnodePrefix().equalsIgnoreCase(metaData.storage);
-                        boolean overWrite = !fileName.equals(metaData.fileName);
-
-                        // 桶散列迁移开启双写过程中，综合新旧分片上元数据的更新结果来判断是否需要将数据块删除
-                        error = error || tuple2.getT2().var1;
-                        normalMove = normalMove && tuple2.getT2().var2;
-                        overWrite = overWrite && tuple2.getT2().var3;
-
-                        if (!error && (overWrite || normalMove)) {
-                            return ErasureClient.deleteObjectFile(pool, new String[]{fileName}, null)
-                                    .doOnNext(b -> {
-                                        if (b) {
-                                            deleteMq(taskKey);
-                                        }
-                                    });
-                        } else {
-                            if (!error) {
-                                deleteMq(taskKey);
-                            }
-
-                            return Mono.just(false);
-                        }
+                                });
                     });
         } else {
             Node instance = Node.getInstance();

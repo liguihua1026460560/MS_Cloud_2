@@ -50,6 +50,9 @@ public class FileTierMove implements Runnable {
     private Map<String, List<StoragePool>> strategyMap;
     private Map<String, Set<String>> poolStrategyMap;
 
+    //一次回迁任务最多回迁10000个数据块
+    public static final int ONCE = 10_000;
+
 
     static {
         MsExecutor executor = new MsExecutor(1, 1, new MsThreadFactory("fs-tier-keep-lock"));
@@ -189,7 +192,7 @@ public class FileTierMove implements Runnable {
                 //TODO 执行分层迁移,回迁至缓存池,判断缓存池是否容量足够
                 long start = System.currentTimeMillis();
                 FileTierRunner runner = new FileTierRunner(mqDB, this);
-                for (int i = 0; i < 100; i++) {
+                for (int i = 0; i < 5; i++) {
                     runner.run();
                 }
                 runner.res.delayElement(Duration.ofSeconds(10))
@@ -200,25 +203,37 @@ public class FileTierMove implements Runnable {
                             }
                             long clearStart = System.currentTimeMillis();
                             FileTierCleanTask fileTierCleanTask = new FileTierCleanTask(mqDB);
-                            for (int i = 0; i < 100; i++) {
+                            for (int i = 0; i < 5; i++) {
                                 fileTierCleanTask.run();
                             }
-                            fileTierCleanTask.res.subscribe(r -> {
-                                if (runner.getTotal() > 0) {
-                                    long clearEnd = System.currentTimeMillis();
-                                    log.info("tier back clear end {} cost {} ms", runner.getTotal(), clearEnd - clearStart);
-                                }
-                            });
+                            fileTierCleanTask.res
+                                    .doFinally((signal) -> {
+                                        runAgain();
+                                    })
+                                    .subscribe(r -> {
+                                        if (fileTierCleanTask.getTotal() > 0) {
+                                            long clearEnd = System.currentTimeMillis();
+                                            log.info("tier back clear end {} cost {} ms", fileTierCleanTask.getTotal(), clearEnd - clearStart);
+                                        }
+                                    });
+                        }, e -> {
+                            log.error("", e);
+                            runAgain();
                         });
-            } finally {
-                try {
-                    redisConnPool.getShortMasterCommand(0).del(FILE_TIER_MOVE_KEY);
-                } finally {
-                    locked.set(false);
-                    FsUtils.fsExecutor.schedule(this, 10, TimeUnit.SECONDS);
-                }
+            } catch (Exception e) {
+                log.error("", e);
+                runAgain();
             }
         } else {
+            FsUtils.fsExecutor.schedule(this, 10, TimeUnit.SECONDS);
+        }
+    }
+
+    public void runAgain() {
+        try {
+            redisConnPool.getShortMasterCommand(0).del(FILE_TIER_MOVE_KEY);
+        } finally {
+            locked.set(false);
             FsUtils.fsExecutor.schedule(this, 10, TimeUnit.SECONDS);
         }
     }

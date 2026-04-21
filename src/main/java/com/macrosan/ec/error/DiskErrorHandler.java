@@ -956,6 +956,7 @@ public class DiskErrorHandler {
                 .publishOn(DISK_SCHEDULER)
                 .flatMap(l -> updateDisk(pool, vnode, dstDisk, removeNode))
                 .delayElement(Duration.ofSeconds(2))
+                .flatMap(l -> waitWriteDone().map(b -> l))
                 .doOnNext(b -> RebuildLog.log(pool, vnode, " start endMigrateVnode"))
                 .flatMap(l -> endMigrateVnode(vnode, objVnodes, srcDisk, dstDisk, poolType, hasMigrateData.get()))
                 .map(l -> {
@@ -969,8 +970,9 @@ public class DiskErrorHandler {
 
     /**
      * 初始化磁盘rocksdb实例和磁盘块设备实例
+     *
      * @param dstDisk 磁盘
-     * @param pool 存储池
+     * @param pool    存储池
      */
     public static void initRocksDbAndBlockDevice(String dstDisk, StoragePool pool) {
         MSRocksDB.getRocksDB(dstDisk);
@@ -980,9 +982,13 @@ public class DiskErrorHandler {
             MSRocksDB.getRocksDB(getSTSTokenLun(dstDisk));
             MSRocksDB.getRocksDB(getRabbitmqRecordLun(dstDisk));
             MSRocksDB.getRocksDB(getAggregateLun(dstDisk));
+        } else {
+            // 数据盘、缓存盘 需要进行磁盘加载
+            BlockDevice.get(dstDisk);
         }
-        BlockDevice.get(dstDisk);
-        pool.addLun(ServerConfig.getInstance().getHostUuid(), dstDisk);
+        if (pool != null) {
+            pool.addLun(ServerConfig.getInstance().getHostUuid(), dstDisk);
+        }
     }
 
 

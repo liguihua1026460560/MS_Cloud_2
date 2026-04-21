@@ -37,6 +37,7 @@ import static com.macrosan.filesystem.nfs.lock.NFS4Lock.ERROR_LOCK;
 import static com.macrosan.filesystem.nfs.lock.NFS4Lock.GET_LOCK;
 import static com.macrosan.filesystem.nfs.reply.v4.OpenV4Reply.*;
 import static com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock.*;
+import static com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock.OPEN_CHECK_VERIFIER_TYPE;
 import static com.macrosan.filesystem.nfs.types.StateId.*;
 import static com.macrosan.filesystem.nfs.types.StateOwner.ANONYMOUS_STATE_OWNER;
 import static com.macrosan.filesystem.utils.CheckUtils.nfs4DelegateOpenCheck;
@@ -140,11 +141,11 @@ public class StateIdOps {
 
 
 
-    public Mono<NFS4State> addOpen(NFS4Client client, StateOwner owner, CompoundContext context, int shareAccess, int shareDeny, int stateIdType, CompoundReply reply) {
+    public Mono<NFS4State> addOpen(NFS4Client client, StateOwner owner, CompoundContext context, int shareAccess, int shareDeny, int stateIdType, CompoundReply reply, OpenV4Call call) {
         Inode inode = context.getCurrentInode();
         ShareAccessLock shareAccessLock = new ShareAccessLock(inode.getBucket(), inode.getObjName(), inode.getNodeId(), null,
                 shareAccess, shareDeny, ServerConfig.getInstance().getHostUuid(), context.clientId, context.sessionId, owner.owner.owner,
-                ADD_SHARE_TYPE, stateIdType, VersionUtil.getVersionNum(), false);
+                ADD_SHARE_TYPE, stateIdType, VersionUtil.getVersionNum(), false, call.verifier);
         Tuple2<NFS4State, Boolean> tuple2 = prepareState(client, owner, inode, stateIdType, shareAccessLock, context);
         NFS4State openState = tuple2.var1;
         client.addLocalIp();
@@ -158,7 +159,7 @@ public class StateIdOps {
                         rollbackState(inode, openState, client, tuple2.var2);
                         reply.status = NFS4ERR_SHARE_DENIED;
                     } else if (lock.type == EXIST_SHARE_TYPE) {
-                        NFS4State state = client.shareUpdate(openState, lock, client, false);
+                        NFS4State state = client.shareUpdate(openState, shareAccessLock, client, false);
                         if (state == null) {
                             reply.status = NFS4ERR_BAD_STATEID;
                         }else {
@@ -166,7 +167,7 @@ public class StateIdOps {
                         }
                         return Mono.just(state != null ? state : openState);
                     } else {
-                        NFS4State state = client.shareUpdate(openState, lock, client, false);
+                        NFS4State state = client.shareUpdate(openState, shareAccessLock, client, false);
                         if (state == null) {
                             reply.status = NFS4ERR_BAD_STATEID;
                         }else {
@@ -182,7 +183,7 @@ public class StateIdOps {
     public Mono<StateId> downgradeOpen(NFS4Client client, NFS4State openState, int shareAccess, int shareDeny, CompoundContext context, CompoundReply reply) {
         ShareAccessLock shareAccessLock = new ShareAccessLock(openState.getBucket(), openState.getObjName(), openState.getNodeId(), openState.stateId(),
                 shareAccess, shareDeny, ServerConfig.getInstance().getHostUuid(), context.clientId, context.sessionId,
-                openState.getOwner().owner.owner, EXIST_SHARE_TYPE, openState.getType(), VersionUtil.getVersionNum(), false);
+                openState.getOwner().owner.owner, EXIST_SHARE_TYPE, openState.getType(), VersionUtil.getVersionNum(), false, 0);
 
         return ShareAccessClient.lock(openState.getBucket(), String.valueOf(openState.getNodeId()), shareAccessLock)
                 .flatMap(lock -> {
@@ -194,7 +195,7 @@ public class StateIdOps {
                         client.rollbackSeq(openState);
                         reply.status = NFS3ERR_INVAL;
                     } else {
-                        NFS4State state = client.shareUpdate(openState, lock, client, true);
+                        NFS4State state = client.shareUpdate(openState, shareAccessLock, client, true);
                         if (state == null) {
                             reply.status = NFS4ERR_BAD_STATEID;
                         } else {
@@ -218,6 +219,22 @@ public class StateIdOps {
         return ShareAccessClient.lock(inode.getBucket(), String.valueOf(inode.getNodeId()), shareAccessLock)
                 .flatMap(lock -> {
                     if (CONFLICT_SHARE.equals(lock)) {
+                        return Mono.just(false);
+                    }
+                    return Mono.just(true);
+                });
+    }
+
+    public Mono<Boolean> checkVerifier(Inode inode, long verifier){
+        ShareAccessLock shareAccessLock = new ShareAccessLock()
+                .setBucket(inode.getBucket())
+                .setNodeId(inode.getNodeId())
+                .setObjName(inode.getObjName())
+                .setVerifier(verifier)
+                .setType(OPEN_CHECK_VERIFIER_TYPE);
+        return ShareAccessClient.lock(inode.getBucket(), String.valueOf(inode.getNodeId()), shareAccessLock)
+                .flatMap(lock -> {
+                    if (NOT_FOUND_SHARE.equals(lock)) {
                         return Mono.just(false);
                     }
                     return Mono.just(true);
@@ -294,7 +311,7 @@ public class StateIdOps {
             if (check) {
                 ShareAccessLock shareAccessLock = new ShareAccessLock(inode.getBucket(), inode.getObjName(), inode.getNodeId(), openStateId,
                         shareAccess, shareDeny, ServerConfig.getInstance().getHostUuid(), context.clientId,
-                        context.sessionId, stateOwner.owner.owner, OPEN_SHARE_CONFLICT_TYPE, stateIdType, VersionUtil.getVersionNum(), false);
+                        context.sessionId, stateOwner.owner.owner, OPEN_SHARE_CONFLICT_TYPE, stateIdType, VersionUtil.getVersionNum(), false, 0);
                 return ShareAccessClient.lock(inode.getBucket(), String.valueOf(inode.getNodeId()), shareAccessLock)
                         .flatMap(lock -> {
                             if (ERROR_SHARE.equals(lock)) {

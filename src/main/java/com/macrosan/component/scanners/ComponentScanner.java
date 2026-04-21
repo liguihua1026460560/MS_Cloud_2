@@ -7,6 +7,7 @@ import com.macrosan.component.ComponentUtils;
 import com.macrosan.component.TaskSender;
 import com.macrosan.component.enums.ErrorEnum;
 import com.macrosan.component.pojo.ComponentRecord;
+import com.macrosan.component.pojo.ComponentStrategy;
 import com.macrosan.component.pojo.ComponentTask;
 import com.macrosan.component.utils.ErrorRecordUtil;
 import com.macrosan.database.redis.RedisConnPool;
@@ -39,10 +40,7 @@ import java.io.File;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -50,6 +48,7 @@ import java.util.stream.Collectors;
 
 import static com.macrosan.component.ComponentStarter.*;
 import static com.macrosan.component.ComponentUtils.checkIfRecordExpire;
+import static com.macrosan.component.pojo.ComponentRecord.Type.IMAGE;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.Utils.getLifeCycleStamp;
@@ -77,7 +76,7 @@ public class ComponentScanner {
     /**
      * 处理定时任务扫描到的metaData，生成componentRecord
      */
-    private static UnicastProcessor<Tuple2<ComponentTask, MetaData>>[] objProcessors = new UnicastProcessor[16];
+    public static UnicastProcessor<Tuple2<ComponentRecord, MetaData>>[] objProcessors = new UnicastProcessor[16];
     private static final int RECORD_NUM = 10000;
 
 
@@ -86,36 +85,23 @@ public class ComponentScanner {
      */
     public void init() {
         for (int i = 0; i < objProcessors.length; i++) {
-            objProcessors[i] = UnicastProcessor.create(Queues.<Tuple2<ComponentTask, MetaData>>unboundedMultiproducer().get());
+            objProcessors[i] = UnicastProcessor.create(Queues.<Tuple2<ComponentRecord, MetaData>>unboundedMultiproducer().get());
             objProcessors[i].publishOn(COMP_SCHEDULER)
                     .filter(tuple2 -> {
-                        if (ComponentRecord.Type.VIDEO.equals(tuple2.var1.strategyType)) {
+                        if (ComponentRecord.Type.VIDEO.equals(tuple2.var1.getStrategy().getType())) {
                             return true;
                         }
                         MetaData metaData = tuple2.var2;
                         long dataSize = metaData.endIndex - metaData.startIndex + 1;
                         if (dataSize > MAX_IMAGE_SIZE) {
                             log.debug("image too large,image size:{}", dataSize);
-                            ErrorRecordUtil.putErrorRecord(ErrorEnum.IMAGE_SIZE_ERROR, metaData, tuple2.var1).subscribe();
+                            ErrorRecordUtil.putErrorRecord(ErrorEnum.IMAGE_SIZE_ERROR, tuple2.var1).subscribe();
                             return false;
                         }
                         return true;
                     })
-                    .subscribe(tuple2 -> {
-                        // 符合条件的对象都根据task中的strategy生成一个record
-                        ComponentTask componentTask = tuple2.var1;
-                        MetaData metaData = tuple2.var2;
-
-                        // 由元数据获取对象相关ak sk。
-                        Map<String, String> sysMap = Json.decodeValue(metaData.getSysMetaData(), new TypeReference<Map<String, String>>() {
-                        });
-                        String userId = sysMap.get("owner");
-
-                        Map<String, String> map = new HashMap<>();
-                        long dataSize = metaData.endIndex - metaData.startIndex + 1;
-                        map.put(CONTENT_LENGTH, String.valueOf(dataSize));
-                        map.put("userId", userId);
-                        ComponentRecord record = ComponentUtils.createComponentRecord(metaData.bucket, metaData.key, metaData, componentTask, map);
+                    .map(t2 -> t2.var1)
+                    .subscribe(record -> {
                         ComponentUtils.putComponentRecord(record, null)
                                 .subscribe(b -> {
                                     if (!b) {
@@ -135,7 +121,7 @@ public class ComponentScanner {
     /**
      * 是否继续扫描
      */
-    private static final AtomicBoolean KEEP_SCANING = new AtomicBoolean();
+    public static final AtomicBoolean KEEP_SCANING = new AtomicBoolean();
 
     /**
      * 保存各桶是否在进行某个组件的扫描。
@@ -262,7 +248,7 @@ public class ComponentScanner {
                             return;
                         }
 
-                        if (ComponentUtils.isSetFullForRecordType(type,taskMarker)) {
+                        if (ComponentUtils.isSetFullForRecordType(type, taskMarker)) {
                             log.debug("delay record scan");
                             Mono.delay(Duration.ofSeconds(1)).publishOn(COMP_SCHEDULER).subscribe(s -> listController.onNext(tuple2.getT1()));
                             return;
@@ -461,7 +447,11 @@ public class ComponentScanner {
                                     for (int i = 0; i < Math.min(maxKey, metaDataList.size()); i++) {
                                         MetaData lifeMeta = metaDataList.get(i).var2;
                                         if (lifeMeta.equals(MetaData.ERROR_META) || lifeMeta.equals(MetaData.NOT_FOUND_META)
-                                                || lifeMeta.deleteMark || lifeMeta.deleteMarker || !lifeMeta.latest) {
+                                                || lifeMeta.deleteMark || lifeMeta.deleteMarker) {
+                                            continue;
+                                        }
+                                        // 图像处理只扫描最新版本；其他类型操作则可以处理历史版本
+                                        if (componentTask.getStrategyType() == IMAGE && !lifeMeta.latest) {
                                             continue;
                                         }
 
@@ -478,8 +468,7 @@ public class ComponentScanner {
                                                 || ComponentUtils.hasCompressed(lifeMeta, componentTask.getStrategy().getType())) {
                                             continue;
                                         }
-                                        int index = ThreadLocalRandom.current().nextInt(objProcessors.length);
-                                        objProcessors[index].onNext(new Tuple2<>(componentTask, lifeMeta));
+                                        distributeMetaData(componentTask.getMarker(), componentTask.getStrategy(), lifeMeta);
                                     }
 
                                     if (metaDataList.size() > 0) {
@@ -738,4 +727,24 @@ public class ComponentScanner {
         }
     }
 
+
+    /**
+     * 分发扫描到的处理记录
+     * @param taskMarker 任务标记
+     * @param strategy 策略
+     * @param lifeMeta 元数据
+     */
+    public static void distributeMetaData(String taskMarker, ComponentStrategy strategy, MetaData lifeMeta) {
+        Map<String, String> sysMap = Json.decodeValue(lifeMeta.getSysMetaData(), new TypeReference<Map<String, String>>() {
+        });
+        String userId = sysMap.get("owner");
+
+        Map<String, String> map = new HashMap<>();
+        long dataSize = lifeMeta.endIndex - lifeMeta.startIndex + 1;
+        map.put(CONTENT_LENGTH, String.valueOf(dataSize));
+        map.put("userId", userId);
+        ComponentRecord componentRecord = ComponentUtils.createComponentRecord(lifeMeta, strategy, taskMarker, map);
+        int index = ThreadLocalRandom.current().nextInt(objProcessors.length);
+        objProcessors[index].onNext(new Tuple2<>(componentRecord, lifeMeta));
+    }
 }

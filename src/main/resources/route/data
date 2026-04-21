@@ -2,6 +2,7 @@ StreamService-getObject                                = GET/bucket/object/
 StreamService-getObjectVersion                         = GET/bucket/object/?versionId
 StreamService-putObject                                = PUT/bucket/object/
 StreamService-appendObject                             = POST/bucket/object/?append&position
+PostObjectService-postObject                           = POST/bucket/
 PartService-uploadPart                                 = PUT/bucket/object/?partNumber&uploadId
 StreamService-deleteObject                             = DELETE/bucket/object/
 StreamService-deleteObjectVersion                      = DELETE/bucket/object/?versionId

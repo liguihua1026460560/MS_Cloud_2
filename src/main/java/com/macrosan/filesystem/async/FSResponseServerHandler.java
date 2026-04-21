@@ -7,6 +7,8 @@ import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.RequestChannalHandler;
 import com.macrosan.filesystem.FsUtils;
 import com.macrosan.filesystem.cache.Node;
+import com.macrosan.filesystem.nfs.NFSBucketInfo;
+import com.macrosan.httpserver.DateChecker;
 import com.macrosan.message.jsonmsg.Inode;
 import com.macrosan.message.socketmsg.SocketDataMsg;
 import com.macrosan.message.socketmsg.SocketReqMsg;
@@ -18,10 +20,12 @@ import com.macrosan.storage.coder.Encoder;
 import com.macrosan.utils.functional.Tuple3;
 import com.macrosan.utils.msutils.md5.Digest;
 import com.macrosan.utils.msutils.md5.Md5Digest;
+import com.macrosan.utils.quota.StatisticsRecorder;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.rsocket.Payload;
 import io.rsocket.util.DefaultPayload;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.binary.Hex;
@@ -34,11 +38,14 @@ import reactor.core.publisher.UnicastProcessor;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.macrosan.ec.server.ErasureServer.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.ERROR;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SUCCESS;
 import static com.macrosan.storage.StorageOperate.PoolType.DATA;
+import static com.macrosan.utils.quota.StatisticsRecorder.addFileStatisticRecord;
+import static com.macrosan.utils.quota.StatisticsRecorder.getRequestType;
 
 @Log4j2
 public class FSResponseServerHandler implements RequestChannalHandler {
@@ -118,9 +125,18 @@ public class FSResponseServerHandler implements RequestChannalHandler {
     }
 
     private void complete() {
+        final AtomicLong startTime = new AtomicLong();
+        startTime.set(DateChecker.getCurrentTime());
+
         long nodeId = Long.parseLong(dataMap.get("nodeId"));
         String bucket = dataMap.get("bucket");
         Inode.InodeData inodeData = Json.decodeValue(dataMap.get("inodeData"), Inode.InodeData.class);
+
+        String statisticBucket = NFSBucketInfo.getBucketInfo(bucket).get("bucket_name");
+        String statisticAccountId = NFSBucketInfo.getBucketInfo(bucket).get("user_id");
+        HttpMethod statisticHttpMethod = HttpMethod.PUT;
+        long statisticSize = inodeData.getSize();
+        StatisticsRecorder.RequestType requestType = getRequestType(statisticHttpMethod);
 
         StorageOperate dataOperate = new StorageOperate(DATA, dataMap.get("obj"), data.length);
         StoragePool dataPool = StoragePoolFactory.getStoragePool(dataOperate, bucket);
@@ -162,15 +178,27 @@ public class FSResponseServerHandler implements RequestChannalHandler {
                         Node.getInstance().exec(nodeId, socketReqMsg, 0, res);
 
                         res.subscribe(i -> {
+                            long executionTime = DateChecker.getCurrentTime() - startTime.get();
                             if (i.getLinkN() >= 0) {
+                                boolean statisticSuccess = true;
+                                addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
                                 responseFlux.onNext(SUCCESS_PAYLOAD);
                                 responseFlux.onComplete();
                             } else {
+                                boolean statisticSuccess = false;
+                                addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
+                                log.error("updateInode err while put, {}, {}, {}", nodeId, fileName, Json.encode(i));
                                 responseFlux.onNext(ERROR_PAYLOAD);
                                 responseFlux.onComplete();
                             }
                         });
                     } else {
+                        long executionTime = DateChecker.getCurrentTime() - startTime.get();
+                        boolean statisticSuccess = false;
+                        addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
                         log.info("put file err, {}", Json.encode(dataMap));
                         responseFlux.onNext(ERROR_PAYLOAD);
                         responseFlux.onComplete();
@@ -184,6 +212,9 @@ public class FSResponseServerHandler implements RequestChannalHandler {
 
     public static Mono<Payload> fileAsyncReqRes(Payload payload) {
         try {
+            final AtomicLong startTime = new AtomicLong();
+            startTime.set(DateChecker.getCurrentTime());
+
             boolean local = payload instanceof LocalPayload;
 
             SocketReqMsg msg = local ? ((LocalPayload<SocketReqMsg>) payload).data : SocketReqMsg.toSocketReqMsg(payload.data());
@@ -194,6 +225,12 @@ public class FSResponseServerHandler implements RequestChannalHandler {
                 SocketDataMsg dataMsg = (SocketDataMsg) msg;
                 String bucket = msg.get("bucket");
                 Inode.InodeData inodeData = Json.decodeValue(msg.get("inodeData"), Inode.InodeData.class);
+
+                String statisticBucket = NFSBucketInfo.getBucketInfo(bucket).get("bucket_name");
+                String statisticAccountId = NFSBucketInfo.getBucketInfo(bucket).get("user_id");
+                long statisticSize = inodeData.getSize();
+                HttpMethod statisticHttpMethod = HttpMethod.PUT;
+                StatisticsRecorder.RequestType requestType = getRequestType(statisticHttpMethod);
 
                 StorageOperate dataOperate = new StorageOperate(DATA, msg.get("obj"), dataMsg.data.length);
                 StoragePool dataPool = StoragePoolFactory.getStoragePool(dataOperate, bucket);
@@ -238,13 +275,24 @@ public class FSResponseServerHandler implements RequestChannalHandler {
                                 Node.getInstance().exec(nodeId, socketReqMsg, 0, res);
 
                                 return res.map(i -> {
+                                    long executionTime = DateChecker.getCurrentTime() - startTime.get();
                                     if (i.getLinkN() >= 0) {
+                                        boolean statisticSuccess = true;
+                                        addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
                                         return DefaultPayload.create(Json.encode(i), SUCCESS.name());
                                     } else {
+                                        boolean statisticSuccess = false;
+                                        addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
                                         return DefaultPayload.create(Json.encode(i), ERROR.name());
                                     }
                                 });
                             } else {
+                                long executionTime = DateChecker.getCurrentTime() - startTime.get();
+                                boolean statisticSuccess = false;
+                                addFileStatisticRecord(statisticAccountId, statisticBucket, statisticHttpMethod, -1, requestType, statisticSuccess, executionTime, statisticSize);
+
                                 log.info("put file err, {}", Json.encode(msg));
                                 return Mono.just(ERROR_PAYLOAD);
                             }

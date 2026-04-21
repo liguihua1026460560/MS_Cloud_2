@@ -8,6 +8,7 @@ import com.macrosan.action.core.BaseService;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.etcd.EtcdClient;
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.filesystem.utils.IpWhitelistUtils;
 import com.macrosan.httpserver.ServerConfig;
 import com.macrosan.message.jsonmsg.Credential;
 import com.macrosan.message.mqmessage.ResponseMsg;
@@ -164,6 +165,7 @@ public class RegionsService extends BaseService {
                 String bucket1 = jsonParam.getString("bucket");
                 String syncType = jsonParam.getString("syncType");
                 String compressType = jsonParam.getString("compressType");
+                String deleteEs = jsonParam.containsKey("deleteEs") ? jsonParam.getString("deleteEs") : "";
                 String sourceSign = jsonParam.getString("sourceSign");
                 String ak0 = jsonParam.getString("ak");
                 String sk0 = jsonParam.getString("sk");
@@ -237,49 +239,23 @@ public class RegionsService extends BaseService {
                         }
                     }
 
-                    if (jsonParam.containsKey("squash")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "squash", jsonParam.getString("squash"));
+                    if (jsonParam.containsKey("fsAddrSet")) {
+                        String fsAddrStr = jsonParam.getString("fsAddrSet");
+                        Set<String> fsAddrSet = JSON.parseObject(fsAddrStr, new TypeReference<Set<String>>() {
+                        });
+                        for (String ip : fsAddrSet) {
+                            if (jsonParam.containsKey("fsAddressPerf-" + ip)) {
+                                String perfStr = jsonParam.getString("fsAddressPerf-" + ip);
+                                Map<String, String> fsAddressPerf = JSON.parseObject(perfStr, new TypeReference<Map<String, String>>() {
+                                });
+                                pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hmset("fsAddressPerf-" + ip, fsAddressPerf);
+                                pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).sadd("fsAddrSet_", bucket1);
+                                cacheJson1.put("fsAddressPerf-", ip);
+                            }
+                        }
+                        cacheJson1.put("fsAddrSet", fsAddrStr);
                     }
-                    if (jsonParam.containsKey("anonuid")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anonuid", jsonParam.getString("anonuid"));
-                    } else {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anonuid");
-                    }
-                    if (jsonParam.containsKey("anongid")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "anongid", jsonParam.getString("anongid"));
-                    } else {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucket1, "anongid");
-                    }
-                    if (jsonParam.containsKey("mountPoint")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "mountPoint", jsonParam.getString("mountPoint"));
-                    }
-                    if (jsonParam.containsKey("nfsAcl")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "nfsAcl", jsonParam.getString("nfsAcl"));
-                    }
-                    if (jsonParam.containsKey("nfs")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "nfs", jsonParam.getString("nfs"));
-                    }
-                    if (jsonParam.containsKey("cifs")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "cifs", jsonParam.getString("cifs"));
-                    }
-                    if (jsonParam.containsKey("caseSensitive")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "caseSensitive", jsonParam.getString("caseSensitive"));
-                    }
-                    if (jsonParam.containsKey("guest")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "guest", jsonParam.getString("guest"));
-                    }
-                    if (jsonParam.containsKey("cifsAcl")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "cifsAcl", jsonParam.getString("cifsAcl"));
-                    }
-                    if (jsonParam.containsKey("ftp")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftp", jsonParam.getString("ftp"));
-                    }
-                    if (jsonParam.containsKey("ftpAcl")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftpAcl", jsonParam.getString("ftpAcl"));
-                    }
-                    if (jsonParam.containsKey("ftp_anonymous")) {
-                        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "ftp_anonymous", jsonParam.getString("ftp_anonymous"));
-                    }
+
                     if (jsonParam.containsKey("nfsIpWhitelist")) {
                         String nfsIpWhitelist = jsonParam.getString("nfsIpWhitelist");
                         List<String> valueList = JSON.parseObject(nfsIpWhitelist, new TypeReference<List<String>>() {
@@ -287,15 +263,8 @@ public class RegionsService extends BaseService {
                         for (Object value : valueList) {
                             pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).lpush(bucket1 + "_nfsIpWhitelist", String.valueOf(value));
                         }
-                    }
-                    for (FSPerformanceService.Instance_Type value : FSPerformanceService.Instance_Type.values()) {
-                        String instance = value.name();
-                        if (jsonParam.containsKey(instance + "-" + THROUGHPUT_QUOTA)) {
-                            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, instance + "-" + THROUGHPUT_QUOTA, jsonParam.getString(instance + "-" + THROUGHPUT_QUOTA));
-                        }
-                        if (jsonParam.containsKey(instance + "-" + BAND_WIDTH_QUOTA)) {
-                            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, instance + "-" + BAND_WIDTH_QUOTA, jsonParam.getString(instance + "-" + BAND_WIDTH_QUOTA));
-                        }
+                        String res = IpWhitelistUtils.updateNFSIpWhitelistsCommand(bucket1);
+                        logger.info("update bucket NFSIpWhitelists cache sync server {}: {}", res, bucket1);
                     }
                     if (jsonParam.containsKey("nfsQuotaMap")) {
                         final String nfsQuotaStr = jsonParam.getString("nfsQuotaMap");
@@ -324,9 +293,13 @@ public class RegionsService extends BaseService {
                 if (StringUtils.isNotBlank(sourceSign)) {
                     pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, DELETE_SOURCE_SIGN, sourceSign);
                 }
+                if (StringUtils.isNotBlank(deleteEs)) {
+                    pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucket1, "deleteEs", deleteEs);
+                }
                 setBucketStatus(bucket1, ak0, sk0, syncMap, archiveMap);
                 String ctime = pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucket1, "ctime");
                 cacheJson1.put("compressType", compressType);
+                cacheJson1.put("deleteEs", deleteEs);
                 cacheJson1.put("sourceSign", sourceSign);
                 cacheJson1.put("sourceType", "");
                 cacheJson1.put("ctime", ctime);
@@ -477,11 +450,14 @@ public class RegionsService extends BaseService {
                     regionJson.put("code", "2");
                 } else {
                     // 获取当前站点的存储策略信息
-                    SocketReqMsg licenseSocket = new SocketReqMsg(MULTI_REGION_CHECK_LICENSE, 0);
+                    SocketReqMsg licenseSocket = new SocketReqMsg(MULTI_REGION_CHECK_LICENSE, 0)
+                            .put("vueHttpPort", jsonParam.getString("vueHttpPort"))
+                            .put("vueHttpsPort", jsonParam.getString("vueHttpsPort"));
                     StringResMsg checkLicenseRes = sender.sendAndGetResponse(licenseSocket, StringResMsg.class, true);
-                    logger.info("checkLicenseRes: {}", checkLicenseRes.getCode());
-                    if (checkLicenseRes.getCode() != ErrorNo.SUCCESS_STATUS) {
-                        regionJson.put("code", "-1");
+                    int code = checkLicenseRes.getCode();
+                    logger.info("checkLicenseRes: {}", code);
+                    if (code != ErrorNo.SUCCESS_STATUS) {
+                        regionJson.put("code", code);
                     } else {
                         List<String> strategyKeys = pool.getCommand(REDIS_POOL_INDEX).keys("strategy_*");
                         Map<String, Map<String, String>> strategyMap = new HashMap<>();

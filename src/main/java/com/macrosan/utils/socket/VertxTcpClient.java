@@ -16,6 +16,8 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.UnicastProcessor;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import static com.macrosan.constants.ErrorNo.GET_OBJECT_CANCELED;
 
 /**
@@ -49,8 +51,10 @@ public class VertxTcpClient {
      * @return 响应数据的 Flux
      */
     public Flux<Buffer> sendRequest(byte[] header, Flux<byte[]> dataflux, UnicastProcessor<Long> streamController, String host, int port) {
+        // 用于存储 socket，以便在取消时关闭
+        AtomicReference<NetSocket> socketRef = new AtomicReference<>();
 
-        return Flux.create(sink -> {
+        return Flux.<Buffer>create(sink -> {
             // 1. 异步建立连接
             client.connect(port, host, res -> {
                 if (res.failed()) {
@@ -60,6 +64,7 @@ public class VertxTcpClient {
                     return;
                 }
                 NetSocket socket = res.result();
+                socketRef.set(socket);
                 // 2. 读控制
                 socket.pause();
                 // 3. 处理接收响应 (Read)
@@ -70,10 +75,16 @@ public class VertxTcpClient {
                 // 4. 下游背压信号
                 sink.onRequest(socket::fetch);
 
-                sink.onCancel(socket::close);
+                sink.onCancel(socket::end);
                 // 5. 处理发送请求 (Write)
                 writeDataFlux(header, dataflux, streamController, sink, socket);
             });
+        }).doOnCancel(() -> {
+            // 在 Flux 链上注册取消回调，确保取消时关闭 socket
+            NetSocket socket = socketRef.get();
+            if (socket != null) {
+                socket.end();
+            }
         });
     }
 

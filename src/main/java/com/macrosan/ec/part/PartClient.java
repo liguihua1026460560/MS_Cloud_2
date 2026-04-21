@@ -261,7 +261,14 @@ public class PartClient {
 
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", fileName)
-                .put("compression", storagePool.getCompression());
+                .put("compression", storagePool.getCompression())
+                .put("bucket", partInfo.bucket)
+                .put("object", partInfo.object)
+                .put("versionId", partInfo.versionId)
+                .put("uploadId", partInfo.uploadId)
+                .put("partNum", partInfo.partNum)
+                .put("storage", storagePool.getVnodePrefix())
+                .put("endIndex", String.valueOf(partInfo.partSize - 1));
 
         if (replace) {
             msg.put("replace", "1");
@@ -339,7 +346,14 @@ public class PartClient {
 
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", targetFileName)
-                .put("compression", targetPool.getCompression());
+                .put("compression", targetPool.getCompression())
+                .put("bucket", partInfo.bucket)
+                .put("object", partInfo.object)
+                .put("versionId", partInfo.versionId)
+                .put("uploadId", partInfo.uploadId)
+                .put("partNum", partInfo.partNum)
+                .put("storage", targetPool.getVnodePrefix())
+                .put("endIndex", String.valueOf(partInfo.partSize - 1));
 
         CryptoUtils.generateKeyPutToMsg(crypto, msg);
 

@@ -6,6 +6,8 @@ import com.macrosan.fs.Allocator.Result;
 import com.macrosan.fs.BlockDevice;
 import com.macrosan.message.jsonmsg.BlockInfo;
 import com.macrosan.utils.msutils.MsException;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.rocksdb.RocksDB;
@@ -51,9 +53,9 @@ public class BatchWriter {
 
     }
 
-    public Result[] hookData(byte[] data) {
+    public Result[] hookData(ByteBuf buf) {
         //以BLOCK_SIZE为单位分配
-        int lastSize = BlockDevice.fitBlock(data.length);
+        int lastSize = BlockDevice.fitBlock(buf.readableBytes());
 
         if (preAllocatedSize < lastSize) {
             preAlloc();
@@ -85,14 +87,14 @@ public class BatchWriter {
         }
 
         Result[] results = resultList.toArray(new Result[0]);
-        Hook hook = new Hook(data, results);
+        Hook hook = new Hook(buf, results);
         hookList.add(hook);
         return results;
     }
 
     @RequiredArgsConstructor
     static class Hook {
-        final byte[] bytes;
+        final ByteBuf buf;
         final Result[] results;
     }
 
@@ -138,9 +140,9 @@ public class BatchWriter {
 
         int i = 0, j = 0;
         int n = 0;
-        byte[][] flushBytes = new byte[flushResults.size()][];
+        ByteBuf[] flushBytes = new ByteBuf[flushResults.size()];
         for (Result result : flushResults) {
-            byte[] bytes = null;
+            ByteBuf bytes = null;
             int bytesIndex = 0;
             boolean curFull = false;
 
@@ -149,23 +151,44 @@ public class BatchWriter {
                 for (; j < opt.results.length; j++) {
                     Result cur = opt.results[j];
                     if (opt.results.length == 1 && cur.size == result.size) {
-                        bytes = opt.bytes;
+                        if (opt.buf.isDirect()) {
+                            if (opt.buf.nioBufferCount() == 1) {
+                                bytes = opt.buf;
+                                bytes.retain();
+                            } else {
+                                int size = opt.buf.readableBytes() + 8192;
+                                bytes = PooledByteBufAllocator.DEFAULT.directBuffer(size, size);
+                                if (bytes.memoryAddress() % 4096 != 0) {
+                                    int skip = Math.toIntExact((bytes.memoryAddress() + 4095) & ~4095 - bytes.memoryAddress());
+                                    bytes.writerIndex(skip);
+                                    bytes.readerIndex(skip);
+                                }
+
+                                bytes.writeBytes(opt.buf);
+                            }
+                        } else {
+                            bytes = opt.buf;
+                        }
                         curFull = true;
                         break;
                     } else {
                         if (bytes == null) {
-                            bytes = new byte[(int) result.size];
+                            //4096对齐，direct写入避免copy。
+                            int size = (int) result.size + 8192;
+                            bytes = PooledByteBufAllocator.DEFAULT.directBuffer(size, size);
+                            if (bytes.memoryAddress() % 4096 != 0) {
+                                int skip = Math.toIntExact((bytes.memoryAddress() + 4095) & ~4095 - bytes.memoryAddress());
+                                bytes.writerIndex(skip);
+                                bytes.readerIndex(skip);
+                            }
                         }
 
-                        int jOffset = 0;
-                        for (int k = 0; k < j; k++) {
-                            jOffset += opt.results[k].size;
-                        }
-                        int copy = (int) Math.min(Math.min(opt.bytes.length, opt.bytes.length - jOffset), cur.size);
-                        System.arraycopy(opt.bytes, jOffset, bytes, bytesIndex, copy);
+                        int copy = (int) Math.min(opt.buf.readableBytes(), cur.size);
+                        bytes.writeBytes(opt.buf, copy);
+
                         bytesIndex += cur.size;
 
-                        if (bytes.length == bytesIndex) {
+                        if (result.size == bytesIndex) {
                             curFull = true;
                             break;
                         }
@@ -196,7 +219,7 @@ public class BatchWriter {
         n = 0;
         Mono[] monos = new Mono[flushBytes.length];
         for (Result result : flushResults) {
-            byte[] data = flushBytes[n];
+            ByteBuf data = flushBytes[n];
             monos[n++] = BlockDevice.get(lun).getChannel().write(data, result);
         }
 
@@ -206,6 +229,10 @@ public class BatchWriter {
             writeRes.onError((Throwable) e);
         }, () -> {
             try {
+                for (ByteBuf data : flushBytes) {
+                    data.release();
+                }
+
                 for (Result result : flushResults) {
                     List<byte[]> list = BlockInfo.getUpdateValue(result.offset, result.size, "upload");
                     for (int k = 0; k < list.size(); k++) {

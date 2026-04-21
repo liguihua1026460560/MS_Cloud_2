@@ -12,7 +12,12 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Log4j2
 public class ShareAccessClient {
+    public static boolean shareAccessSwitch = true;
+
     public static Mono<Boolean> lock(String bucket, String key, ShareAccessLock value, SMB2Header header) {
+        if (!shareAccessSwitch) {
+            return Mono.just(true);
+        }
         return LockClient.lock(bucket, key, value)
                 .flatMap(b -> {
                     if (b) {
@@ -25,6 +30,9 @@ public class ShareAccessClient {
     }
 
     public static Mono<Boolean> unlock(SMB2FileId smb2FileId, SMB2Header header) {
+        if (!shareAccessSwitch) {
+            return Mono.just(true);
+        }
         MonoProcessor<Boolean> res = MonoProcessor.create();
         ShareAccessServer.sessionTreeMap.compute(header.getSessionId(), (sessionId, map) -> {
             if (map == null) {
@@ -51,6 +59,9 @@ public class ShareAccessClient {
     }
 
     public static Mono<Boolean> reconnectLock(String bucket, String key, ShareAccessLock value, ShareAccessLock reconnect, SMB2Header header) {
+        if (!shareAccessSwitch) {
+            return Mono.just(true);
+        }
         ShareAccessServer.sessionTreeMap.computeIfPresent(header.getSessionId(), (sessionId, map) -> {
             map.computeIfPresent(header.getTid(), (treeId, map0) -> {
                 map0.remove(reconnect.smb2FileId);
@@ -73,6 +84,9 @@ public class ShareAccessClient {
     }
 
     public static void treeDisconnect(long sid, int tid) {
+        if (!shareAccessSwitch) {
+            return;
+        }
         ShareAccessServer.sessionTreeMap.computeIfPresent(sid, (sessionId, map) -> {
             map.computeIfPresent(tid, (treeId, map0) -> {
                 Flux.fromIterable(map0.values())
@@ -85,6 +99,9 @@ public class ShareAccessClient {
     }
 
     public static void logOff(long sid) {
+        if (!shareAccessSwitch) {
+            return;
+        }
         ShareAccessServer.sessionTreeMap.computeIfPresent(sid, (sessionId, map) -> {
             Flux.fromIterable(map.values())
                     .flatMap(map0 -> Flux.fromIterable(map0.values())

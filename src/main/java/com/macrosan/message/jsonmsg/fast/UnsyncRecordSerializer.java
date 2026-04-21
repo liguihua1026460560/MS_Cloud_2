@@ -45,7 +45,7 @@ public class UnsyncRecordSerializer extends JsonSerializer<UnSynchronizedRecord>
         String uri = value.uri;
         if (uri != null) {
             gen.writeFieldName("6");
-            MsStringJson.serialize0(uri, gen, serializers);
+            MsStringJson.serializeKey(uri, gen, serializers);
         }
         HttpMethod method = value.method;
         if (method != null) {
@@ -61,7 +61,7 @@ public class UnsyncRecordSerializer extends JsonSerializer<UnSynchronizedRecord>
         String object = value.object;
         if (object != null) {
             gen.writeFieldName("9");
-            MsStringJson.serialize0(object, gen, serializers);
+            MsStringJson.serializeKey(object, gen, serializers);
         }
         String versionId = value.versionId;
         if (versionId != null) {
@@ -86,7 +86,7 @@ public class UnsyncRecordSerializer extends JsonSerializer<UnSynchronizedRecord>
         String recordKey = value.recordKey;
         if (recordKey != null) {
             gen.writeFieldName("e");
-            MsStringJson.serialize0(recordKey, gen, serializers);
+            MsStringJson.serializeKey(recordKey, gen, serializers);
         }
         String lastStamp = value.lastStamp;
         if (lastStamp != null) {

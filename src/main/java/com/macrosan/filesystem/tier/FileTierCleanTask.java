@@ -16,12 +16,14 @@ import reactor.core.publisher.MonoProcessor;
 
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.macrosan.constants.ErrorNo.NO_SUCH_BUCKET;
 import static com.macrosan.constants.SysConstants.ROCKS_CACHE_BACK_STORE_KEY;
 import static com.macrosan.constants.SysConstants.ROCKS_OBJ_META_DELETE_MARKER;
+import static com.macrosan.filesystem.tier.FileTierMove.ONCE;
 import static com.macrosan.filesystem.utils.FsTierUtils.FS_TIER_DEBUG;
 
 /**
@@ -39,6 +41,12 @@ public class FileTierCleanTask {
     Queue<Tuple2<String, String>> queue = new ConcurrentLinkedQueue<>();
     AtomicLong queueSize = new AtomicLong();
 
+    private final AtomicLong total = new AtomicLong();
+
+    public long getTotal() {
+        return total.get();
+    }
+
     FileTierCleanTask(MSRocksDB mqDB) {
         this.mqDB = mqDB;
         this.iterator = mqDB.newIterator();
@@ -49,6 +57,7 @@ public class FileTierCleanTask {
     private void getSomeTask() {
         synchronized (iterator) {
             while (!scanEnd.get() && iterator.isValid()) {
+
                 String key = new String(iterator.key());
                 if (!key.startsWith(ROCKS_CACHE_BACK_STORE_KEY)) {
                     scanEnd.set(true);
@@ -57,7 +66,12 @@ public class FileTierCleanTask {
                 iterator.next();
                 if (value.startsWith(ROCKS_OBJ_META_DELETE_MARKER)) {
                     queue.offer(new Tuple2<>(key, value));
+                    total.incrementAndGet();
                     if (queueSize.incrementAndGet() > 2000) {
+                        return;
+                    }
+                    if (total.get() >= ONCE) {
+                        scanEnd.set(true);
                         return;
                     }
                 }

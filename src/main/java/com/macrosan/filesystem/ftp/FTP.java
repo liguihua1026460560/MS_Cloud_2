@@ -26,9 +26,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.constants.SysConstants.REDIS_SYSINFO_INDEX;
-import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MAX_PORT;
-import static com.macrosan.filesystem.ftp.FTPPort.FTP_DATA_MIN_PORT;
+import static com.macrosan.filesystem.ftp.FTPPort.*;
 
 @Log4j2
 public class FTP {
@@ -63,9 +61,13 @@ public class FTP {
         log.info("start ftp data service in {}->{}", FTP_DATA_MIN_PORT, FTP_DATA_MAX_PORT);
     }
 
-    public static void restart() {
+    public static void restart(boolean reloadRange) {
         vertx.close(ar -> {
             if (ar.succeeded()) {
+                if (reloadRange) {
+                    FTPPort.reloadPort();
+                }
+
                 vertx = Vertx.vertx(new VertxOptions()
                         .setEventLoopPoolSize(Runtime.getRuntime().availableProcessors())
                         .setPreferNativeTransport(true));

@@ -35,7 +35,6 @@ import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.*;
 import reactor.util.concurrent.Queues;
-import reactor.util.function.Tuples;
 
 import java.util.Map;
 import java.util.Optional;
@@ -48,10 +47,8 @@ import static com.macrosan.action.datastream.ActiveService.PASSWORD;
 import static com.macrosan.action.datastream.ActiveService.SYNC_AUTH;
 import static com.macrosan.component.ComponentStarter.*;
 import static com.macrosan.component.ComponentUtils.addExpire;
-import static com.macrosan.component.enums.ErrorEnum.IMAGE_TOTAL_PIXEL_ERROR;
 import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.ec.ErasureClient.updateMetaDataAcl;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.SEND_DICOM_RECORD;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.rsocket.server.Rsocket.BACK_END_PORT;
@@ -278,62 +275,8 @@ public class TaskSender {
                 .handler(resp -> {
                     String[] dataStr = new String[]{""};
                     AtomicBoolean resFlag = new AtomicBoolean();
-                    resp.handler(buffer -> {
-                        dataStr[0] += new String(buffer.getBytes());
-                        // 判断是否属于完整的json数据
-                        if (dataStr[0].startsWith("/") && dataStr[0].endsWith("/")) {
-                            String dataJson = dataStr[0].substring(1, dataStr[0].length() - 1);
-                            MediaResult result = JSONObject.parseObject(dataJson, MediaResult.class);
-                            if ("continue".equals(result.getMsg()) && result.getData() != null) {
-                                JSONObject resultData = (JSONObject) result.getData();
-                                record.headerMap.put("timeStamp", resultData.getString("timeStamp"));
-                                record.headerMap.put("index", resultData.getString("index"));
-                                record.setVersionNum(VersionUtil.getVersionNum());
-                                bucketPool.mapToNodeInfo(bucketPool.getBucketVnodeId(record.bucket, record.object))
-                                        .flatMap(bucketVnodeList -> ErasureClient.getObjectMetaVersion(record.bucket, record.object,
-                                                record.versionId, bucketVnodeList, null))
-                                        .flatMap(metaData -> {
-                                            if (metaData.deleteMarker || metaData.deleteMark
-                                                    || !record.syncStamp.equals(metaData.syncStamp) || MetaData.NOT_FOUND_META.equals(metaData)) {
-                                                // 原对象已删除或被覆盖  暂停进行中的视频截帧
-                                                request.connection().close();
-                                                res.onNext(new Tuple2<>(false, null));// 此处返回false，不直接删除记录  原对象不存在再次扫描到记录时会进行删除
-                                                resFlag.set(true);
-                                                return Mono.just(false);
-                                            }
-                                            if (StringUtils.equals(COMPONENT_RECORD_INNER_MARKER, record.taskMarker)) {
-                                                return Mono.just(true);
-                                            }
-                                            return POOL.getReactive(REDIS_POOL_INDEX).hget(ComponentTask.REDIS_KEY + "_" + record.taskName, "marker")
-                                                    .defaultIfEmpty("")
-                                                    .flatMap(mark -> {
-                                                        if (!mark.equals(record.taskMarker)) {
-                                                            // 任务已删除  暂停进行中的视频截帧
-                                                            request.connection().close();
-                                                            res.onNext(new Tuple2<>(false, null));// 此处返回false，不直接删除记录，在ComponentScanner.scanDeleteTaskSet中处理
-                                                            resFlag.set(true);
-                                                            return Mono.just(false);
-                                                        }
-                                                        return Mono.just(true);
-                                                    });
-                                        })
-                                        .filter(b -> b)
-                                        .flatMap(b -> ComponentUtils.putComponentRecord(record, null))
-                                        .doOnNext(b -> addExpire(record))
-                                        .doFinally(s -> dataStr[0] = "")
-                                        .subscribe();
-                            } else if (result.getCode() == MAXIMUM_PIXEL_ERROR_CODE) {
-                                // 插件处理的图片总像素已达上限，暂不处理该图片
-                                res.onNext(new Tuple2<>(false, null));
-                                resFlag.set(true);
-                                log.debug("The total number of pixels in the processed image has reached the limit,ip:{}", ip);
-                            } else {
-                                res.onNext(new Tuple2<>(result.getCode() == SUCCESS, ErrorEnum.getErrorEnum(result.getCode())));
-                                resFlag.set(true);
-                                log.debug("ip:{}, statusCode:{}, msg:{},", ip, result.getCode(), result.getMsg());
-                            }
-                        }
-                    }).endHandler(h -> {
+                    resp.handler(buffer -> handleResponse(record, buffer, dataStr, bucketPool, request, res, resFlag, ip));
+                    resp.endHandler(h -> {
                         if (!resFlag.get()) {
                             res.onNext(new Tuple2<>(resp.statusCode() == SUCCESS, null));
                             log.debug("ip:{}, statusCode:{}, msg:{},", ip, resp.statusCode(), resp.statusMessage());
@@ -342,6 +285,69 @@ public class TaskSender {
                 })
                 .sendHead();
         return res;
+    }
+
+    private static void handleResponse(ComponentRecord record, Buffer buffer, String[] dataStr, StoragePool bucketPool, HttpClientRequest request, MonoProcessor<Tuple2<Boolean, ErrorEnum>> res, AtomicBoolean resFlag, String ip) {
+        dataStr[0] += new String(buffer.getBytes());
+        // 判断是否属于完整的json数据
+        if (dataStr[0].startsWith("/") && dataStr[0].endsWith("/")) {
+            String dataJson = dataStr[0].substring(1, dataStr[0].length() - 1);
+            MediaResult result = JSONObject.parseObject(dataJson, MediaResult.class);
+            if (result.isHeartbeat()) {
+                if (result.getData() == null) {
+                    // 只是心跳信息，不进行处理
+                    log.debug("receive heartbeat bucket:{} object:{} versionId:{}", record.getBucket(), record.getObject(), record.getVersionId());
+                    addExpire(record);
+                    return;
+                }
+                JSONObject resultData = (JSONObject) result.getData();
+                record.headerMap.put("timeStamp", resultData.getString("timeStamp"));
+                record.headerMap.put("index", resultData.getString("index"));
+                record.setVersionNum(VersionUtil.getVersionNum());
+                bucketPool.mapToNodeInfo(bucketPool.getBucketVnodeId(record.bucket, record.object))
+                        .flatMap(bucketVnodeList -> ErasureClient.getObjectMetaVersion(record.bucket, record.object,
+                                record.versionId, bucketVnodeList, null))
+                        .flatMap(metaData -> {
+                            if (metaData.deleteMarker || metaData.deleteMark
+                                    || !record.syncStamp.equals(metaData.syncStamp) || MetaData.NOT_FOUND_META.equals(metaData)) {
+                                // 原对象已删除或被覆盖  暂停进行中的视频截帧
+                                request.connection().close();
+                                res.onNext(new Tuple2<>(false, null));// 此处返回false，不直接删除记录  原对象不存在再次扫描到记录时会进行删除
+                                resFlag.set(true);
+                                return Mono.just(false);
+                            }
+                            if (StringUtils.equals(COMPONENT_RECORD_INNER_MARKER, record.taskMarker)) {
+                                return Mono.just(true);
+                            }
+                            return POOL.getReactive(REDIS_POOL_INDEX).hget(ComponentTask.REDIS_KEY + "_" + record.taskName, "marker")
+                                    .defaultIfEmpty("")
+                                    .flatMap(mark -> {
+                                        if (!mark.equals(record.taskMarker)) {
+                                            // 任务已删除  暂停进行中的视频截帧
+                                            request.connection().close();
+                                            res.onNext(new Tuple2<>(false, null));// 此处返回false，不直接删除记录，在ComponentScanner.scanDeleteTaskSet中处理
+                                            resFlag.set(true);
+                                            return Mono.just(false);
+                                        }
+                                        return Mono.just(true);
+                                    });
+                        })
+                        .filter(b -> b)
+                        .flatMap(b -> ComponentUtils.putComponentRecord(record, null))
+                        .doOnNext(b -> addExpire(record))
+                        .doFinally(s -> dataStr[0] = "")
+                        .subscribe();
+            } else if (result.getCode() == MAXIMUM_PIXEL_ERROR_CODE) {
+                // 插件处理的图片总像素已达上限，暂不处理该图片
+                res.onNext(new Tuple2<>(false, null));
+                resFlag.set(true);
+                log.debug("The total number of pixels in the processed image has reached the limit,ip:{}", ip);
+            } else {
+                res.onNext(new Tuple2<>(result.getCode() == SUCCESS, ErrorEnum.getErrorEnum(result.getCode())));
+                resFlag.set(true);
+                log.debug("ip:{}, statusCode:{}, msg:{},", ip, result.getCode(), result.getMsg());
+            }
+        }
     }
 
     /**

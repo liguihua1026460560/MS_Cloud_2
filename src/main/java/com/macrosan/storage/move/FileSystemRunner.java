@@ -256,7 +256,12 @@ public class FileSystemRunner {
                             .put("vnode", t.var3)
                             .put("compression", targetPool.getCompression())
                             .put("metaKey", metaKey)
-                            .put("fileOffset", String.valueOf(fileOffset));
+                            .put("fileOffset", String.valueOf(fileOffset))
+                            .put("bucket", inode.getBucket())
+                            .put("object", inode.getObjName())
+                            .put("versionId", inode.getVersionId())
+                            .put("storage", targetPool.getVnodePrefix())
+                            .put("fileSize", String.valueOf(fileSize));
 
                     return msg;
                 })
@@ -338,7 +343,7 @@ public class FileSystemRunner {
                 .setStorage(targetPool.getVnodePrefix())
                 .setSize(fileSize);
 
-        return Node.getInstance().updateInodeData(inode.getBucket(), inode.getNodeId(), fileOffset, tmp, "", "oldInodeData")
+        return Node.getInstance().updateInodeData2(inode.getBucket(), inode.getNodeId(), fileOffset, tmp, "", "oldInodeData")
                 .flatMap(resInode -> {
                     if (resInode.getLinkN() == Inode.UPDATE_PROCESS_INODE.getLinkN()) {
                         updateProcess.set(true);

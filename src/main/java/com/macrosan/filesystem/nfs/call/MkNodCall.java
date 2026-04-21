@@ -34,7 +34,8 @@ public class MkNodCall implements ReadStruct {
         type = buf.getInt(offset);
         offset += 4;
         offset += attr.readStruct(buf, offset);
-        if (type != FsConstants.FileType.NF_FIFO) {
+        if (type == FsConstants.FileType.NF_BLK
+                || type == FsConstants.FileType.NF_CHR) {
             specData1 = buf.getInt(offset);
             specData2 = buf.getInt(offset + 4);
             offset += 8;

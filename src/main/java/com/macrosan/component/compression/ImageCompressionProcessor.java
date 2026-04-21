@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.macrosan.component.ComponentUtils;
 import com.macrosan.component.pojo.ComponentRecord;
 import com.macrosan.constants.ErrorNo;
-import com.macrosan.ec.ECUtils;
 import com.macrosan.ec.ErasureClient;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.httpserver.ServerConfig;
@@ -28,6 +27,7 @@ import io.vertx.core.json.Json;
 import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -35,9 +35,8 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 
 import java.io.File;
-import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -67,6 +66,9 @@ public class ImageCompressionProcessor {
 
     public static final Payload RATE_LIMIT_ERROR_PAYLOAD = DefaultPayload.create("RATE_LIMIT_ERROR", ErasureServer.PayloadMetaType.ERROR.name());
 
+    private final ConcurrentSkipListMap<String, Tuple2<ComponentRecord, MonoProcessor<Payload>>> waitMap = new ConcurrentSkipListMap<>();
+
+    public static final int MAX_WAIT_QUEUE_SIZE = 50;
     /**
      * 系统元数据字段集合
      **/
@@ -93,15 +95,42 @@ public class ImageCompressionProcessor {
     }
 
     public Mono<Payload> compressImage(Payload payload) {
-        AtomicBoolean needRelease = new AtomicBoolean(true);
+        ComponentRecord record = Json.decodeValue(payload.getDataUtf8(), ComponentRecord.class);
         // 获取可用压缩服务
         CompressionServerManager.AcquiredServer availableServer = CompressionServerManager.getInstance().getAvailableServer();
-        try {
-            if (availableServer == null) {
-                return Mono.delay(Duration.ofMillis(ThreadLocalRandom.current().nextInt(100, 500)))
-                        .thenReturn(RATE_LIMIT_ERROR_PAYLOAD);
+        if (availableServer == null) {
+            // 超过最大并发，进入队列等待
+            if (waitMap.size() > MAX_WAIT_QUEUE_SIZE) {
+                if (ModuleDebug.mediaComponentDebug()) {
+                    log.info("Not available server and waitQueue is full bucket:{} object:{} versionId:{}", record.getBucket(), record.getObject(), record.getVersionId());
+                }
+                // 进入等待队列失败，则直接返回error
+                return Mono.just(RATE_LIMIT_ERROR_PAYLOAD);
+            } else {
+                synchronized (waitMap) {
+                    if (waitMap.size() > MAX_WAIT_QUEUE_SIZE) {
+                        if (ModuleDebug.mediaComponentDebug()) {
+                            log.info("Not available server and waitQueue is full bucket:{} object:{} versionId:{}", record.getBucket(), record.getObject(), record.getVersionId());
+                        }
+                        // 进入等待队列失败，则直接返回error
+                        return Mono.just(RATE_LIMIT_ERROR_PAYLOAD);
+                    } else {
+                        if (ModuleDebug.mediaComponentDebug()) {
+                            log.info("put in waitQueue queueSize:{} bucket:{} object:{} versionId:{}", waitMap.size(), record.getBucket(), record.getObject(), record.getVersionId());
+                        }
+                        MonoProcessor<Payload> res = MonoProcessor.create();
+                        waitMap.put(RandomStringUtils.randomAlphanumeric(8), new Tuple2<>(record, res));
+                        return res;
+                    }
+                }
             }
-            ComponentRecord record = Json.decodeValue(payload.getDataUtf8(), ComponentRecord.class);
+        }
+        return doCompressImage(record, availableServer);
+    }
+
+    private Mono<Payload> doCompressImage(ComponentRecord record, CompressionServerManager.AcquiredServer availableServer) {
+        AtomicBoolean needRelease = new AtomicBoolean(true);
+        try {
             if (ModuleDebug.mediaComponentDebug()) {
                 log.info("Start processing DICOM record: bucket={}, object={} version:{}", record.bucket, record.object, record.versionId);
             }
@@ -134,16 +163,42 @@ public class ImageCompressionProcessor {
                     .switchIfEmpty(Mono.just(SUCCESS_PAYLOAD))
                     .doFinally(s -> {
                         if (needRelease.compareAndSet(true, false)) {
-                            availableServer.release();
+                            notifyWaitRecord(availableServer);
                         }
                     });
         } catch (Exception e) {
             if (needRelease.compareAndSet(true, false) && availableServer != null) {
-                availableServer.release();
+                notifyWaitRecord(availableServer);
             }
             log.error("Process DICOM record error", e);
             return Mono.just(ERROR_PAYLOAD);
         }
+    }
+
+    /**
+     * 一个请求处理结束，如果等待队列有请求，则优先处理等待队列的请求
+     * @param availableServer 可用服务
+     */
+    private void notifyWaitRecord(CompressionServerManager.AcquiredServer availableServer) {
+
+        if (waitMap.isEmpty()) {
+            availableServer.release();
+            return;
+        }
+        Map.Entry<String, Tuple2<ComponentRecord, MonoProcessor<Payload>>> waiter = waitMap.pollFirstEntry();
+        if (waiter == null) {
+            availableServer.release();
+            return;
+        }
+
+        Tuple2<ComponentRecord, MonoProcessor<Payload>> tuple2 = waiter.getValue();
+        if (ModuleDebug.mediaComponentDebug()) {
+            log.info("notify waiter record bucket:{} object:{} versionId:{}", tuple2.var1.getBucket(), tuple2.var1.getObject(), tuple2.var1.getVersionId());
+        }
+        doCompressImage(tuple2.var1(), availableServer)
+                .doOnError(e -> tuple2.var2().onError(e))
+                .subscribe(payload -> tuple2.var2().onNext(payload));
+
     }
 
     public Flux<Buffer> decompressImage(String compressionType, long dataSize, Flux<byte[]> dataFlux, UnicastProcessor<Long> streamController, UnicastProcessor<Long> decompressStreamController, CompressionServerManager.ServerInfo server) {
@@ -169,6 +224,108 @@ public class ImageCompressionProcessor {
                 .doFinally(s -> {
                     availableServer.release();
                 });
+    }
+
+    /**
+     * 对压缩后数据流进行解压，并返回指定范围的数据
+     *
+     * @param compressionType            压缩类型
+     * @param dataSize                   压缩后数据大小
+     * @param decompressedSize           解压后数据总大小
+     * @param dataFlux                   压缩后数据流
+     * @param streamController           读取数据控制器
+     * @param decompressStreamController 解压流控制器（用于控制上游拉取速率）
+     * @param startIndex                 起始字节位置（包含）
+     * @param endIndex                   结束字节位置（包含）
+     * @return 解压后指定范围的数据流
+     */
+    public Flux<Buffer> decompressImage(String compressionType, long dataSize, long decompressedSize, Flux<byte[]> dataFlux,
+                                        UnicastProcessor<Long> streamController, UnicastProcessor<Long> decompressStreamController,
+                                        long startIndex, long endIndex) {
+        Flux<Buffer> decompressedFlux = decompressImage(compressionType, dataSize, dataFlux, streamController, decompressStreamController);
+
+        // 如果不需要范围裁剪，直接返回解压后的原始流
+        if (startIndex <= 0 && endIndex >= decompressedSize - 1) {
+            return decompressedFlux;
+        }
+
+        return sliceFluxRange(decompressedFlux, decompressStreamController, startIndex, endIndex);
+    }
+
+    /**
+     * 对数据流进行范围裁剪，只返回 startIndex 到 endIndex 之间的数据，发送完后立即结束流
+     *
+     * @param flux             原始数据流
+     * @param streamController 流控制器（用于控制上游拉取速率，跳过数据时需通知）
+     * @param startIndex       起始字节位置（包含）
+     * @param endIndex         结束字节位置（包含）
+     * @return 裁剪后的数据流
+     */
+    private Flux<Buffer> sliceFluxRange(Flux<Buffer> flux, UnicastProcessor<Long> streamController, long startIndex, long endIndex) {
+        long[] bytesRead = {0};
+        MonoProcessor<Void> endSignal = MonoProcessor.create();
+
+        // takeUntilOther ：收到结束信号后，向上游发送cancel信息，向下游发送complete信号
+        return flux.takeUntilOther(endSignal)
+                .flatMap(buffer -> {
+                    long currentStart = bytesRead[0];
+                    int bufferLength = buffer.length();
+                    long currentEnd = currentStart + bufferLength - 1;
+                    bytesRead[0] += bufferLength;
+
+                    // 完全在范围之前，跳过
+                    if (currentEnd < startIndex) {
+                        notifyController(streamController);
+                        return Mono.empty();
+                    }
+
+                    // 完全在范围内，直接返回
+                    if (currentStart >= startIndex && currentEnd <= endIndex) {
+                        // 已到达范围末尾，发送数据后立即结束流
+                        if (currentEnd == endIndex) {
+                            endSignal.onComplete();
+                        }
+                        return Mono.just(buffer);
+                    }
+
+                    // 跨越边界，需要切割
+                    Buffer slicedBuffer = sliceBuffer(buffer, currentStart, bufferLength, startIndex, endIndex);
+
+                    // 只有到达或超过范围末尾时才结束流
+                    if (currentEnd >= endIndex) {
+                        endSignal.onComplete();
+                    }
+
+                    return Mono.just(slicedBuffer);
+                });
+    }
+
+    /**
+     * 对跨越边界的 buffer 进行切割
+     *
+     * @param buffer       原始 buffer
+     * @param currentStart 当前 buffer 在整个数据流中的起始位置
+     * @param bufferLength buffer 长度
+     * @param startIndex   请求范围的起始位置
+     * @param endIndex     请求范围的结束位置
+     * @return 切割后的 buffer
+     */
+    private Buffer sliceBuffer(Buffer buffer, long currentStart, int bufferLength, long startIndex, long endIndex) {
+        int sliceStart = (int) Math.max(0, startIndex - currentStart);
+        // slice 的 end 参数是结束位置，左闭右开 [start, end)
+        int sliceEnd = (int) Math.min(bufferLength, endIndex - currentStart + 1);
+        return buffer.slice(sliceStart, sliceEnd);
+    }
+
+    /**
+     * 通知控制器继续拉取数据，避免数据流阻塞
+     *
+     * @param streamController 流控制器
+     */
+    private void notifyController(UnicastProcessor<Long> streamController) {
+        if (streamController != null) {
+            streamController.onNext(1L);
+        }
     }
 
     /**
@@ -274,6 +431,8 @@ public class ImageCompressionProcessor {
         request.putHeader(DECOMPRESSED_ETAG, decompressedEtag);
         request.putHeader(DECOMPRESSED_LENGTH, String.valueOf(decompressedSize));
         request.putHeader(COMPRESSION_TYPE, DCMX);
+        request.putHeader(VERSIONID, metaData.getVersionId());
+        request.putHeader("stamp", metaData.getStamp());
         if (record.headerMap.containsKey("userId")) {
             request.putHeader(COMPONENT_USER_ID, record.headerMap.get("userId"));
         }

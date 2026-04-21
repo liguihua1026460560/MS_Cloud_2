@@ -349,10 +349,19 @@ public class DataDivision {
         List<SocketReqMsg> msg = new ArrayList<>(curNodeList.size());
 
         for (Tuple3<String, String, String> tuple3 : curNodeList) {
-            msg.add(baseReqMsg.copy()
+            SocketReqMsg copy = baseReqMsg.copy();
+            Optional.ofNullable(partInfos[partN].snapshotMark).ifPresent(v -> copy.put("snapshotMark", v));
+            msg.add(copy
                     .put("fileName", partInfos[partN].fileName)
                     .put("lun", tuple3.var2)
-                    .put("vnode", tuple3.var3));
+                    .put("vnode", tuple3.var3)
+                    .put("bucket", partInfos[partN].bucket)
+                    .put("object", partInfos[partN].object)
+                    .put("versionId", partInfos[partN].versionId)
+                    .put("storage", storagePool.getVnodePrefix())
+                    .put("uploadId", partInfos[partN].uploadId)
+                    .put("partNum", partInfos[partN].partNum)
+                    .put("endIndex", String.valueOf(partInfos[partN].partSize - 1)));
         }
         return new Tuple2<>(curNodeList, msg);
     }

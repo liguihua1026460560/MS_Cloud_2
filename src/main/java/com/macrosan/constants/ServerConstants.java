@@ -490,6 +490,10 @@ public class ServerConstants {
             "snapshot".hashCode(),
             "fsperformancequota".hashCode(),
             "fsaddressperformancequota".hashCode(),
+            "setNfsStatus".hashCode(),
+            "nfsIpWhitelists".hashCode(),
+            "setCifsStatus".hashCode(),
+            "setFtpStatus".hashCode(),
             "PutFsDirQuotaInfo".hashCode(),
             "PutFsUserQuotaInfo".hashCode(),
             "PutFsGroupQuotaInfo".hashCode(),
@@ -581,6 +585,7 @@ public class ServerConstants {
     public static final String SOURCEIP = "sourceIp";
 
     public static final String MOSSSOURCEIP = "moss:sourceIp";
+    public static final String FILENAME = "filename";
 
     /* -------------------------路由配置文件路径----------------- */
     public static final String MANAGE_ROUTE = File.separator + "route" + File.separator + "manage";

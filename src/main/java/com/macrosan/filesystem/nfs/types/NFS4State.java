@@ -10,6 +10,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 @Accessors(chain = true)
@@ -19,8 +22,8 @@ import java.util.*;
 public class NFS4State {
     private StateId stateId;
     private StateOwner owner;
-    private boolean confirmed = false;
-    private boolean disposed = false;
+    private AtomicBoolean confirmed = new AtomicBoolean(false);
+    private AtomicBoolean disposed = new AtomicBoolean(false);
     private final int type;
     private long nodeId;
     private String bucket;
@@ -30,7 +33,7 @@ public class NFS4State {
     private int shareDeny;
     private int lastUpdateSeqId;
     private NFS4Client client;
-    private final List<StateDisposeListener> disposeListeners;
+    private final ConcurrentLinkedQueue<StateDisposeListener> disposeListeners;
     private final Map<NFS4Lock, StateDisposeListener> lockDisposeMap;
 
 //    public NFS4State(StateOwner owner, StateId stateId, int type, NFS4Client client) {
@@ -49,8 +52,8 @@ public class NFS4State {
         this.nodeId = nodeId;
         this.bucket = bucket;
         this.objName = objName;
-        disposeListeners = new ArrayList<>();
-        lockDisposeMap = new HashMap<>();
+        disposeListeners = new ConcurrentLinkedQueue<>();
+        lockDisposeMap = new ConcurrentHashMap<>();
     }
 
     public void incrSeqId() {
@@ -62,7 +65,7 @@ public class NFS4State {
     }
 
     public void confirm() {
-        confirmed = true;
+        confirmed.set(true);
     }
 
     public void setStateId(StateId stateId) {
@@ -88,11 +91,11 @@ public class NFS4State {
     public NFS4State clone() {
         return new NFS4State(stateId.clone(), owner.clone(), confirmed, disposed, type, nodeId, bucket, objName,
                 openState == null ? null : openState.clone(), shareAccess, shareDeny, lastUpdateSeqId, client,
-                new ArrayList<>(disposeListeners), new HashMap<>(lockDisposeMap));
+                new ConcurrentLinkedQueue<>(disposeListeners), new HashMap<>(lockDisposeMap));
     }
 
     public boolean getConfirmed() {
-        return confirmed;
+        return confirmed.get();
     }
 
     public int type() {
@@ -100,29 +103,27 @@ public class NFS4State {
     }
 
     public Mono<Boolean> tryDispose() {
-        synchronized (this) {
-            List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
-            if (!disposed) {
-                return Flux.fromIterable(dispose0)
-                        .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
-                        .collectList().doOnNext(v -> {disposed = true;}).map(v -> true);
-            }
+        List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
+        if (!disposed.get()) {
+            return Flux.fromIterable(dispose0)
+                    .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
+                    .collectList().doOnNext(v -> {
+                        disposed.set(true);
+                    }).map(v -> true);
         }
         return Mono.just(true);
     }
 
 
     public Mono<Boolean> disposeIgnoreFailures() {
-        synchronized (this) {
-            List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
-            if (!disposed) {
-                return Flux.fromIterable(dispose0)
-                        .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
-                        .collectList().doOnNext(v -> {
-                            disposed = true;
-                            lockDisposeMap.clear();
-                        }).map(v -> true);
-            }
+        List<StateDisposeListener> dispose0 = new ArrayList<>(disposeListeners);
+        if (!disposed.get()) {
+            return Flux.fromIterable(dispose0)
+                    .flatMap(i -> i.notifyDisposed(this).doOnNext(f -> disposeListeners.remove(i)))
+                    .collectList().doOnNext(v -> {
+                        disposed.set(true);
+                        lockDisposeMap.clear();
+                    }).map(v -> true);
         }
         return Mono.just(true);
     }
@@ -137,25 +138,30 @@ public class NFS4State {
     }
 
     public void addDisposeListener(StateDisposeListener disposeListener) {
-        synchronized (this) {
-            disposeListeners.add(disposeListener);
-        }
+        disposeListeners.add(disposeListener);
     }
 
     public void addLockDispose(NFS4Lock lock, StateDisposeListener disposeListener) {
-        synchronized (this) {
+        lockDisposeMap.compute(lock, (k, v) -> {
             disposeListeners.add(disposeListener);
-            lockDisposeMap.put(lock, disposeListener);
-        }
+            return disposeListener;
+        });
     }
 
     public void removeLockDispose(NFS4Lock lock) {
-        synchronized (this) {
-            StateDisposeListener lockDispose = lockDisposeMap.get(lock);
-            if (lockDispose != null) {
-                disposeListeners.remove(lockDispose);
-                lockDisposeMap.remove(lock);
+        if (lock.removeOwner()) {
+            List<StateDisposeListener> stateDisposeListeners = new ArrayList<>(lockDisposeMap.values());
+            for (StateDisposeListener disposeListener : stateDisposeListeners) {
+                disposeListeners.remove(disposeListener);
             }
+            lockDisposeMap.clear();
+        } else {
+            lockDisposeMap.compute(lock, (k, v) -> {
+                if (v != null) {
+                    disposeListeners.remove(v);
+                }
+                return null;
+            });
         }
     }
 

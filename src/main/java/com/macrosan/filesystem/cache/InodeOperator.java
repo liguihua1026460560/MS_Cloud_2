@@ -64,6 +64,8 @@ import static com.macrosan.filesystem.FsConstants.*;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEFlag.INHERIT_ONLY_ACE;
 import static com.macrosan.filesystem.FsConstants.SMB2ACEType.*;
 import static com.macrosan.filesystem.FsUtils.setFsDelMark;
+import static com.macrosan.filesystem.async.AsyncUtils.ASYNC_NODEID;
+import static com.macrosan.filesystem.async.AsyncUtils.ASYNC_RECHECK;
 import static com.macrosan.filesystem.cifs.api.smb2.SetInfo.IS_ALLOCATE;
 import static com.macrosan.filesystem.cifs.call.smb2.NotifyCall.*;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
@@ -278,9 +280,14 @@ public class InodeOperator {
                 String s3VersionId = msg.get("versionId");
                 String metaHash = msg.get("metaHash");
                 String dirDefACEs = msg.dataMap.get(NFS_ACE);
+
+                if (AsyncUtils.checkOptForAsync(msg) && !"1".equals(ASYNC_RECHECK)) {
+                    // 站点A收到文件客户端发来的请求，记下nodeId存入差异记录，后续同步时将使用该id作为更新依据。
+                    msg.put(ASYNC_NODEID, String.valueOf(VersionUtil.newInode()));
+                }
                 //用readOpt防止batch
                 operator = new InodeOperator(nodeId, -1, true,
-                        () -> createS3Inode(vnode, bucket, s3ObjectName, s3VersionId, metaHash, dirDefACEs),
+                        () -> createS3Inode(vnode, bucket, s3ObjectName, s3VersionId, metaHash, dirDefACEs, msg),
                         null, null, opt);
                 break;
             //创建inode时，从nodeId对应的节点获得versionNum
@@ -378,12 +385,12 @@ public class InodeOperator {
 
                 Mono<Inode> res = InodeUtils.create0(bucket, createInode, nodeId, stamp, createVersion, s3Account, displayName);
                 Mono<Inode> mono;
-                if (AsyncUtils.checkOptForAsync(opt, msg)) {
+                if (AsyncUtils.checkOptForAsync(msg)) {
                     // 异步复制写预提交记录操作放在这里是为了保证写预提交记录的顺序和waitLit中任务处理的顺序一致
                     // todo del
                     log.debug("opt1 : {}, {}, {}", nodeId, opt, msg);
                     List<SocketReqMsg> msgs = Stream.of(msg).collect(Collectors.toList());
-                    mono = AsyncUtils.asyncBatch(msg.get("bucket"), nodeId, opt, msgs, res);
+                    mono = AsyncUtils.asyncBatch(msg.get("bucket"), nodeId, msgs, res);
                 } else {
                     mono = res;
                 }
@@ -409,12 +416,27 @@ public class InodeOperator {
             log.info("no such inode opt {}:{}", opt, msg);
             return Mono.just(local ? RETRY_INODE_PAYLOAD : DefaultPayload.create(Json.encode(RETRY_INODE), SUCCESS.name()));
         } else {
-            if (AsyncUtils.checkOptForAsync(opt, msg)) {
-                operator.setMsg(msg);
+            Mono<Inode> mono;
+            if (AsyncUtils.checkOptForAsync(msg)) {
+                // 文件复制加入objName作为差异记录并发处理的依据。同名对象/文件需要串行处理。
+                // 根目录的objName为空，单独处理
+                if (StringUtils.isBlank(msg.get("objName")) && nodeId != 1L) {
+                    InodeOperator finalOperator = operator;
+                    mono = Node.getInstance().getInode(bucket, nodeId)
+                            .doOnNext(inode -> {
+                                msg.put("objName", inode.getObjName());
+                                finalOperator.setMsg(msg);
+                            })
+                            .flatMap(inode -> vnode.exec(finalOperator));
+                } else {
+                    operator.setMsg(msg);
+                    mono = vnode.exec(operator);
+                }
             } else {
                 operator.setMsg(null);
+                mono = vnode.exec(operator);
             }
-            return FastMonoTimeOut.fastTimeout(vnode.exec(operator), Duration.ofSeconds(300))
+            return FastMonoTimeOut.fastTimeout(mono, Duration.ofSeconds(300))
                     .map(i -> local ? new LocalPayload<>(SUCCESS, i) : DefaultPayload.create(Json.encode(i), SUCCESS.name()))
                     .onErrorResume(e -> {
                         if (e instanceof TimeoutException || "closed connection".equals(e.getMessage())
@@ -612,7 +634,7 @@ public class InodeOperator {
      * 只对相近时间内 对同一对象进行createInode的操作加锁
      * 间隔较长的，可以认为get到的Metadata中，inode已经>0了，不会进行重复的创建操作
      */
-    private static Mono<Inode> createS3Inode(Vnode vnode, String bucket, String objName, String versionId, String metaHash, String dirDefACEs) {
+    private static Mono<Inode> createS3Inode(Vnode vnode, String bucket, String objName, String versionId, String metaHash, String dirDefACEs, SocketReqMsg msg) {
         String key = Utils.getVersionMetaDataKey(metaHash, bucket, objName, versionId);
         AtomicReference<Inode> inode = new AtomicReference<>(new Inode());
         vnode.inodeCache.s3InodeCache.compute(key, (k, v) -> {
@@ -634,9 +656,11 @@ public class InodeOperator {
             }
         });
 
+        // 对于文件复制来说可能两边的索引inode不一致，需要再确认是否要创建。
+        boolean isAsync = "1".equals(msg.get("async"));
         //加锁成功
-        if (inode.get().getLinkN() == 0) {
-            return InodeUtils.createS3Inode(bucket, objName, versionId, metaHash, dirDefACEs)
+        if (inode.get().getLinkN() == 0 || isAsync) {
+            return InodeUtils.createS3Inode(bucket, objName, versionId, metaHash, dirDefACEs, msg)
                     .doOnNext(i -> {
                         if (InodeUtils.isError(i)) {
                             //释放锁
@@ -1148,7 +1172,7 @@ public class InodeOperator {
                                 List<Tuple3<String, String, String>> nodeList = pool.mapToNodeInfo(bucketVnode).block();
                                 String key = Utils.getMetaDataKey(bucketVnode, bucket, linkInode.getObjName(), metaData.versionId, metaData.stamp);
                                 return ErasureClient.getFsMetaVerUnlimited(oldInode.getBucket(), oldInode.getObjName(), oldInode.getVersionId(), nodeList, null, null, null,
-                                                linkInode.getXAttrMap().get(QUOTA_KEY))
+                                        linkInode.getXAttrMap().get(QUOTA_KEY))
                                         .flatMap(sourceMeta -> {
                                             if (sourceMeta.isAvailable()) {
                                                 //创建硬链接时，硬链接metaData中的sysMeta与源文件保持一致，owner和名称也一致
@@ -1232,17 +1256,18 @@ public class InodeOperator {
                                 return Mono.just(false);
                             });
                 }).
-                flatMap(r -> {
-                    //存在缓存池，则更新deleteMark，防止下刷失败
-                    if (r) {
-                        deleteMark.inode = renameInode.getNodeId();
-                        deleteMark.partInfos = new PartInfo[0];
-                        deleteMark.partUploadId = "inode";
-                        msg.put("deleteMark", Json.encode(deleteMark));
-                    }
-                    return pool.mapToNodeInfo(bucketVnode);
-                })
-                .flatMap(nodeList -> ErasureClient.getFsMetaVerUnlimited(renameInode.getBucket(), oldObjName, renameInode.getVersionId(), nodeList, null, null, null, renameInode.getXAttrMap().get(QUOTA_KEY))
+                        flatMap(r -> {
+                            //存在缓存池，则更新deleteMark，防止下刷失败
+                            if (r) {
+                                deleteMark.inode = renameInode.getNodeId();
+                                deleteMark.partInfos = new PartInfo[0];
+                                deleteMark.partUploadId = "inode";
+                                msg.put("deleteMark", Json.encode(deleteMark));
+                            }
+                            return pool.mapToNodeInfo(bucketVnode);
+                        })
+                .flatMap(nodeList -> ErasureClient.getFsMetaVerUnlimited(renameInode.getBucket(), oldObjName, renameInode.getVersionId(), nodeList, null, null, null,
+                        renameInode.getXAttrMap().get(QUOTA_KEY))
                         .flatMap(sourceMeta -> {
                             if (sourceMeta.isAvailable() && sourceMeta.inode == renameInode.getNodeId()) {
                                 return BucketSyncSwitchCache.isSyncSwitchOffMono(bucket)

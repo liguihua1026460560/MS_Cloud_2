@@ -129,7 +129,6 @@ import static com.macrosan.doubleActive.AssignClusterHandler.SKIP_SIGNAL;
 import static com.macrosan.doubleActive.DoubleActiveUtil.buildSyncRecord;
 import static com.macrosan.doubleActive.DoubleActiveUtil.streamDispose;
 import static com.macrosan.doubleActive.HeartBeatChecker.isMultiAliveStarted;
-import static com.macrosan.doubleActive.HeartBeatChecker.isNotDeleteEs;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.*;
 import static com.macrosan.ec.ECUtils.*;
 import static com.macrosan.ec.ErasureClient.*;
@@ -166,7 +165,6 @@ import static com.macrosan.utils.msutils.MsException.throwWhenEmpty;
 import static com.macrosan.utils.notification.BucketNotification.checkNotification;
 import static com.macrosan.utils.notification.BucketNotification.saveInfoToQueue;
 import static com.macrosan.utils.perf.KeepAliveRequest.KEEP_SOCKET_PERIOD;
-import static com.macrosan.utils.regex.PatternConst.OBJECT_NAME_PATTERN;
 import static com.macrosan.utils.store.StoreManagementServer.*;
 import static com.macrosan.utils.store.StoreUtils.validateRequest;
 import static com.macrosan.utils.trash.TrashUtils.bucketTrash;
@@ -494,6 +492,9 @@ public class StreamService extends BaseService {
                                 sysMetaMap.put(LAST_MODIFY, lastModify);
                                 if ("REPLACE".equals(request.getHeader(X_AMZ_METADATA_DIRECTIVE))) {
                                     sysMetaMap.keySet().removeIf(key -> SPECIAL_HEADER.contains(key.toLowerCase().hashCode()));
+                                    if (StringUtils.isNotEmpty(sourceMeta.lastAccessStamp)) {//更新对象的用户元数据时继承lastAccessStamp
+                                        metaData.setLastAccessStamp(sourceMeta.lastAccessStamp);
+                                    }
                                 }
                                 setSysMeta(sysHeader, sysMetaMap, request);
                                 metaData.setVersionId(versionId).setVersionNum(versionNum).setStamp(stamp)
@@ -898,8 +899,10 @@ public class StreamService extends BaseService {
         //获取存储策略是否配置分层
         String strategy = BUCKET_STRATEGY_NAME_MAP.get(bucketName);
         if (dataPool.getVnodePrefix().startsWith("cache") && isEnableCacheAccessTimeFlush(strategy)) {//当前缓存池开启访问记录
-            lastAccessStamp = String.valueOf(System.currentTimeMillis());//这里直接按照上传时间更新最近访问时间吧
-            metaData.setLastAccessStamp(lastAccessStamp);
+            if ((metaData.endIndex + 1) != 0) {
+                lastAccessStamp = String.valueOf(System.currentTimeMillis());//这里直接按照上传时间更新最近访问时间吧
+                metaData.setLastAccessStamp(lastAccessStamp);
+            }
         }
 
         final JsonObject sysMetaMap = getSysMetaMap(request);
@@ -1352,7 +1355,7 @@ public class StreamService extends BaseService {
         Set<String> dedupFile = new HashSet<>();
         List<String> allFile = new ArrayList<>();
         Mono<Boolean> result = null;
-        boolean deleteESSource = !isNotDeleteEs || request.getHeader("deleteSource") == null || !"1".equals(request.getHeader("deleteSource"));
+        boolean deleteESSource = "on".equals(msg.get(ES_DELETE_ES));
         if (metaData[0].partUploadId != null) {
             PartInfo[] partInfos = metaData[0].partInfos;
             for (int i = 0; i < partInfos.length; i++) {
@@ -1691,13 +1694,8 @@ public class StreamService extends BaseService {
             preRecord.setUri(uri);
             String bucketVnodeId = bucketPool.getBucketVnodeId(msHttpRequest.getBucketName(), msHttpRequest.getObjectName());
             disposables[1] = bucketPool.mapToNodeInfo(bucketVnode)
-                    .zipWith(pool.getReactive(REDIS_BUCKETINFO_INDEX).hget(request.getBucketName(), ARCHIVE_SWITCH).defaultIfEmpty("off"))
-                    .flatMap(tuple2 -> {
+                    .flatMap(nodeList -> {
                         if (needFlushSyncRecord.get()) {
-                            if ("on".equals(tuple2.getT2())) {
-                                needFlushSyncRecord.set(false);
-                                return Mono.just(true);
-                            }
                             preRecord.rocksKey();
                             boolean isVersion = ("NULL".equals(versionStatus)) && (KeyVersion.getVersionId() == null);
                             String tempVersion = isVersion ? "null" : KeyVersion.getVersionId();
@@ -1712,7 +1710,7 @@ public class StreamService extends BaseService {
                                             if (StringUtils.isNotEmpty(tempVersion)) {
                                                 throw new MsException(NO_SUCH_OBJECT, "no such object, object name: " + KeyVersion);
                                             } else {
-                                                return ECUtils.putSynchronizedRecord(bucketPool, preRecord.recordKey, Json.encode(preRecord), tuple2.getT1(), WRITE_ASYNC_RECORD, request);
+                                                return ECUtils.putSynchronizedRecord(bucketPool, preRecord.recordKey, Json.encode(preRecord), nodeList, WRITE_ASYNC_RECORD, request);
                                             }
                                         } else {
                                             if (null != KeyVersion.getVersionId() || "NULL".equals(versionStatus)) {
@@ -1726,7 +1724,7 @@ public class StreamService extends BaseService {
                                                 preRecord.setSyncStamp(syncStamp);
                                             }
 
-                                            return ECUtils.putSynchronizedRecord(bucketPool, preRecord.recordKey, Json.encode(preRecord), tuple2.getT1(), WRITE_ASYNC_RECORD, request);
+                                            return ECUtils.putSynchronizedRecord(bucketPool, preRecord.recordKey, Json.encode(preRecord), nodeList, WRITE_ASYNC_RECORD, request);
                                         }
                                     });
                         }
@@ -1909,7 +1907,7 @@ public class StreamService extends BaseService {
         boolean[] hasStartFS = {false};
         int[] startFsType = {0};
         Inode[] dirInodes = {null};
-        boolean deleteESSource = !isNotDeleteEs || request.getHeader("deleteSource") == null || !"1".equals(request.getHeader("deleteSource"));
+        boolean[] deleteESSource = new boolean[]{false};
         return currentWormTimeMillis()
                 .doOnNext(l -> currentWormStamp[0] = reqWormStamp == null ? l : Long.valueOf(reqWormStamp))
                 .flatMap(l -> pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(bucketName)
@@ -1948,6 +1946,9 @@ public class StreamService extends BaseService {
                             } else {
                                 msg.put("mda", "off");
                             }
+                            String deleteEs = bucketInfo.getOrDefault(ES_DELETE_ES, "on");
+                            deleteESSource[0] = "on".equals(deleteEs);
+                            msg.put(ES_DELETE_ES, deleteEs);
                             msg.put("bucket_userId", bucketInfo.get(BUCKET_USER_ID));
                             if (bucketInfo.containsKey(BUCKET_VERSION_STATUS)) {
                                 versionStatus[0] = bucketInfo.get(BUCKET_VERSION_STATUS);
@@ -2121,7 +2122,7 @@ public class StreamService extends BaseService {
                                                 boolean res = ERROR_INODE.getLinkN() != i.getLinkN();
                                                 if (res) {
                                                     if (ES_ON.equals(msg.get("mda"))) {
-                                                        esMono = EsMetaTask.delEsMeta(i.clone().setObjName(meta.key), meta, !deleteESSource);
+                                                        esMono = EsMetaTask.delEsMeta(i.clone().setObjName(meta.key), meta, !deleteESSource[0]);
                                                     }
                                                 }
                                                 return esMono.flatMap(b -> InodeUtils.updateSpeciDirTime(dirInodes[0], meta.key, bucketName))
@@ -2210,7 +2211,7 @@ public class StreamService extends BaseService {
                                                 .flatMap(f -> {
                                                     if (!syncDelete[0]) {
                                                         if (!"off".equals(msg.get("mda"))) {
-                                                            return EsMetaTask.putOrDelS3EsMeta(requestUserId, bucketName, objName, versionId, metaData[0].endIndex + 1, request, true, !deleteESSource);
+                                                            return EsMetaTask.putOrDelS3EsMeta(requestUserId, bucketName, objName, versionId, metaData[0].endIndex + 1, request, true, !deleteESSource[0]);
                                                         }
                                                     }
                                                     return Mono.just(true);
@@ -2330,7 +2331,7 @@ public class StreamService extends BaseService {
                                                 .flatMap(f -> {
                                                     if (!syncDelete[0]) {
                                                         if (!"off".equals(msg.get("mda"))) {
-                                                            return EsMetaTask.putOrDelS3EsMeta(requestUserId, bucketName, objName, versionId, metaData[0].endIndex + 1, request, true, !deleteESSource);
+                                                            return EsMetaTask.putOrDelS3EsMeta(requestUserId, bucketName, objName, versionId, metaData[0].endIndex + 1, request, true, !deleteESSource[0]);
                                                         }
                                                     }
                                                     return Mono.just(true);
@@ -2498,8 +2499,9 @@ public class StreamService extends BaseService {
                         sysMetaMap.put("x-amz-object-lock-retain-until-date", MsDateUtils.stampToISO8601(expiration));
                         sysMetaMap.put("x-amz-object-lock-mode", sysMetaMap.getOrDefault("mode", "COMPLIANCE"));
                     }
-
-                    long total = metaData.endIndex - metaData.startIndex + 1;
+                    String compressionType = sysMetaMap.get(COMPRESSION_TYPE);
+                    boolean needDeCompressed = compressionType != null;
+                    long total = needDeCompressed ? Long.parseLong(sysMetaMap.get(DECOMPRESSED_LENGTH)) : metaData.endIndex - metaData.startIndex + 1;
                     long startIndex = 0;
                     long endIndex = metaData.endIndex;
                     //range处理
@@ -2509,15 +2511,11 @@ public class StreamService extends BaseService {
                         startIndex = t.var1;
                         endIndex = t.var2;
 
-//                        if (endIndex - startIndex <= 0) {
-//                            total = 0;
-//                        }
                         request.response()
                                 .putHeader("Accept-Ranges", "bytes")
                                 .putHeader("Content-Range", "bytes " + startIndex + '-' + endIndex + '/' + total)
                                 .setStatusCode(206);
                     }
-                    String compressionType = sysMetaMap.get(COMPRESSION_TYPE);
                     //添加请求头
                     addPublicHeaders(request, getRequestId())
                             .putHeader(CONTENT_LENGTH, String.valueOf(endIndex - startIndex < 0 ? 0 : endIndex - startIndex + 1))
@@ -2546,10 +2544,13 @@ public class StreamService extends BaseService {
                         res.onNext(Buffer.buffer(new byte[0]));
                         return res;
                     }
+                    // 如果对象需要解压，则从moss下载对象时需要下载完整的数据
+                    long readStartIndex = needDeCompressed ? metaData.startIndex : startIndex;
+                    long readEndIndex = needDeCompressed ? metaData.endIndex : endIndex;
 
                     if (metaData.aggregationKey != null && metaData.crypto == null && metaData.aggSize > 0) {
-                        long offset = metaData.offset + startIndex;
-                        long size = endIndex - startIndex + 1;
+                        long offset = metaData.offset + readStartIndex;
+                        long size = readEndIndex - readStartIndex + 1;
                         return ReadObjClient.readObj(0, metaData.storage, bucketName, metaData.fileName, offset, size, metaData.aggSize, false)
                                 .map(tuple21 -> tuple21.var2)
                                 .map(BytesWrapperBuffer::new);
@@ -2557,19 +2558,23 @@ public class StreamService extends BaseService {
 
                     accessMetaData[0] = metaData.clone();
 
-                    Flux<byte[]> dataFlux = ErasureClient.getObject(dataPool[0], metaData, startIndex, endIndex, tuple2.getT1(), streamController, request, null);
-                    if (compressionType == null) {
+                    Flux<byte[]> dataFlux = ErasureClient.getObject(dataPool[0], metaData, readStartIndex, readEndIndex, tuple2.getT1(), streamController, request, null);
+                    if (!needDeCompressed) {
                         return dataFlux.map(BytesWrapperBuffer::new);
                     }
-                    if (sysMetaMap.containsKey(COMPRESSION_TYPE)) {
-                        // 压缩对象，替换etag和length为解压后的
-                        request.response().putHeader(ETAG, '"' + sysMetaMap.get(DECOMPRESSED_ETAG) + '"');
-                        request.response().putHeader(CONTENT_LENGTH, sysMetaMap.get(DECOMPRESSED_LENGTH));
-                    }
+                    long decompressedSize = Long.parseLong(sysMetaMap.get(DECOMPRESSED_LENGTH));
+                    long decompressRangeStartIndex = request.headers().contains(RANGE) ? startIndex : 0;
+                    long decompressRangeEndIndex = request.headers().contains(RANGE) ? endIndex : decompressedSize - 1;
+                    // 压缩对象，替换etag和length为解压后的
+                    request.response().putHeader(ETAG, '"' + sysMetaMap.get(DECOMPRESSED_ETAG) + '"');
+                    request.response().putHeader(CONTENT_LENGTH, String.valueOf(decompressRangeEndIndex - decompressRangeStartIndex < 0 ? 0 : decompressRangeEndIndex - decompressRangeStartIndex + 1));
                     // 切换下游控制器， 解压服务通过 streamController 控制 上游getObject速率，客户端写入 通过readController控制从解压服务器读取数据的速率
                     UnicastProcessor<Long> readController = UnicastProcessor.create();
                     controllerToUse.set(readController);
-                    return ImageCompressionProcessor.getInstance().decompressImage(compressionType, endIndex - startIndex + 1, dataFlux, streamController, readController);
+
+                    return ImageCompressionProcessor.getInstance().decompressImage(
+                            compressionType, metaData.endIndex + 1, decompressedSize, dataFlux,
+                            streamController, readController, decompressRangeStartIndex, decompressRangeEndIndex);
                 })
                 .doFinally(s -> {
                     //处理文件通过s3协议访问，单独进行处理
@@ -2582,11 +2587,19 @@ public class StreamService extends BaseService {
                     if (dataPool[0] == null) {
                         return;
                     }
+                    if (objectSize[0] == 0) {
+                        //Okb对象不参与访问记录更新以及回迁
+                        return;
+                    }
                     if (isEnableCacheAccessTimeFlush(dataPool[0]) && isEnableCacheAccessTimeFlush(strategy)) {
                         ObjectAccessCache.addAccessRecord(bucketName, objName, versionId[0]);//添加到异步处理增加访问记录
                     }
                     //策略开启数据分层后get数据池上的对象会触发异步回迁至缓存池//todo 判断数据池对应策略下缓存池是否容量都超过了80，存在未超过80的则可以进行回迁
                     if (dataPool[0].getVnodePrefix().startsWith("data") && isEnableCacheAccessTimeFlush(getStrategyNameByDataPrefix(dataPool[0].getVnodePrefix())) && objectSize[0] <= 262144L) {//todo 这里要改成数据池所在的策略确认是否分层
+                        if (accessMetaData[0] != null && accessMetaData[0].getFileName() != null && accessMetaData[0].getFileName().contains("#")) {
+                            //复制对象不回迁
+                            return;
+                        }
                         boolean canBackStore = false;
                         List<StoragePool> cachePools = CacheMove.getPools(getStrategyNameByDataPrefix(dataPool[0].getVnodePrefix()));
                         long singleUsed = 0L;
@@ -3095,7 +3108,7 @@ public class StreamService extends BaseService {
                                                 .stream()
                                                 .map(group -> group.size() > 1 ?
                                                         group.stream().filter(con -> con.getOwner().getId().equals(request.getUserId()))
-                                                                .collect(Collectors.toList()).get(0) : group.get(0))
+                                                        .collect(Collectors.toList()).get(0) : group.get(0))
                                                 .collect(Collectors.toList());
                                         prefixList.addAll(forwardPrefixList);
                                         Set<Prefix> prefixSet = new HashSet<>(prefixList);
@@ -3400,21 +3413,6 @@ public class StreamService extends BaseService {
     }
 
     /**
-     * 检查对象名字是否符合要求
-     *
-     * @param name 对象名字
-     */
-    private void checkObjectName(String name) {
-        if (!OBJECT_NAME_PATTERN.matcher(name).matches()) {
-            throw new MsException(ErrorNo.NAME_INPUT_ERR, "name is invalid");
-        }
-
-        if (name.getBytes(StandardCharsets.UTF_8).length > 1024) {
-            throw new MsException(ErrorNo.NAME_INPUT_ERR, "name is invalid");
-        }
-    }
-
-    /**
      * 将目标字符串填充上空字符，使总长度为1024
      * 注：不直接使用format是因为format性能较低
      *
@@ -3439,25 +3437,6 @@ public class StreamService extends BaseService {
             targetSocket.getDelegate().write(httpBodyChunk);
             migSocket.getDelegate().write(httpBodyChunk);
         };
-    }
-
-    /**
-     * 上传之前的桶配额和账户配额检查
-     *
-     * @param bucketInfo        桶信息
-     * @param accountQuotaFlag  账户容量配额标志
-     * @param accountObjNumFlag 账户对象数配额标志
-     */
-    private void quotaCheck(Map<String, String> bucketInfo, String accountQuotaFlag, String accountObjNumFlag) {
-        if ("1".equals(bucketInfo.get(QUOTA_FLAG))) {
-            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the bucket quota.");
-        } else if ("1".equals(bucketInfo.get(OBJNUM_FLAG))) {
-            throw new MsException(NO_ENOUGH_OBJECTS, "The bucket hard-max-objects was exceeded.");
-        } else if ("2".equals(accountQuotaFlag)) {
-            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the account quota.");
-        } else if ("2".equals(accountObjNumFlag)) {
-            throw new MsException(NO_ENOUGH_OBJECTS, "The account hard-max-objects was exceeded.");
-        }
     }
 
     private void capacityQuotaCheck(Map<String, String> bucketInfo, String accountQuotaFlag) {
@@ -4050,7 +4029,7 @@ public class StreamService extends BaseService {
         MetaData[] metaData = new MetaData[]{null};
         String[] versionNum = new String[]{null};
         boolean[] syncDelete = new boolean[]{true};
-        boolean deleteESSource = !isNotDeleteEs || request.getHeader("deleteSource") == null || !"1".equals(request.getHeader("deleteSource"));
+        boolean deleteESSource = "on".equals(socketReqMsg.get(ES_DELETE_ES));
         return VersionUtil.getVersionNum(bucketName, objectName)
                 .doOnNext(version -> versionNum[0] = version)
                 .flatMap(res -> bucketPool.mapToNodeInfo(bucketVnode))
@@ -4545,7 +4524,7 @@ public class StreamService extends BaseService {
                                                 return Mono.just(true);
                                             });
                                 } else {
-                                    if (metaData[0].inode > 0 && "inode".equals(metaData[0].partUploadId)) {
+                                    if (metaData[0].inode > 0 && metaData[0].partUploadId != null && metaData[0].partUploadId.contains("inode")) {
                                         putMono = Mono.just(true).flatMap(b -> Node.getInstance().getInode(request.getBucketName(), metaData[0].inode))
                                                 .flatMap(inode -> {
                                                     return FSQuotaUtils.addQuotaDirInfo(inode, Long.parseLong(stamp), true);
@@ -4627,7 +4606,7 @@ public class StreamService extends BaseService {
                                                         .setEtag(partInfo.getEtag())
                                                         .setFileName(partInfo.fileName);
                                                 return Node.getInstance().updateInodeData(bucketName, inodes[0].getNodeId(), inodes[0].getSize(), inodeData, "", "", 1,
-                                                                inodes[0].getXAttrMap().get(QUOTA_KEY))
+                                                                inodes[0].getXAttrMap().get(QUOTA_KEY), objName)
                                                         .flatMap(i -> {
                                                             if (isError(i)) {
                                                                 return Mono.error(new MsException(UNKNOWN_ERROR, "put meta data error!"));

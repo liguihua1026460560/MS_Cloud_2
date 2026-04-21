@@ -43,9 +43,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.macrosan.constants.SysConstants.*;
-import static com.macrosan.constants.SysConstants.ROCKS_CACHE_ACCESS_KEY;
-import static com.macrosan.ec.Utils.getFileMetaKeyByAccessTimeKey;
-import static com.macrosan.ec.Utils.getFileMetaKeyByCacheOrderKey;
+import static com.macrosan.ec.Utils.*;
 import static com.macrosan.rabbitmq.RabbitMqUtils.CURRENT_IP;
 import static com.macrosan.storage.strategy.CacheSmallObjectStrategy.*;
 
@@ -167,6 +165,7 @@ public class CacheMove implements Runnable {
                                     log.info("scan access {} {} {}ms", pool.getVnodePrefix(), n0, time);
                                 }
                             }
+                            start = System.nanoTime();
                             int n1 = scan(pool, RUN_ONCE);
                             n += n1;
                             if (n1 > 0) {
@@ -566,6 +565,23 @@ public class CacheMove implements Runnable {
                                 } else {
                                     recordTask(pool, meta, disk, n);
                                 }
+                            } else {
+                                //判断该fileMeta是否存在访问记录,存在访问记录则不通过扫描#表和上传时间处理了，否则如果fileMeta中有lastAccessStamp,但无访问记录则直接进行下刷
+                                byte[] record =  cacheDb.get(getAccessTimeKey(meta.getLastAccessStamp(), meta.getFileName()).getBytes());
+                                if (record == null) {
+                                    if (meta.getFileName().contains("#")) {
+                                        if (isEnableCacheAccessTimeFlush(strategy)) {//如果策略开启分层
+                                            if (meta.getLastAccessStamp().compareTo(String.valueOf(endStamp)) < 0) {
+                                                recordTask(pool, meta, disk, n);
+                                            }
+
+                                        } else {
+                                            recordTask(pool, meta, disk, n);
+                                        }
+                                    } else {
+                                        recordTask(pool, meta, disk, n);
+                                    }
+                                }
                             }
                         } else {
                             if (isEnableCacheAccessTimeFlush(strategy)) {
@@ -739,6 +755,10 @@ public class CacheMove implements Runnable {
     }
 
     public static boolean needDeleteDataInDataPool(String strategy) {
+        if (strategy == null) {
+            log.debug("DelDataWhenBackStore:Strategy is null");
+            return false;
+        }
         return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).isDelDataWhenBackStore();
     }
 
@@ -748,10 +768,18 @@ public class CacheMove implements Runnable {
     }
 
     public static boolean isEnableCacheAccessTimeFlush(String strategy) {
+        if (strategy == null) {
+            log.debug("EnableCacheAccess:Strategy is null");
+            return false;
+        }
         return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).isEnableAccessTimeFlush();
     }
 
     public static String getEnableLayeringStamp(String strategy) {
+        if (strategy == null) {
+            log.debug("EnableLayeringStamp:Strategy is null");
+            return CacheFlushConfigRefresher.StrategyFlushConfig.DEFAULT_STRATEGY_CONFIG.getEnableLayeringStamp();
+        }
         return CacheFlushConfigRefresher.getInstance().getStrategyFlushConfig(strategy).getEnableLayeringStamp();
     }
 

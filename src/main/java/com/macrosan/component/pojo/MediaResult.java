@@ -14,4 +14,8 @@ public class MediaResult {
 
     private Object data;
 
+    public boolean isHeartbeat() {
+        return "heartbeat".equals(msg);
+    }
+
 }

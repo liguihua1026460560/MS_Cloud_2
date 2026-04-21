@@ -87,7 +87,15 @@ public class FTPControl {
 
         session.setUser(account);
         if ("anonymous".equalsIgnoreCase(account)) {
-            return Mono.just(GUEST_LOGIN_OK.reply());
+            return CheckUtils.checkFtpAnonymousPrimarySwitch()
+                    .flatMap(enable -> {
+                        if (!enable) {
+                            //true:匿名用户，false：以普通用户认证
+                            return Mono.just(USER_NAME_OK_NEED_PASSWORD.reply());
+                        }
+
+                        return Mono.just(GUEST_LOGIN_OK.reply());
+                    });
         } else {
             return Mono.just(USER_NAME_OK_NEED_PASSWORD.reply());
         }
@@ -102,19 +110,33 @@ public class FTPControl {
 
         String pw = ftpRequest.args.get(0);
 
-        if ("anonymous".equalsIgnoreCase(session.getUser())) {
-            return Mono.just(USER_LOGGED_IN.reply());
-        }
-
-        return pool.getReactive(REDIS_USERINFO_INDEX).hgetall(session.getUser())
-                .flatMap(map -> {
-                    if (map.size() > 0 && map.get("passwd").equals(pw)) {
-                        session.setUserId(map.get("id"));
-                        return Mono.just(USER_LOGGED_IN.reply());
-                    } else {
-                        return Mono.just(AUTHENTICATION_FAILED.reply());
+        return Mono.just("anonymous".equalsIgnoreCase(session.getUser()))
+                .flatMap(isAnonymous -> {
+                    if (isAnonymous) {
+                        //true:匿名用户，false：以普通用户认证
+                        return CheckUtils.checkFtpAnonymousPrimarySwitch();
                     }
+
+                    //是普通用户
+                    return Mono.just(false);
+                })
+                .flatMap(isAnonymousConfirm -> {
+                    if (isAnonymousConfirm) {
+                        return Mono.just(USER_LOGGED_IN.reply());
+                    }
+
+                    return pool.getReactive(REDIS_USERINFO_INDEX).hgetall(session.getUser())
+                            .flatMap(map -> {
+                                if (map.size() > 0 && map.get("passwd").equals(pw)) {
+                                    session.setUserId(map.get("id"));
+                                    return Mono.just(USER_LOGGED_IN.reply());
+                                } else {
+                                    return Mono.just(AUTHENTICATION_FAILED.reply());
+                                }
+                            });
                 });
+
+
     }
 
     @FTPRequest.FTPOpt(FTPRequest.Command.CDUP)
@@ -148,7 +170,8 @@ public class FTPControl {
             } else {
                 int port1 = port / 256;
                 int port2 = port & 255;
-                res.onNext(ENTER_PASSIVE_MODE.reply("(" + session.host.replace(".", ",") + "," + port1 + "," + port2 + ")"));
+                String tryPortStr = "(" + session.host.replace(".", ",") + "," + port1 + "," + port2 + ")";
+                res.onNext(ENTER_PASSIVE_MODE.reply(tryPortStr));
             }
         } else {
             res.onNext("\r\n");
@@ -235,7 +258,10 @@ public class FTPControl {
                     .map(list -> list.size() > 0);
         } else {
             return pool.getReactive(REDIS_BUCKETINFO_INDEX).hgetall(bucket)
-                    .map(bucketInfo -> StringUtils.isNotBlank(bucketInfo.get("ftp")) && bucketInfo.get("ftp").equals("1") && "1".equals(bucketInfo.get("ftp_anonymous")));
+                    .flatMap(bucketInfo -> {
+                        return CheckUtils.checkFtpAnonymousPrimarySwitch()
+                                .map(enable -> StringUtils.isNotBlank(bucketInfo.get("ftp")) && bucketInfo.get("ftp").equals("1") && "1".equals(bucketInfo.get("ftp_anonymous")) && enable);
+                    });
         }
     }
 

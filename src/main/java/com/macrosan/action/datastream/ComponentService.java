@@ -10,6 +10,7 @@ import com.macrosan.component.pojo.ComponentStrategy;
 import com.macrosan.component.utils.ParamsUtils;
 import com.macrosan.constants.ErrorNo;
 import com.macrosan.ec.ErasureClient;
+import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.httpserver.MsHttpRequest;
 import com.macrosan.httpserver.ServerConfig;
@@ -265,9 +266,16 @@ public class ComponentService extends BaseService {
                     }
                 })
                 .flatMap(b -> pool.getReactive(REDIS_POOL_INDEX).sismember(COMPONENT_RECORD_BUCKET_SET, bucket))
-                .doOnNext(b -> {
-                    if (!b) {
-                        pool.getShortMasterCommand(REDIS_POOL_INDEX).sadd(COMPONENT_RECORD_BUCKET_SET, bucket);
+                .flatMap(b -> {
+                    if (b) {
+                        return Mono.just(true);
+                    } else {
+                        // 切换redis执行线程，防止在redis eventLoop线程执行导致死锁
+                        return Mono.fromCallable(() -> {
+                                    pool.getShortMasterCommand(REDIS_POOL_INDEX).sadd(COMPONENT_RECORD_BUCKET_SET, bucket);
+                                    return true;
+                                })
+                                .subscribeOn(ErasureServer.DISK_SCHEDULER);
                     }
                 })
                 .flatMap(b -> ComponentUtils.getComponentRecord(record))

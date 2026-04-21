@@ -313,13 +313,13 @@ public class DoubleActiveUtil {
                     reqMap.put(FS_GID, paramMap.get(FS_GID));
                 }
             } else if (ACTION_ADD_NFS_IP_WHITELISTS.equals(paramMap.get("action")) || ACTION_DEL_NFS_IP_WHITELISTS.equals(paramMap.get("action"))) {
-                reqMap.put(NFS_IP_WHITELISTS, paramMap.get(NFS_IP_WHITELISTS));
+                reqMap.put(NFS_IP_WHITE_LISTS, paramMap.get(NFS_IP_WHITE_LISTS));
             } else if (ACTION_SET_BUCKET_NFS.equals(paramMap.get("action"))) {
                 reqMap.put(NFS_ACL, paramMap.get(NFS_ACL));
                 reqMap.put(FS_STATUS, paramMap.get(FS_STATUS));
                 reqMap.put(FS_SQUASH, paramMap.get(FS_SQUASH));
-                reqMap.put(ANON_UID, paramMap.get(ANON_UID));
-                reqMap.put(ANON_GID, paramMap.get(ANON_GID));
+                reqMap.put(ANON_UID, paramMap.getOrDefault(ANON_UID, ""));
+                reqMap.put(ANON_GID, paramMap.getOrDefault(ANON_GID, ""));
             } else if (ACTION_SET_BUCKET_CIFS.equals(paramMap.get("action"))) {
                 reqMap.put(CIFS_ACL, paramMap.get(CIFS_ACL));
                 reqMap.put(GUEST, paramMap.get(GUEST));
@@ -1347,16 +1347,6 @@ public class DoubleActiveUtil {
                             && getSyncIndexMap(bucketName, MASTER_INDEX).contains(LOCAL_CLUSTER_INDEX);
                 })
                 .doOnError(e -> logger.error("checkBucObjNumIsEnable error", e));
-    }
-
-    public static Mono<Boolean> archiveSwitchIsOn(String bucket) {
-        if (StringUtils.isEmpty(bucket)) {
-            return Mono.just(false);
-        }
-        return pool.getReactive(REDIS_BUCKETINFO_INDEX)
-                .hget(bucket, ARCHIVE_SWITCH)
-                .defaultIfEmpty("off")
-                .map("on"::equals);
     }
 
     /**

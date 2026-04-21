@@ -11,6 +11,7 @@ import com.macrosan.message.jsonmsg.MetaData;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.rsocket.client.RSocketClient;
 import com.macrosan.utils.functional.Tuple2;
+import io.netty.buffer.ByteBuf;
 import io.rsocket.util.DefaultPayload;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
@@ -208,7 +209,8 @@ public class WriteBatch {
                         writeB.put(finalKey, value);
                     };
                     BatchRocksDB.customizeOperateData(dstLun, consumer)
-                            .subscribe(b -> {}, e -> log.error("", e));
+                            .subscribe(b -> {
+                            }, e -> log.error("", e));
 //                    MSRocksDB.getRocksDB(lun).put(key, value);
                 }
             } catch (Exception e) {
@@ -304,7 +306,7 @@ public class WriteBatch {
         return batchWriter.write(w, writeOptions, db);
     }
 
-    public Result[] hookData(byte[] bytes) {
-        return batchWriter.hookData(bytes);
+    public Result[] hookData(ByteBuf buf) {
+        return batchWriter.hookData(buf);
     }
 }

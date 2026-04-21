@@ -38,6 +38,7 @@ import static com.macrosan.storage.StorageOperate.PoolType.DATA;
 
 @Slf4j
 public class WriteCacheClient {
+    public static int writeNum = 5;
     private static final AtomicBoolean FLUSHING = new AtomicBoolean(false);
     private static final Set<SMB2FileId> existCacheSet = ConcurrentHashMap.newKeySet();
 
@@ -54,22 +55,22 @@ public class WriteCacheClient {
         }
     }
 
-    public static Mono<Boolean> cifsWrite(SMB2FileId smb2FileId, long offset, byte[] bytes, Inode inode, int flag, long allocationSize) {
+    public static Mono<Boolean> cifsWrite(SMB2FileId smb2FileId, long offset, byte[] bytes, Inode inode, int flag, SMB2FileId.FileInfo fileInfo) {
         return FSQuotaUtils.addQuotaDirInfo(inode, System.currentTimeMillis(), true)
                 .flatMap(i -> {
                     if (i.getLinkN() == CAP_QUOTA_EXCCED_INODE.getLinkN()) {
                         throw new NFSException(NFS3ERR_DQUOT, "can not write ,because of exceed quota.bucket:" + inode.getBucket() + ",objName:" + inode.getObjName() + ",nodeId:" + inode.getNodeId());
                     }
-                    if (flag != 0 || FLUSHING.get()) {
+                    if (flag != 0 || fileInfo.writeNum++ < writeNum || FLUSHING.get()) {
                         return directWrite(offset, bytes, i, false);
                     } else {
                         // bytes超过allocationSize的部分不写入缓存
-                        if (offset >= allocationSize) {
+                        if (offset >= fileInfo.allocationSize) {
                             return Mono.just(true);
                         } else {
                             byte[] writeBytes;
-                            if (offset + bytes.length > allocationSize) {
-                                int writeLen = (int) (allocationSize - offset);
+                            if (offset + bytes.length > fileInfo.allocationSize) {
+                                int writeLen = (int) (fileInfo.allocationSize - offset);
                                 writeBytes = new byte[writeLen];
                                 System.arraycopy(bytes, 0, writeBytes, 0, writeLen);
                             } else {

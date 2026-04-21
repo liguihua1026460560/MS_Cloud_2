@@ -350,6 +350,9 @@ public class AccountService extends BaseService {
         String validityTime = paramMap.getOrDefault("ValidityTime","");
         String validityGrade = paramMap.getOrDefault("ValidityGrade","0");
         String EndTimeSecond = paramMap.getOrDefault("EndTimeSecond","0");
+        String accountUid = paramMap.getOrDefault("AccountUid","");
+        String accountGid = paramMap.getOrDefault("AccountGid","");
+        String accountGids = paramMap.getOrDefault("AccountGids","");
         if ("".equals(validityGrade)) {
             validityGrade = "0";
         }
@@ -520,6 +523,20 @@ public class AccountService extends BaseService {
                     "The specified storage strategy does not exist.");
         }
 
+        //文件id校验
+        if (StringUtils.isNotEmpty(accountUid)) {
+            validateUidOrGid("accountUid", accountUid);
+        }
+        if (StringUtils.isNotEmpty(accountGid)) {
+            validateUidOrGid("accountGid", accountGid);
+        }
+        if (StringUtils.isNotEmpty(accountGids)) {
+            String[] accountGidsArray = accountGids.split(",");
+            for (String accountGidFromArray : accountGidsArray) {
+                validateUidOrGid("accountGids", accountGidFromArray);
+            }
+        }
+
         AccountInfoResponse accountInfoResponse = new AccountInfoResponse();
         for (int tryTime = 10; ; tryTime -= 1) {
             SocketReqMsg msg = buildUpdateAccountMsg(paramMap);
@@ -540,6 +557,8 @@ public class AccountService extends BaseService {
                 throw new MsException(ErrorNo.INCONSISTENT_STORAGE_STRATEGY, "The account storage strategy inconsistent.");
             } else if (code == ErrorNo.ACCESS_FORBIDDEN) {
                 throw new MsException(ErrorNo.ACCESS_FORBIDDEN, "only read ak.");
+            } else if (code == ErrorNo.ACCOUNT_UID_EXIST) {
+                throw new MsException(ErrorNo.ACCOUNT_UID_EXIST, "Account uid already exist.");
             }
             if (tryTime == 0) {
                 throw new MsException(ErrorNo.UNKNOWN_ERROR, "Update account failed.");
@@ -1050,6 +1069,19 @@ public class AccountService extends BaseService {
             } catch (Exception e) {
                 throw new MsException(ErrorNo.INVALID_ARGUMENT, "quota is invalid");
             }
+        }
+    }
+
+    private void validateUidOrGid(String paramName, String paramValue) {
+        try {
+            int value = Integer.parseInt(paramValue);
+            if (value < 0 || value > 65534) {
+                throw new MsException(ErrorNo.INVALID_ARGUMENT,
+                        paramName + " must be an integer between 0 and 65534, actual value: " + value);
+            }
+        } catch (Exception e) {
+            throw new MsException(ErrorNo.INVALID_ARGUMENT,
+                    paramName + " must be a valid integer, actual value: " + paramValue);
         }
     }
 }

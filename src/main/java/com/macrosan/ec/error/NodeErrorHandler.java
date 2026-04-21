@@ -43,6 +43,8 @@ import static com.macrosan.constants.ServerConstants.*;
 import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.database.rocksdb.MSRocksDB.*;
 import static com.macrosan.doubleActive.HeartBeatChecker.isMultiAliveStarted;
+import static com.macrosan.ec.error.DiskErrorHandler.initRocksDbAndBlockDevice;
+import static com.macrosan.ec.error.DiskErrorHandler.waitWriteDone;
 import static com.macrosan.ec.error.ErrorConstant.ECErrorType.*;
 import static com.macrosan.ec.migrate.Migrate.ADD_NODE_SCHEDULER;
 import static com.macrosan.ec.server.ErasureServer.CUR_NODE;
@@ -76,13 +78,9 @@ public class NodeErrorHandler {
                         List<String> disks = RedisConnPool.getInstance().getCommand(REDIS_LUNINFO_INDEX).keys(uuid + "@fs-SP0-*");
                         for (String disk : disks) {
                             ReBuildRunner.getInstance().rabbitMq.consumer(disk);
-                            // 初始化差异记录的rocksDB实例
-                            if (disk.contains("index") && uuid.equals(ServerConfig.getInstance().getHostUuid())) {
-                                MSRocksDB.getRocksDB(MSRocksDB.getSyncRecordLun(disk.split("@")[1]));
-                                MSRocksDB.getRocksDB(MSRocksDB.getComponentRecordLun(disk.split("@")[1]));
-                                MSRocksDB.getRocksDB(MSRocksDB.getSTSTokenLun(disk.split("@")[1]));
-                                MSRocksDB.getRocksDB(MSRocksDB.getRabbitmqRecordLun(disk.split("@")[1]));
-                                MSRocksDB.getRocksDB(MSRocksDB.getAggregateLun(disk.split("@")[1]));
+                            if (uuid.equals(ServerConfig.getInstance().getHostUuid())) {
+                                // 新节点 初始化磁盘和rocksdb实例
+                                initRocksDbAndBlockDevice(disk, null);
                             }
                         }
                         NodeCache.add(uuid);
@@ -305,6 +303,7 @@ public class NodeErrorHandler {
             return flux.publishOn(ADD_NODE_SCHEDULER).collectList()
                     .flatMap(l -> updateNode(pool, vnode, dstNode, dstDisk).map(b -> l))
                     .delayElement(Duration.ofSeconds(2))
+                    .flatMap(l -> waitWriteDone().map(b -> l))
                     .flatMapMany(l -> Flux.fromStream(l.stream()))
                     .flatMap(objVnode -> endMigrateVnode(objVnode, vnode, finalSrcDisk, dstDisk, dstNodeIp, finalMigrateMeta))
                     .collectList()
@@ -355,6 +354,7 @@ public class NodeErrorHandler {
         return flux.publishOn(ADD_NODE_SCHEDULER).collectList()
                 .flatMap(l -> updateNode(pool, vnode, dstNode, dstDisk).map(b -> l))
                 .delayElement(Duration.ofSeconds(2))
+                .flatMap(l -> waitWriteDone().map(b -> l))
                 .flatMapMany(l -> Flux.fromStream(l.stream()))
                 .flatMap(objVnode -> endMigrateVnode(objVnode, vnode, finalSrcDisk, dstDisk, dstNodeIp, finalMigrateMeta))
                 .collectList()

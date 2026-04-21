@@ -12,6 +12,8 @@ import com.macrosan.filesystem.ftp.FTPRequest;
 import com.macrosan.filesystem.ftp.Session;
 import com.macrosan.filesystem.lock.redlock.RedLockClient;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
+import com.macrosan.filesystem.nfs.NFSException;
+import com.macrosan.filesystem.utils.CheckUtils;
 import com.macrosan.filesystem.utils.FSQuotaUtils;
 import com.macrosan.filesystem.utils.FsTierUtils;
 import com.macrosan.filesystem.utils.InodeUtils;
@@ -420,10 +422,17 @@ public class FTPDataTransfer {
                         .flux();
             } else {
                 // 匿名用户列举所有开启匿名访问的桶
-                res = scanAnonymousBucketInfo()
-                        .flatMap(map -> nodeInstance.getInode(map.get("bucket_name"), 1L))
-                        .collectList()
-                        .flux();
+                res = CheckUtils.checkFtpAnonymousPrimarySwitch()
+                        .flatMapMany(enable -> {
+                            if (!enable) {
+                                throw new NFSException(FsConstants.NfsErrorNo.NFS3ERR_ACCES, "ftp anonymous not enable");
+                            }
+
+                            return scanAnonymousBucketInfo()
+                                    .flatMap(map -> nodeInstance.getInode(map.get("bucket_name"), 1L))
+                                    .collectList()
+                                    .flux();
+                        });
             }
         } else {
             Tuple2<String, String> tuple2 = session.getBucketAndObject("");
@@ -522,16 +531,24 @@ public class FTPDataTransfer {
                         });
             } else {
                 // 匿名用户列举所有开启匿名访问的桶
-                return scanAnonymousBucketInfo()
-                        .map(map -> {
-                            listing.append(map.get("bucket_name") + "\r\n");
-                            return true;
-                        }).collectList().flatMap(list -> {
-                            socket.write(listing.toString());
-                            socket.end();
+                return CheckUtils.checkFtpAnonymousPrimarySwitch()
+                        .flatMap(enable -> {
+                            if (!enable) {
+                                throw new NFSException(FsConstants.NfsErrorNo.NFS3ERR_ACCES, "ftp anonymous not enable");
+                            }
 
-                            return Mono.just(CLOSING_DATA_CONNECTION.reply());
+                            return scanAnonymousBucketInfo()
+                                    .map(map -> {
+                                        listing.append(map.get("bucket_name") + "\r\n");
+                                        return true;
+                                    }).collectList().flatMap(list -> {
+                                        socket.write(listing.toString());
+                                        socket.end();
+
+                                        return Mono.just(CLOSING_DATA_CONNECTION.reply());
+                                    });
                         });
+
             }
         } else {
             Tuple2<String, String> tuple2 = session.getBucketAndObject("");
@@ -628,15 +645,22 @@ public class FTPDataTransfer {
                     });
         } else {
             // 匿名用户列举所有开启匿名访问的桶
-            return scanAnonymousBucketInfo()
-                    .map(map -> {
-                        listing.append("Size=").append(0).append(";").append("Modify=").append(MsDateUtils.formatFTPTime(Long.parseLong(map.get("ctime")))).append(";").append("Type=").append("dir").append("; ").append(map.get("bucket_name")).append("\r\n");
-                        return true;
-                    }).collectList().flatMap(list -> {
-                        socket.write(listing.toString());
-                        socket.end();
+            return CheckUtils.checkFtpAnonymousPrimarySwitch()
+                    .flatMap(enable -> {
+                        if (!enable) {
+                            throw new NFSException(FsConstants.NfsErrorNo.NFS3ERR_ACCES, "ftp anonymous not enable");
+                        }
 
-                        return Mono.just(CLOSING_DATA_CONNECTION.reply());
+                        return scanAnonymousBucketInfo()
+                                .map(map -> {
+                                    listing.append("Size=").append(0).append(";").append("Modify=").append(MsDateUtils.formatFTPTime(Long.parseLong(map.get("ctime")))).append(";").append("Type=").append("dir").append("; ").append(map.get("bucket_name")).append("\r\n");
+                                    return true;
+                                }).collectList().flatMap(list -> {
+                                    socket.write(listing.toString());
+                                    socket.end();
+
+                                    return Mono.just(CLOSING_DATA_CONNECTION.reply());
+                                });
                     });
         }
     }

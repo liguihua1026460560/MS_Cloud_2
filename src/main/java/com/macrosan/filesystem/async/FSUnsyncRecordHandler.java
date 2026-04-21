@@ -21,6 +21,7 @@ import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 import reactor.util.concurrent.Queues;
 
+import java.io.File;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Comparator;
@@ -32,6 +33,7 @@ import java.util.stream.Collectors;
 import static com.macrosan.doubleActive.DataSynChecker.isDebug;
 import static com.macrosan.doubleActive.DataSynChecker.timeoutMinute;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
+import static com.macrosan.filesystem.async.AsyncUtils.ASYNC;
 import static com.macrosan.httpserver.MossHttpClient.INDEX_IPS_MAP;
 import static com.macrosan.message.jsonmsg.Inode.ERROR_INODE;
 import static com.macrosan.message.jsonmsg.Inode.NOT_FOUND_INODE;
@@ -49,7 +51,7 @@ public class FSUnsyncRecordHandler {
 //            return record.bucket + File.separator + record.object;
 //        }
 //        return record.bucket + File.separator + record.nodeId;
-        return record.bucket;
+        return record.bucket + File.separator + record.object;
     }
 
     public static Mono<Boolean> dealRecord(UnSynchronizedRecord record) {
@@ -61,7 +63,7 @@ public class FSUnsyncRecordHandler {
         String bucket = record.bucket;
         dataMap.put("bucket", bucket);
         dataMap.put("nodeId", String.valueOf(nodeId));
-        dataMap.put("async", "1");
+        dataMap.put(ASYNC, "1");
 
         int currentIndex = ThreadLocalRandom.current().nextInt(0, INDEX_IPS_MAP.get(clusterIndex).length);
         if (isDebug) {
@@ -230,7 +232,7 @@ public class FSUnsyncRecordHandler {
         ClientTemplate.ResponseInfo<String> responseInfo = ClientTemplate.multiResponse(publisher, String.class, nodeList, DA_RSOCKET_PORT);
 
         UnicastProcessor<Integer> processor = UnicastProcessor.create(Queues.<Integer>unboundedMultiproducer().get());
-        FileAysncSubscriber subscriber = new FileAysncSubscriber(map, data, publisher, processor);
+        FileAsyncSubscriber subscriber = new FileAsyncSubscriber(map, data, publisher, processor);
         responseInfo.responses
                 .timeout(Duration.ofSeconds(30))
                 .subscribe(s -> {
@@ -263,7 +265,7 @@ public class FSUnsyncRecordHandler {
         return res;
     }
 
-    static final class FileAysncSubscriber implements CoreSubscriber<Integer> {
+    static final class FileAsyncSubscriber implements CoreSubscriber<Integer> {
         Subscription s;
         UnicastProcessor<Integer> processor;
         Map<String, String> map;
@@ -273,7 +275,7 @@ public class FSUnsyncRecordHandler {
         int position = 0;
         int chunkSize = CHUNK_SIZE;
 
-        FileAysncSubscriber(Map<String, String> map, byte[] data, List<UnicastProcessor<Payload>> publisher, UnicastProcessor<Integer> processor) {
+        FileAsyncSubscriber(Map<String, String> map, byte[] data, List<UnicastProcessor<Payload>> publisher, UnicastProcessor<Integer> processor) {
             this.map = map;
             this.data = data;
             this.publisher = publisher;

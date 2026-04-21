@@ -50,6 +50,7 @@ import static com.macrosan.httpserver.ResponseUtils.*;
 import static com.macrosan.message.jsonmsg.MetaData.ERROR_META;
 import static com.macrosan.message.jsonmsg.MetaData.NOT_FOUND_META;
 import static com.macrosan.utils.msutils.MsAclUtils.getAclNum;
+import static com.macrosan.utils.regex.PatternConst.OBJECT_NAME_PATTERN;
 import static com.macrosan.utils.regex.PatternConst.TAG_PATTERN;
 
 /**
@@ -160,6 +161,40 @@ public class BaseService {
         Map<String, String> bucketInfo = getBucketMapByName(bucketName);
         if (consumer != null) {
             consumer.apply(bucketInfo, userId, bucketName);
+        }
+    }
+
+    /**
+     * 检查对象名字是否符合要求
+     *
+     * @param name 对象名字
+     */
+    protected void checkObjectName(String name) {
+        if (!OBJECT_NAME_PATTERN.matcher(name).matches()) {
+            throw new MsException(ErrorNo.NAME_INPUT_ERR, "name is invalid");
+        }
+
+        if (name.getBytes(StandardCharsets.UTF_8).length > 1024) {
+            throw new MsException(ErrorNo.NAME_INPUT_ERR, "name is invalid");
+        }
+    }
+
+    /**
+     * 上传之前的桶配额和账户配额检查
+     *
+     * @param bucketInfo        桶信息
+     * @param accountQuotaFlag  账户容量配额标志
+     * @param accountObjNumFlag 账户对象数配额标志
+     */
+    protected void quotaCheck(Map<String, String> bucketInfo, String accountQuotaFlag, String accountObjNumFlag) {
+        if ("1".equals(bucketInfo.get(QUOTA_FLAG))) {
+            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the bucket quota.");
+        } else if ("1".equals(bucketInfo.get(OBJNUM_FLAG))) {
+            throw new MsException(NO_ENOUGH_OBJECTS, "The bucket hard-max-objects was exceeded.");
+        } else if ("2".equals(accountQuotaFlag)) {
+            throw new MsException(NO_ENOUGH_SPACE, "No Enough Space Because of the account quota.");
+        } else if ("2".equals(accountObjNumFlag)) {
+            throw new MsException(NO_ENOUGH_OBJECTS, "The account hard-max-objects was exceeded.");
         }
     }
 

@@ -3,6 +3,7 @@ package com.macrosan.filesystem.cache;
 import com.macrosan.ec.server.ErasureServer;
 import com.macrosan.ec.server.ErasureServer.PayloadMetaType;
 import com.macrosan.ec.server.WriteCacheServer;
+import com.macrosan.filesystem.async.AsyncUtils;
 import com.macrosan.filesystem.nfs.NFSBucketInfo;
 import com.macrosan.filesystem.nfs.NFSException;
 import com.macrosan.filesystem.nfs.types.ObjAttr;
@@ -45,6 +46,7 @@ import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.ec.server.ErasureServer.PayloadMetaType.*;
 import static com.macrosan.filesystem.FsConstants.NFSACLType.NFS_ACE;
 import static com.macrosan.filesystem.FsConstants.NfsErrorNo.NFS3ERR_DQUOT;
+import static com.macrosan.filesystem.async.AsyncUtils.ASYNC;
 import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_KEY;
 import static com.macrosan.message.jsonmsg.ChunkFile.ERROR_CHUNK;
 import static com.macrosan.message.jsonmsg.ChunkFile.NOT_FOUND_CHUNK;
@@ -131,13 +133,13 @@ public class Node {
                 });
     }
 
-    public Mono<Inode> updateInodeData(String bucket, long nodeId, long fileOffset, InodeData inodeData, String versionNum) {
-        return updateInodeData(bucket, nodeId, fileOffset, inodeData, versionNum, "", 0, "");
+    public Mono<Inode> updateInodeData1(String bucket, long nodeId, long fileOffset, InodeData inodeData, String versionNum, String objectName) {
+        return updateInodeData(bucket, nodeId, fileOffset, inodeData, versionNum, "", 0, "", objectName);
     }
 
-    public Mono<Inode> updateInodeData(String bucket, long nodeId, long fileOffset, InodeData inodeData, String versionNum,
+    public Mono<Inode> updateInodeData2(String bucket, long nodeId, long fileOffset, InodeData inodeData, String versionNum,
                                        String oldInodeData) {
-        return updateInodeData(bucket, nodeId, fileOffset, inodeData, versionNum, oldInodeData, 0, "");
+        return updateInodeData(bucket, nodeId, fileOffset, inodeData, versionNum, oldInodeData, 0, "", "");
     }
 
 
@@ -145,7 +147,7 @@ public class Node {
      * 原子更新updateInodeData，向rsocket server发送1操作，server处理对应方法INODE_CACHE_OPT
      */
     public Mono<Inode> updateInodeData(String bucket, long nodeId, long fileOffset, InodeData inodeData, String versionNum,
-                                       String oldInodeData, int updateTime, String quotaDir) {
+                                       String oldInodeData, int updateTime, String quotaDir, String objectName) {
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("opt", "1")
                 .put("bucket", bucket)
@@ -155,7 +157,10 @@ public class Node {
                 .put("versionNum", versionNum)
                 .put("oldInodeData", oldInodeData)
                 .put(QUOTA_KEY, quotaDir)
-                .put("updateTime", String.valueOf(updateTime));
+                .put("updateTime", String.valueOf(updateTime))
+                // 文件复制中作为并发处理差异记录的依据。
+                .put("objName", objectName);
+
         MonoProcessor<Inode> res = MonoProcessor.create();
 
         exec(nodeId, msg, 0, res);
@@ -461,7 +466,8 @@ public class Node {
                 .put("nodeId", String.valueOf(nodeId))
                 .put("version", version)
                 .put("s3Account", s3Account)
-                .put("displayName", displayName);
+                .put("displayName", displayName)
+                .put("objName", inode.getObjName());
         MonoProcessor<Inode> res = MonoProcessor.create();
         exec(nodeId, msg, 0, res);
         return res;
@@ -596,7 +602,10 @@ public class Node {
 
         Vnode vnode = getInodeV(nodeId);
         String masterNode = vnode.state.masterNode;
-
+        int opt = Integer.parseInt(msg.get("opt"));
+        if (AsyncUtils.checkOptForAsync(opt, msg)) {
+            msg.put(ASYNC, "0");
+        }
         if (masterNode == null) {
             if (retry < MAX_RETRY_NUM) {
                 ErasureServer.DISK_SCHEDULER.schedule(() -> exec(nodeId, msg, retry + 1, res), (long) (retry + 1) * RETRY_TIME_OUT, TimeUnit.MILLISECONDS);

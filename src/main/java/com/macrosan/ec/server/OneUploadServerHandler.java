@@ -1,19 +1,26 @@
 package com.macrosan.ec.server;
 
+import com.macrosan.constants.ErrorNo;
 import com.macrosan.database.rocksdb.batch.BatchRocksDB;
 import com.macrosan.fs.Allocator.Result;
+import com.macrosan.fs.BlockDevice;
 import com.macrosan.message.jsonmsg.FileMeta;
+import com.macrosan.rsocket.data.DataServer;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
 import com.macrosan.storage.compressor.CompressorUtils;
 import com.macrosan.storage.crypto.CryptoUtils;
 import com.macrosan.storage.crypto.rootKey.RootSecretKeyUtils;
 import com.macrosan.utils.functional.Tuple2;
+import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.ratelimiter.RecoverLimiter;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.rsocket.Payload;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import reactor.core.publisher.MonoProcessor;
 import reactor.core.publisher.UnicastProcessor;
 
 import java.util.concurrent.atomic.AtomicReference;
@@ -24,22 +31,35 @@ import static com.macrosan.storage.move.CacheMove.isEnableCacheAccessTimeFlush;
 
 @Log4j2
 public class OneUploadServerHandler extends AioUploadServerHandler {
-    OneUploadServerHandler(UnicastProcessor<Payload> responseFlux, boolean local) {
+    public OneUploadServerHandler(UnicastProcessor<Payload> responseFlux, boolean local) {
         super(responseFlux, local);
     }
 
     public void complete(byte[] bs) {
+        complete(Unpooled.wrappedBuffer(bs), null);
+    }
+
+    public void complete(ByteBuf buf, MonoProcessor<ByteBuf> processor) {
         try {
-            fileSize = bs.length;
-            checksumProvider.update(bs);
+            if (CompressorUtils.checkCompressEnable(compression) || CryptoUtils.checkCryptoEnable(crypto)) {
+                if (buf.isDirect()) {
+                    byte[] bytes = new byte[buf.readableBytes()];
+                    buf.readBytes(bytes);
+                    buf.release();
+                    buf = Unpooled.wrappedBuffer(bytes);
+                }
+            }
+            int size = buf.readableBytes();
+            fileSize = size;
+            checksumProvider.update(buf);
 
             AtomicReference<CompressionInfo> compressionInfo = new AtomicReference<>();
-            long beforeLen = bs.length % 4096 == 0 ? bs.length : (bs.length / 4096 * 4096 + 4096);
+            long beforeLen = size % 4096 == 0 ? size : (size / 4096 * 4096 + 4096);
             beforeCompressionLen += beforeLen;
-            bs = dealCompressionBeforeWrite(bs, compressionInfo);
+            buf = dealCompressionBeforeWrite(buf, compressionInfo);
 
             AtomicReference<CryptoInfo> cryptoInfo0 = new AtomicReference<>();
-            bs = dealCryptoBeforeWrite(bs, cryptoInfo0);
+            buf = dealCryptoBeforeWrite(buf, cryptoInfo0);
 
             String checksum = checksumProvider.getChecksum();
             checksumProvider.release();
@@ -48,11 +68,15 @@ public class OneUploadServerHandler extends AioUploadServerHandler {
                     .setSize(fileSize);
 
             String fileMetaKey = FileMeta.getKey(fileName);
+            BlockDevice device = get(lun);
+            if (null == device) {
+                isNullDevice = true;
+                throw new MsException(ErrorNo.UNKNOWN_ERROR, "get " + lun + " rocks db fail");
+            }
 
-            byte[] finalBytes = bs;
-
+            ByteBuf finalBuf = buf;
             BatchRocksDB.RequestConsumer consumer = (db, writeBatch, request) -> {
-                Result[] hookRes = writeBatch.hookData(finalBytes);
+                Result[] hookRes = writeBatch.hookData(finalBuf);
                 Result[] res = hookRes;
 
                 long[] offset = new long[res.length];
@@ -140,16 +164,24 @@ public class OneUploadServerHandler extends AioUploadServerHandler {
             };
 
             //写入FileMeta
-            RecoverLimiter.getInstance().acquireData(lun, finalBytes.length, recover)
+            RecoverLimiter.getInstance().acquireData(lun, size, recover)
                     .flatMap(b -> BatchRocksDB.customizeOperateData(lun, fileMetaKey.hashCode(), consumer))
                     .doOnError(e -> {
 //                            log.error("", e);
-                        responseFlux.onNext(ERROR_PAYLOAD);
-                        responseFlux.onComplete();
+                        if (processor == null) {
+                            responseFlux.onNext(ERROR_PAYLOAD);
+                            responseFlux.onComplete();
+                        } else {
+                            processor.onNext(DataServer.ERROR.retainedSlice());
+                        }
                     })
                     .subscribe(s -> {
-                        responseFlux.onNext(SUCCESS_PAYLOAD);
-                        responseFlux.onComplete();
+                        if (processor == null) {
+                            responseFlux.onNext(SUCCESS_PAYLOAD);
+                            responseFlux.onComplete();
+                        } else {
+                            processor.onNext(DataServer.SUCCESS.retainedSlice());
+                        }
                     });
         } catch (Exception e) {
             log.error("", e);

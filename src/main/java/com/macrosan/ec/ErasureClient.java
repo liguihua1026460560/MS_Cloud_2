@@ -127,16 +127,27 @@ public class ErasureClient {
         String bucketVnode = StoragePoolFactory.getMetaStoragePool(meta.bucket).getBucketVnodeId(meta.bucket, meta.key);
         String versionMetaKey = Utils.getVersionMetaDataKey(bucketVnode, meta.bucket, meta.key, meta.versionId, meta.snapshotMark);
         SocketReqMsg msg = new SocketReqMsg("", 0)
-                .put("metaKey", versionMetaKey)
                 .put("noGet", "1")
                 .put("compression", storagePool.getCompression())
-                .put("fileName", meta.fileName);
+                .put("fileName", meta.fileName)
+                .put("bucket", meta.bucket)
+                .put("object", meta.key)
+                .put("versionId", meta.versionId)
+                .put("storage", storagePool.getVnodePrefix());
+        Optional.ofNullable(meta.snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
+
+
+        // 非post请求，需要传递metaKey
+        if (request.method() != HttpMethod.POST) {
+            msg.put("metaKey", versionMetaKey);
+        }
+
         // 判断是否开启缓冲池 按序下刷
         if (isEnableCacheOrderFlush(storagePool)) {
             msg.put("flushStamp", meta.stamp);
         }
 
-        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", meta.lastAccessStamp, isEnableCacheAccessTimeFlush(storagePool));
+//        log.debug("lastAccessStamp:{}, isEnableCacheAccessTimeFlush:{}", meta.lastAccessStamp, isEnableCacheAccessTimeFlush(storagePool));
         if (isEnableCacheAccessTimeFlush(storagePool) && StringUtils.isNotEmpty(meta.lastAccessStamp)) {//这里应该要和上面按上传时间下刷的配置互斥
             msg.put("lastAccessStamp", meta.lastAccessStamp);
         }
@@ -3122,7 +3133,13 @@ public class ErasureClient {
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", newFileName)
                 .put("metaKey", metaKey)
-                .put("compression", targetPool.getCompression());
+                .put("compression", targetPool.getCompression())
+                .put("bucket", targetMeta.bucket)
+                .put("object", targetMeta.key)
+                .put("versionId", targetMeta.versionId)
+                .put("storage", targetPool.getVnodePrefix())
+                .put("fileSize", String.valueOf(sourceMeta.getEndIndex() - sourceMeta.getStartIndex()));
+        Optional.ofNullable(targetMeta.snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
         if (isEnableCacheOrderFlush(targetPool)) {
             msg.put("flushStamp", targetMeta.getStamp());
         }
@@ -3236,7 +3253,7 @@ public class ErasureClient {
         List<Disposable> disposables = new ArrayList<>();
         AtomicInteger successNum = new AtomicInteger(0);
         AtomicInteger totalNum = new AtomicInteger(partInfos.length);
-
+        Queue<String> needDelete = new LinkedList<>();
         AtomicLong fileOffset = new AtomicLong(0);
         Flux.fromArray(partInfos)
                 .publishOn(DISK_SCHEDULER)
@@ -3250,6 +3267,7 @@ public class ErasureClient {
                     }
                     String partName = Utils.getPartFileName(targetPool, targetMeta.getBucket(), targetMeta.getKey(), targetMeta.getPartUploadId(), String.valueOf(partInfo.getPartNum()),
                             RequestBuilder.getRequestId());
+                    needDelete.add(partName);
                     List<Tuple3<String, String, String>> sourceNodeList = finalStoragePool.mapToNodeInfo(finalStoragePool.getObjectVnodeId(partInfo.getFileName())).block();
                     String newObjectVnodeId = targetPool.getObjectVnodeId(partName);
                     List<Tuple3<String, String, String>> targetNodeList = targetPool.mapToNodeInfo(newObjectVnodeId).block();
@@ -3294,10 +3312,18 @@ public class ErasureClient {
                                 ecEncodeHandler.put(bytes);
                             }, e -> log.error("", e));
 
+                    PartInfo partInfo1 = targetMeta.getPartInfos()[index.intValue()].setFileName(partName);
                     SocketReqMsg msg = new SocketReqMsg("", 0)
                             .put("fileName", partName)
                             .put("compression", targetPool.getCompression())
-                            .put("metaKey", metaKey);
+                            .put("metaKey", metaKey)
+                            .put("bucket", partInfo1.bucket)
+                            .put("object", partInfo1.object)
+                            .put("versionId", partInfo1.versionId)
+                            .put("uploadId", partInfo1.uploadId)
+                            .put("partNum", partInfo1.partNum)
+                            .put("storage", targetPool.getVnodePrefix())
+                            .put("endIndex", String.valueOf(partInfo1.partSize - 1));
 
                     if (targetPool.getVnodePrefix().startsWith("cache")) {
                         msg.put("fileOffset", String.valueOf(fileOffset.getAndAdd(partInfo.getPartSize())));
@@ -3413,13 +3439,18 @@ public class ErasureClient {
                 for (Disposable disposable : disposables) {
                     disposable.dispose();
                 }
+                deleteSucParts(needDelete, targetPool);
             });
         } catch (Exception e) {
             log.error("", e);
             res.onNext(false);
         }
 
-        return res;
+        return res.doOnNext(b ->{
+            if (!b){
+                deleteSucParts(needDelete, targetPool);
+            }
+        });
     }
 
 
@@ -3433,7 +3464,7 @@ public class ErasureClient {
         List<Disposable> disposables = new ArrayList<>();
         AtomicInteger successNum = new AtomicInteger(0);
         AtomicInteger totalNum = new AtomicInteger(partInfos.length);
-
+        Queue<String> needDelete = new LinkedList<>();
         AtomicLong fileOffset = new AtomicLong(0);
         Flux.fromArray(partInfos)
                 .publishOn(DISK_SCHEDULER)
@@ -3448,6 +3479,7 @@ public class ErasureClient {
                     AtomicLong putBytesLen = new AtomicLong();
                     String partName = Utils.getPartFileName(targetPool, targetMeta.getBucket(), targetMeta.getKey(), targetMeta.getPartUploadId(), String.valueOf(partInfo.getPartNum()),
                             RequestBuilder.getRequestId());
+                    needDelete.add(partName);
                     String tempFileName = partInfo.fileName;
                     if (StringUtils.isBlank(tempFileName)) {
                         StorageOperate operate = new StorageOperate(StorageOperate.PoolType.DATA, "", Long.MAX_VALUE);
@@ -3497,10 +3529,18 @@ public class ErasureClient {
                                 ecEncodeHandler.put(bytes);
                             }, e -> log.error("", e));
 
+                    PartInfo partInfo1 = targetMeta.getPartInfos()[index.intValue()].setFileName(partName);
                     SocketReqMsg msg = new SocketReqMsg("", 0)
                             .put("fileName", partName)
                             .put("compression", targetPool.getCompression())
-                            .put("metaKey", metaKey);
+                            .put("metaKey", metaKey)
+                            .put("bucket", partInfo1.bucket)
+                            .put("object", partInfo1.object)
+                            .put("versionId", partInfo1.versionId)
+                            .put("uploadId", partInfo1.uploadId)
+                            .put("partNum", partInfo1.partNum)
+                            .put("storage", targetPool.getVnodePrefix())
+                            .put("endIndex", String.valueOf(partInfo1.partSize - 1));
 
                     if (targetPool.getVnodePrefix().startsWith("cache")) {
                         msg.put("fileOffset", String.valueOf(fileOffset.getAndAdd(partInfo.getPartSize())));
@@ -3620,13 +3660,36 @@ public class ErasureClient {
                 for (Disposable disposable : disposables) {
                     disposable.dispose();
                 }
+                deleteSucParts(needDelete, targetPool);
             });
         } catch (Exception e) {
             log.error("", e);
             res.onNext(false);
         }
 
-        return res;
+        return res.doOnNext(b ->{
+            if (!b){
+                deleteSucParts(needDelete, targetPool);
+            }
+        });
+    }
+
+    public static void deleteSucParts(Queue<String> needDelete, StoragePool targetPool){
+        if (!needDelete.isEmpty()){
+            try {
+                String poolQueueTag = StoragePoolFactory.getPoolNameByPrefix(targetPool.getVnodePrefix());
+                String newObjectVnodeId = targetPool.getObjectVnodeId(needDelete.peek());
+                List<Tuple3<String, String, String>> targetNodeList = targetPool.mapToNodeInfo(newObjectVnodeId).block();
+                SocketReqMsg errorMsg = new SocketReqMsg("", 0);
+                errorMsg.put("fileName", Json.encode(needDelete.toArray(new String[0])))
+                        .put("storage", targetPool.getVnodePrefix())
+                        .put("poolQueueTag", poolQueueTag)
+                        .put("lun", targetNodeList.get(0).var2);
+                ObjectPublisher.publish(CURRENT_IP, errorMsg, ERROR_DELETE_OBJECT_FILE);
+            }catch (Exception e){
+                log.error("",e);
+            }
+        }
     }
 
     private static Mono<Boolean> processFilePartCopyToSingle(StoragePool sourcePool, StoragePool targetPool,
@@ -3702,7 +3765,13 @@ public class ErasureClient {
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", newFileName)
                 .put("metaKey", metaKey)
-                .put("compression", targetPool.getCompression());
+                .put("compression", targetPool.getCompression())
+                .put("bucket", targetMeta.bucket)
+                .put("object", targetMeta.key)
+                .put("versionId", targetMeta.versionId)
+                .put("storage", targetPool.getVnodePrefix())
+                .put("fileSize", String.valueOf(sourceMeta.getEndIndex()));
+        Optional.ofNullable(targetMeta.snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
         if (isEnableCacheOrderFlush(targetPool)) {
             msg.put("flushStamp", targetMeta.getStamp());
         }

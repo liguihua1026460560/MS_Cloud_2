@@ -561,6 +561,8 @@ public class BucketService extends BaseService {
             deleteBucketGrantAcl(bucketName);
             //移除user_bucket列表
             pool.getShortMasterCommand(REDIS_USERINFO_INDEX).srem(userId + USER_BUCKET_SET_SUFFIX, bucketName);
+            // 删除dicom压缩开关key
+            pool.getShortMasterCommand(REDIS_POOL_INDEX).del(DICOM_COMPRESS_BUCKET_KEY_PREFIX + bucketName);
             //删除桶后,删去桶的占用容量的结果
             StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucketName);
 
@@ -700,6 +702,15 @@ public class BucketService extends BaseService {
             JSONArray esArray = JSONArray.parseArray(Optional.ofNullable(pool.getCommand(REDIS_POOL_INDEX).hget(strategy, "es")).orElse("[]"));
             if (esArray.size() == 0) {
                 throw new MsException(NO_SUPPORT_METADATA_SEARCH, "The bucket does not support metadata search.");
+            }
+            // 判断桶是否开启文件复制
+            boolean nfsOpen = "1".equals(bucketInfo.get("nfs"));
+            boolean cifsOpen = "1".equals(bucketInfo.get("cifs"));
+            boolean ftpOpen = "1".equals(bucketInfo.get("ftp"));
+            boolean startFS = nfsOpen || cifsOpen || ftpOpen;
+            if ("on".equals(bucketInfo.get(DATA_SYNC_SWITCH)) && startFS) {
+                throw new MsException(NFS_CONFLICT,
+                        "metadata search and fs data synchronization conflicts, bucket_name: " + bucketName + ".");
             }
         }
 
@@ -1414,6 +1425,14 @@ public class BucketService extends BaseService {
 
         final String syncSwitch = bucketMap.get(DATA_SYNC_SWITCH);
         if ("on".equals(syncSwitch)) {
+            if ((nfsOpen || cifsOpen || ftpOpen) && ("on".equals(bucketMap.get("mda")))) {
+                throw new MsException(NFS_CONFLICT,
+                        "createBucket failed, metadata search and fs data synchronization conflicts, bucket_name: " + bucketName + ".");
+            }
+            if (ftpOpen) {
+                throw new MsException(NFS_CONFLICT,
+                        "createBucket failed, ftp and data synchronization conflicts, bucket_name: " + bucketName + ".");
+            }
             if (StringUtils.isNotBlank(ak) && StringUtils.isNotBlank(sk)) {
                 bucketMap.put("server_ak", ak);
                 bucketMap.put("server_sk", sk);
@@ -2760,6 +2779,66 @@ public class BucketService extends BaseService {
             pool.getShortMasterCommand(REDIS_SYSINFO_INDEX).hdel(BUCKET_TAG_KEY, bucketName);
         }
         return new ResponseMsg().setHttpCode(204);
+    }
+
+    /**
+     * dicom压缩开关
+     *
+     * @param paramMap 请求参数(on or off)
+     * @return 结果
+     */
+    public ResponseMsg putDicomCompressSwitch(UnifiedMap<String, String> paramMap) {
+        String userId = paramMap.get(USER_ID);
+        String bucketName = paramMap.get(BUCKET_NAME);
+        Map<String, String> bucketInfo = getBucketMapByName(bucketName);
+        String switchAction = paramMap.get(DICOM_COMPRESS_SWITCH);
+
+        // 判断用户是否拥有权限或者是否为桶的所有者
+        String method = "PutDicomCompressSwitch";
+        int policyResult = PolicyCheckUtils.getPolicyResult(paramMap, bucketName, userId, method);
+        if (policyResult == 0) {
+            userCheck(userId, bucketInfo.get(BUCKET_USER_ID));
+        }
+
+        //检查桶是否存在
+        if (bucketInfo.isEmpty()) {
+            throw new MsException(NO_SUCH_BUCKET, "no such bucket: " + bucketName);
+        }
+
+        if ("on".equals(switchAction)) {
+            pool.getShortMasterCommand(REDIS_POOL_INDEX).set(DICOM_COMPRESS_BUCKET_KEY_PREFIX + bucketName, "");
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "dicom_compress", "on");
+        } else if ("off".equals(switchAction)) {
+            pool.getShortMasterCommand(REDIS_POOL_INDEX).del(DICOM_COMPRESS_BUCKET_KEY_PREFIX + bucketName);
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "dicom_compress", "off");
+        } else {
+            throw new MsException(INVALID_ARGUMENT, "switch parameter input error.");
+        }
+
+        return new ResponseMsg();
+    }
+
+
+    /**
+     * 获取dicom压缩开关
+     *
+     * @param paramMap 请求参数
+     * @return on or off
+     */
+    public ResponseMsg getDicomCompressSwitch(UnifiedMap<String, String> paramMap) {
+        String userId = paramMap.get(USER_ID);
+        String bucketName = paramMap.get(BUCKET_NAME);
+        Map<String, String> bucketInfo = pool.getCommand(REDIS_BUCKETINFO_INDEX).hgetall(bucketName);
+        if (bucketInfo.isEmpty()) {
+            throw new MsException(NO_SUCH_BUCKET, "no such bucket. bucket_name: " + bucketName);
+        }
+        String method = "GetDicomCompressSwitch";
+        int policyResult = PolicyCheckUtils.getPolicyResult(paramMap, bucketName, userId, method);
+        if (policyResult == 0) {
+            MsAclUtils.checkReadAcl(bucketInfo, userId, bucketName);
+        }
+        String value = Optional.ofNullable(bucketInfo.get("dicom_compress")).orElse("off");
+        return new ResponseMsg().addHeader(DICOM_COMPRESS_SWITCH, value);
     }
 
 }

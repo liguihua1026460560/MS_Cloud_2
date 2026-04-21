@@ -42,8 +42,7 @@ import java.util.stream.Collectors;
 import static com.macrosan.component.ComponentStarter.*;
 import static com.macrosan.component.pojo.ComponentRecord.ERROR_COMPONENT_RECORD;
 import static com.macrosan.component.pojo.ComponentRecord.NOT_FOUND_COMPONENT_RECORD;
-import static com.macrosan.component.pojo.ComponentRecord.Type.IMAGE;
-import static com.macrosan.component.pojo.ComponentRecord.Type.VIDEO;
+import static com.macrosan.component.pojo.ComponentRecord.Type.*;
 import static com.macrosan.constants.ServerConstants.AUTHORIZATION;
 import static com.macrosan.constants.ServerConstants.COMPONENT_RECORD_INNER_MARKER;
 import static com.macrosan.constants.SysConstants.ROCKS_COMPONENT_IMAGE_KEY;
@@ -73,6 +72,8 @@ public class ComponentUtils {
      * 存放视频处理记录的map  k为getMapKey()方法获取  v为一个元组，第一个为时间戳，第二个为记录
      */
     public static final Map<String, Tuple2<Long, ComponentRecord>> checkVideoRecordMap = new ConcurrentHashMap<>();
+
+    public static final Map<String, Tuple2<Long, ComponentRecord>> checkDicomRecordMap = new ConcurrentHashMap<>();
 
     // 记录过期时间 10分钟
     public static final Long RECORD_EXPIRE_TIME = 1000 * 60 * 15L;
@@ -136,6 +137,8 @@ public class ComponentUtils {
     public static boolean startRecordOperation(ComponentRecord record) {
         if (record.taskMarker.startsWith(COMPONENT_RECORD_INNER_MARKER) && VIDEO.equals(record.strategy.getType())) {
             return checkVideoRecordMap.putIfAbsent(getMapKey(record), new Tuple2<>(System.currentTimeMillis(), record)) == null;
+        } else if (DICOM.equals(record.strategy.getType())) {
+            return checkDicomRecordMap.putIfAbsent(getMapKey(record), new Tuple2<>(System.currentTimeMillis(), record)) == null;
         } else {
             return checkRecordMap.putIfAbsent(getMapKey(record), new Tuple2<>(System.currentTimeMillis(), record)) == null;
         }
@@ -147,6 +150,8 @@ public class ComponentUtils {
     public static void endRecordOperation(ComponentRecord record) {
         if (record.taskMarker.startsWith(COMPONENT_RECORD_INNER_MARKER) && VIDEO.equals(record.strategy.getType())) {
             checkVideoRecordMap.remove(getMapKey(record));
+        } else if (DICOM.equals(record.strategy.getType())) {
+            checkDicomRecordMap.remove(getMapKey(record));
         } else {
             checkRecordMap.remove(getMapKey(record));
         }

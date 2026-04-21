@@ -1423,7 +1423,7 @@ public class FSQuotaUtils {
             return Mono.empty();
         }
 
-        return FsUtils.lookup(bucketName, parentDir.toString(), null, false, false, -1, null);
+        return FsUtils.lookup(bucketName, parentDir.toString(), null, false, -1, null);
     }
 
     private static Flux<reactor.util.function.Tuple2<FSQuotaConfig, Long>> findMinimumDirQuota(String bucketName, long startDirInodeId) {

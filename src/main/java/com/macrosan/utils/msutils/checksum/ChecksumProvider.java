@@ -1,8 +1,10 @@
 package com.macrosan.utils.msutils.checksum;
 
 import com.macrosan.utils.cache.Md5DigestPool;
+import io.netty.buffer.ByteBuf;
 import org.apache.commons.codec.binary.Hex;
 
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.zip.CRC32;
 
@@ -12,6 +14,7 @@ import java.util.zip.CRC32;
 public class ChecksumProvider {
     private static final String CHECKSUM_METHOD;
     private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
+
     static {
         String method = System.getProperty("checksum.method", "crc32");
         if (!"crc32".equals(method) && !"md5".equals(method)) {
@@ -57,6 +60,10 @@ public class ChecksumProvider {
         strategy.update(data, 0, data.length);
     }
 
+    public void update(ByteBuf data) {
+        strategy.update(data);
+    }
+
     public void update(byte[] data, int offset, int length) {
         strategy.update(data, offset, length);
     }
@@ -80,6 +87,8 @@ public class ChecksumProvider {
         String getChecksum();
 
         void release();
+
+        void update(ByteBuf data);
     }
 
 
@@ -105,6 +114,10 @@ public class ChecksumProvider {
         public String getChecksum() {
             return Hex.encodeHexString(digest.digest());
         }
+
+        public void update(ByteBuf data) {
+            digest.update(data.nioBuffer());
+        }
     }
 
 
@@ -124,6 +137,12 @@ public class ChecksumProvider {
 
         @Override
         public void release() {
+        }
+
+        public void update(ByteBuf data) {
+            for (ByteBuffer buffer : data.nioBuffers()) {
+                crc.update(buffer);
+            }
         }
     }
 

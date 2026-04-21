@@ -313,7 +313,9 @@ public class ErasureServer extends AbstractRSocket {
         FILE_ASYNC,
         START_FILE_ASYNC_CHANNEL,
         PUT_FILE_ASYNC_CHANNEL,
-        SEND_DICOM_RECORD
+        SEND_DICOM_RECORD,
+        COUNT_BUCKET_DICOM_RECORD,
+        CHECK_FILE_EXISTS
     }
 
     @Override
@@ -679,6 +681,10 @@ public class ErasureServer extends AbstractRSocket {
                                     return FSResponseServerHandler.fileAsyncReqRes(payload);
                                 case SEND_DICOM_RECORD:
                                     return ImageCompressionProcessor.getInstance().compressImage(payload);
+                                case COUNT_BUCKET_DICOM_RECORD:
+                                    return RequestResponseServerHandler.countBucketDicomRecord(payload);
+                                case CHECK_FILE_EXISTS:
+                                    return RequestResponseServerHandler.checkFileExists(payload);
                                 case ERROR:
                                 default:
                                     log.info("no such payload meta type:{}", metaType);
@@ -914,7 +920,7 @@ public class ErasureServer extends AbstractRSocket {
                 request = newRequest(msg, bytes);
             }
             //初始化request后再处理双写
-            request = MigrateServer.getInstance().putChannel(lun, fileName, request);
+            request = MigrateServer.getInstance().putChannel(lun, fileName, request, msg);
         } else if (request != null) {
             long curId = id.incrementAndGet();
             runningMap.put(curId, 0L);

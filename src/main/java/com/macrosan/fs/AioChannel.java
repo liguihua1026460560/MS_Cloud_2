@@ -7,6 +7,7 @@ import com.macrosan.utils.msutils.MsException;
 import com.macrosan.utils.msutils.MsExecutor;
 import com.macrosan.utils.msutils.MsThreadFactory;
 import com.macrosan.utils.msutils.UnsafeUtils;
+import io.netty.buffer.ByteBuf;
 import lombok.extern.log4j.Log4j2;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -15,6 +16,8 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import sun.misc.Unsafe;
 
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadFactory;
@@ -22,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.macrosan.constants.ServerConstants.PROC_NUM;
 import static com.macrosan.ec.server.ErasureServer.DISK_SCHEDULER;
+import static com.macrosan.utils.msutils.UnsafeUtils.unsafe;
 
 /**
  * @author gaozhiyuan
@@ -54,6 +58,11 @@ public class AioChannel {
 
     private final static ThreadFactory AIO_THREAD_FACTORY = new MsThreadFactory("aio");
     public static final Scheduler AIO_SCHEDULER;
+    public static long addrOffset;
+
+    public static long getBufferAddress(ByteBuffer buffer) {
+        return unsafe.getLong(buffer, AioChannel.addrOffset) + buffer.position();
+    }
 
     static {
         Scheduler scheduler = null;
@@ -65,6 +74,10 @@ public class AioChannel {
                 executor = new MsExecutor(PROC_NUM, 8, AIO_THREAD_FACTORY);
             }
             scheduler = Schedulers.fromExecutor(executor);
+
+            Class ByteBuffer = Class.forName("java.nio.Buffer");
+            Field field = ByteBuffer.getDeclaredField("address");
+            addrOffset = UnsafeUtils.unsafe.objectFieldOffset(field);
         } catch (Exception e) {
             log.error("", e);
         }
@@ -144,6 +157,70 @@ public class AioChannel {
         //申请到的逻辑空间，每一个元素都是一个逻辑空间块
         Result[] allocRes = device.alloc(bytes.length);
         return write(bytes, allocRes);
+    }
+
+    public Mono<Result[]> write(ByteBuf buf, Result... allocRes) {
+        if (buf.isDirect()) {
+            ByteBuffer[] nioBuffers = buf.nioBuffers();
+            if (nioBuffers.length != 1) {
+                throw new MsException(ErrorNo.UNKNOWN_ERROR, "buf is not direct");
+            }
+
+            long addr = buf.memoryAddress() + buf.readerIndex();
+            int size = (buf.readableBytes() + 4095) & ~4095;
+            if (size > buf.capacity() - buf.readerIndex()) {
+                byte[] bytes = new byte[buf.readableBytes()];
+                buf.readBytes(bytes);
+                return write(bytes, allocRes);
+            }
+
+            MonoProcessor<Result[]> res = MonoProcessor.create();
+            Flux<Boolean> flux = Flux.empty();
+
+            for (int i = 0; i < allocRes.length; i++) {
+                Result alloc = allocRes[i];
+                MonoProcessor<Boolean> processor = MonoProcessor.create();
+                long id = AioChannel.id.incrementAndGet();
+                flux = flux.concatWith(processor);
+                map.put(id, processor);
+
+                int ret;
+
+                int writeLen = Math.min(size, (int) alloc.size);
+                long[] addrArray = new long[]{addr};
+                int[] sizeArray = new int[]{writeLen};
+
+                for (int tryNum = 0; tryNum < 10; tryNum++) {
+                    if ((ret = directWrite(id, ctxAddr, fd, alloc.offset, addrArray, sizeArray, 1)) == 1) {
+                        break;
+                    }
+                    log.error("submit write error {} in {}", ret, device.getName());
+                    synchronized (Thread.currentThread()) {
+                        try {
+                            Thread.currentThread().wait(100);
+                        } catch (InterruptedException e) {
+                            log.error("", e);
+                        }
+                    }
+
+                    if (tryNum == 9) {
+                        map.remove(id);
+                        throw new UnsupportedOperationException("submit write error " + ret);
+                    }
+                }
+
+                addr += writeLen;
+                size -= writeLen;
+            }
+
+            flux.doOnComplete(() -> res.onNext(allocRes))
+                    .doOnError(res::onError)
+                    .subscribe();
+
+            return res;
+        } else {
+            return write(buf.nioBuffer().array(), allocRes);
+        }
     }
 
     /**
@@ -232,7 +309,8 @@ public class AioChannel {
 
     public static native long ioEvent();
 
-    public static native int write(long id, long ctxAddr, int fd, long offset, byte[] bytes, int bytesOffset, int len);
+    public static native int write(long id, long ctxAddr, int fd, long offset, byte[] bytes, int bytesOffset,
+                                   int len);
 
     public static native int read(long id, long ctxAddr, int fd, long offset, int len);
 
@@ -241,4 +319,7 @@ public class AioChannel {
     private static native long[] getReadComplete(long ctxAddr, long eventAddr);
 
     public static native void free0(long addr);
+
+    public static native int directWrite(long id, long ctxAddr, int fd, long offset,
+                                         long[] addr, int[] size, int num);
 }

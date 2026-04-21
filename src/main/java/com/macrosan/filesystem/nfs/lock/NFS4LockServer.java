@@ -19,6 +19,7 @@ import reactor.core.publisher.MonoProcessor;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static com.macrosan.filesystem.lock.LockKeeper.KEEP_NAN;
@@ -44,11 +45,11 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
 
     public static Map<String, Map<String, DealLock>> lockMap = new ConcurrentHashMap<>();
     public static ConcurrentHashMap<NFS4Lock, Long> unLockMap = new ConcurrentHashMap<>();
-    public static Map<NFS4Lock, Object> unLocker = new ConcurrentHashMap<>();
+    public static Map<NFS4Lock, AtomicInteger> unLocker = new ConcurrentHashMap<>();
     private static final String localNode = ServerConfig.getInstance().getHostUuid();
 
     public Mono<NFS4Lock> tryKeep(String bucket, String key, NFS4Lock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             MonoProcessor<NFS4Lock> res = MonoProcessor.create();
             lockMap.compute(bucket, (bucket0, map) -> {
@@ -64,6 +65,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                         return dealLock;
                     }
                     NFS4Lock lock = dealLock.lock(value);
+                    o.decrementAndGet();
                     res.onNext(lock);
                     return dealLock;
                 });
@@ -81,7 +83,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
     }
 
     public Mono<NFS4Lock> tryLock0(String bucket, String key, NFS4Lock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             MonoProcessor<NFS4Lock> res = MonoProcessor.create();
             lockMap.compute(bucket, (bucket0, map) -> {
@@ -93,9 +95,12 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                         dealLock = new DealLock();
                     }
                     NFS4Lock lock = dealLock.lock(value);
+                    int i = o.decrementAndGet();
                     if (DEFAULT_LOCK.equals(lock)) {
                         unLockMap.remove(lock);
                         addKeep(bucket, key, value);
+                    }else if (i == 0){
+                        unLocker.remove(value, o);
                     }
                     res.onNext(lock);
                     return dealLock;
@@ -108,13 +113,14 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
 
     @Override
     protected Mono<Boolean> tryUnLock(String bucket, String key, NFS4Lock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             lockMap.computeIfPresent(bucket, (bucket0, map) -> {
                 map.computeIfPresent(key, (key0, dealLock) -> {
                     switch (value.optType) {
                         case UNLOCK_TYPE:
                             dealLock.unLock(value);
+                            unLockMap.put(value, System.nanoTime());
                             break;
                         case REMOVE_WAIT_TYPE:
                             dealLock.removeWait(value);
@@ -122,6 +128,10 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                         case RECALL_TYPE:
                             recall(value);
                             break;
+                    }
+                    int i = o.decrementAndGet();
+                    if (value.optType != UNLOCK_TYPE && i == 0){
+                        unLocker.remove(value, o);
                     }
                     return dealLock.isEmpty() ? null : dealLock;
                 });
@@ -132,7 +142,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
     }
 
     public Mono<NFS4Lock> tryUnLock0(String bucket, String key, NFS4Lock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             MonoProcessor<NFS4Lock> res = MonoProcessor.create();
             NFS4LockServer.lockMap.compute(bucket, (bucket0, map) -> {
@@ -160,6 +170,7 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                                 unLockMap.put(value, System.nanoTime());
                                 res.onNext(DEFAULT_LOCK);
                             } else {
+                                unLockMap.put(value, System.nanoTime());
                                 res.onNext(nfs4Locks.get(nfs4Locks.size() - 1));
                             }
                             break;
@@ -172,6 +183,10 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
                             break;
                     }
                     res.onNext(ERROR_LOCK);
+                    int i = o.decrementAndGet();
+                    if (value.optType != UNLOCK_TYPE && i == 0){
+                        unLocker.remove(value, o);
+                    }
                     return dealLock.isEmpty() ? null : dealLock;
                 });
                 return map.isEmpty() ? null : map;
@@ -423,5 +438,15 @@ public class NFS4LockServer extends LockServer<NFS4Lock> {
 
     public boolean recall(NFS4Lock lock) {
         return lock.notifyLock();
+    }
+
+    public AtomicInteger getLock(NFS4Lock value){
+        return unLocker.compute(value, (k, v) ->{
+            if (v == null){
+                return new AtomicInteger(1);
+            }
+            v.incrementAndGet();
+            return v;
+        });
     }
 }

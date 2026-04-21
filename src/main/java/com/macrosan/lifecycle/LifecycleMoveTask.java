@@ -309,7 +309,16 @@ public class LifecycleMoveTask {
 
         SocketReqMsg msg = new SocketReqMsg("", 0)
                 .put("fileName", newFileName)
-                .put("compression", targetPool.getCompression());
+                .put("compression", targetPool.getCompression())
+                .put("bucket", bucket)
+                .put("object", object)
+                .put("versionId", versionId)
+                .put("storage", targetPool.getVnodePrefix())
+                .put("uploadId", uploadId)
+                .put("partNum", partNum)
+                .put("endIndex", String.valueOf(endIndex))
+                .put("fileSize", String.valueOf(endIndex + 1));
+        Optional.ofNullable(snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
 
         // 判断是否开启缓冲池 按序下刷
         if (isEnableCacheOrderFlush(targetPool)) {

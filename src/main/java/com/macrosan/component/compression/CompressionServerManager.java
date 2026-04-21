@@ -225,6 +225,14 @@ public class CompressionServerManager {
 
 
     /**
+     * 获取所有压缩服务器总并发
+     * @return 总并发
+     */
+    public int getAllServerTotalConcurrent() {
+        return allServers.stream().filter(ServerInfo::isAvailable).mapToInt(ServerInfo::getMaxConcurrent).sum();
+    }
+
+    /**
      * 服务信息
      */
     @Data

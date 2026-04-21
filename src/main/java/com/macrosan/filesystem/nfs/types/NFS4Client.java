@@ -43,7 +43,7 @@ public class NFS4Client {
     private final SocketAddress clientAddress;
     private final SocketAddress localAddress;
     private final long leaseTime;
-    private boolean reclaimCompleted;
+    private AtomicBoolean reclaimCompleted;
     private final int minorVersion;
     private final AtomicInteger stateIdCounter = new AtomicInteger(0);
     private final NFS4ClientControl clientControl;
@@ -63,7 +63,7 @@ public class NFS4Client {
         this.localAddress = localAddress;
         this.leaseTime = leaseTime;
         this.minorVersion = minorVersion;
-        reclaimCompleted = this.minorVersion == 0;
+        reclaimCompleted = new AtomicBoolean(this.minorVersion == 0);
         this.nfsHandler = nfsHandler;
         this.localIp = getLocalAddress();
     }
@@ -153,7 +153,7 @@ public class NFS4Client {
     }
 
 
-    public synchronized void reset() {
+    public void reset() {
         refreshLeaseTime();
         confirmed.set(false);
     }
@@ -177,14 +177,17 @@ public class NFS4Client {
         if (openState != null) {
             NFS4State finalCreateState = createState;
             openState.addDisposeListener(s -> {
-                NFS4State nfsState = clientStates.remove(finalCreateState.stateId());
-                if (nfsState != null) {
-                    if (type == NFS4_LOCK_STID) {
-                        lockOwners.remove(stateOwner.getOwner());
+                AtomicReference<NFS4State> res = new AtomicReference<>();
+                clientStates.compute(finalCreateState.stateId(),(k,v) ->{
+                    if (v != null){
+                        if (type == NFS4_LOCK_STID) {
+                            lockOwners.remove(stateOwner.getOwner());
+                        }
+                        res.set(v);
                     }
-                    return nfsState.tryDispose();
-                }
-                return Mono.just(true);
+                    return null;
+                });
+                return res.get() != null ? res.get().tryDispose() : Mono.just(true);
             });
         }
         clientStates.put(createState.stateId(), createState);
@@ -418,7 +421,7 @@ public class NFS4Client {
         return !clientStates.isEmpty();
     }
 
-    private synchronized Mono<Boolean> clearStates() {
+    private Mono<Boolean> clearStates() {
         List<NFS4State> nfs4States = new ArrayList<>(clientStates.values());
         return Flux.fromIterable(nfs4States).flatMap(i -> i.disposeIgnoreFailures().doOnNext(v -> clientStates.remove(i.stateId()))).collectList().map(v -> true);
     }
@@ -432,56 +435,62 @@ public class NFS4Client {
     }
 
 
-    public synchronized void reclaimComplete() {
-        if (reclaimCompleted) {
+    public void reclaimComplete() {
+        if (reclaimCompleted.get()) {
             throw new NFSException(NFS4ERR_COMPLETE_ALREADY, "reclaimComplete : complete already");
         }
         clientControl.reclaimComplete(getOwnerId());
-        reclaimCompleted = true;
+        reclaimCompleted.set(true);
     }
 
 
-    public synchronized void wantReclaim() {
-        if (reclaimCompleted) {
+    public void wantReclaim() {
+        if (reclaimCompleted.get()) {
             throw new NFSException(NFS4ERR_NO_GRACE, "wantReclaim : complete already");
         }
         clientControl.wantReclaim(getOwnerId());
     }
 
-    public synchronized boolean needReclaim() {
-        return !reclaimCompleted;
+    public boolean needReclaim() {
+        return !reclaimCompleted.get();
     }
 
-    public synchronized StateOwner getOrCreateOwner(byte[] owner, int seq, boolean isLock) {
-
-        StateOwner stateOwner;
+    public StateOwner getOrCreateOwner(byte[] owner, int seq, boolean isLock) {
+        AtomicReference<StateOwner> res = new AtomicReference<>(null);
         if (minorVersion == 0) {
             StateOwner.Owner key = StateOwner.newOwner(clientId, owner);
             if (isLock) {
-                NFS4State openState = lockOwners.get(key);
-                if (openState == null) {
-                    stateOwner = new StateOwner(clientId, owner, seq);
-                } else {
-                    stateOwner = openState.getStateOwner();
-                    stateOwner.incrSequence(seq);
-                }
+                lockOwners.compute(key, (k,v) ->{
+                    if (v == null){
+                        res.set(new StateOwner(clientId, owner, seq));;
+                        return null;
+                    }else {
+                        StateOwner stateOwner0 = v.getStateOwner();
+                        res.set(stateOwner0);
+                        stateOwner0.incrSequence(seq);
+                        return v;
+                    }
+                });
             } else {
-                stateOwner = owners.get(key);
-                if (stateOwner == null) {
-                    stateOwner = new StateOwner(clientId, owner, seq);
-                    owners.put(StateOwner.newOwner(clientId, stateOwner.owner.owner), stateOwner);
-                } else {
-                    stateOwner.incrSequence(seq);
-                }
+                owners.compute(key, (k,v) ->{
+                    if (v == null){
+                        StateOwner stateOwner0 = new StateOwner(clientId, owner, seq);
+                        res.set(stateOwner0);
+                        return stateOwner0;
+                    }
+                    v.incrSequence(seq);
+                    res.set(v);
+                    return v;
+                });
             }
         } else {
-            stateOwner = new StateOwner(clientId, owner, 0);
+            res.set(new StateOwner(clientId, owner, 0));
         }
-        return stateOwner;
+        return res.get();
     }
 
 
-    public synchronized Mono<Boolean> releaseOwner(byte[] owner) {
+    public Mono<Boolean> releaseOwner(byte[] owner) {
         NFS4State lockState = lockOwners.remove(StateOwner.newOwner(clientId, owner));
         if (lockState == null) {
             throw new NFSException(NFS4ERR_STALE_CLIENTID, "releaseOwner : not exist stateOwner");

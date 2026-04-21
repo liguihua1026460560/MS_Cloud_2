@@ -18,8 +18,7 @@ import reactor.core.publisher.Mono;
 import static com.macrosan.filesystem.FsConstants.NTStatus.*;
 import static com.macrosan.filesystem.cifs.SMB2.SMB2_OPCODE.SMB2_CANCEL;
 import static com.macrosan.filesystem.cifs.SMB2.SMB2_OPCODE.SMB2_NOTIFY;
-import static com.macrosan.filesystem.cifs.SMB2Header.SMB2_HDR_FLAG_ASYNC;
-import static com.macrosan.filesystem.cifs.SMB2Header.newReplyHeader;
+import static com.macrosan.filesystem.cifs.SMB2Header.*;
 
 @Slf4j
 public class Notify {
@@ -60,7 +59,7 @@ public class Notify {
         NotifyCache.addCache(asyncID, header.getMessageId(), fileInfo.bucket, fileInfo.obj,
                 session.handler, notify, replyHeader);
         return LockClient.lock(fileInfo.bucket, fileInfo.obj, notify)
-                .map(b -> {
+                .flatMap(b -> {
                     if (b) {
                         int flags = reply.getHeader().getFlags();
                         reply.getHeader().setFlags(flags | SMB2_HDR_FLAG_ASYNC);
@@ -69,11 +68,17 @@ public class Notify {
 
                         reply.getHeader().setAsyncId(asyncID);
 
-                        return reply;
+                        if ((header.getFlags() & SMB2_HDR_FLAG_ASYNC) == 0 && NotifyCache.isCancel(header.getMessageId())) {
+                            return LockClient.unlock(fileInfo.bucket, fileInfo.obj, notify).flatMap(bb -> {
+                                return Mono.just(createCancelledReply(header, asyncID));
+                            });
+                        }
+
+                        return Mono.just(reply);
                     } else {
                         NotifyCache.clearByAsync(asyncID);
                         reply.getHeader().setStatus(STATUS_INSUFFICIENT_RESOURCES);
-                        return reply;
+                        return Mono.just(reply);
                     }
                 });
     }
@@ -87,6 +92,9 @@ public class Notify {
         NotifyCache cache;
         if ((header.getFlags() & SMB2_HDR_FLAG_ASYNC) == 0) {
             cache = NotifyCache.clearByMsg(header.getMessageId());
+            if (cache == null) {
+                NotifyCache.addCancel(header.getMessageId());
+            }
         } else {
             cache = NotifyCache.clearByAsync(header.getAsyncId());
         }
@@ -107,11 +115,16 @@ public class Notify {
                         }
                     });
         } else {
-            reply.getHeader().setOpcode(SMB2_NOTIFY.opcode);
-            int flags = reply.getHeader().getFlags();
-            reply.getHeader().setFlags(flags);
-            reply.getHeader().setStatus(STATUS_CANCELLED);
-            return Mono.just(reply);
+            //不返回 reply
+            return Mono.empty();
         }
+    }
+
+    public static SMB2.SMB2Reply createCancelledReply(SMB2Header header, long asyncID) {
+        SMB2.SMB2Reply reply = new SMB2.SMB2Reply(header);
+        reply.getHeader().setAsyncId(asyncID);
+        reply.getHeader().setStatus(STATUS_CANCELLED);
+        reply.getHeader().setCreditCharge((short) 1);
+        return reply;
     }
 }

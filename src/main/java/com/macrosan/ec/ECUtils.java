@@ -1521,19 +1521,47 @@ public class ECUtils {
         };
 
         Handler<Buffer> bufferHandler = bufferHandler(request, bufferConsumer, bytesConsumer, throwableConsumer);
-        if (HttpMethod.POST == request.method() && request.headers().contains(CONTENT_TYPE) && request.getHeader(CONTENT_TYPE).contains("multipart/form-data")) {
+        AtomicBoolean fileReceived = new AtomicBoolean(false);
+        boolean postObject = HttpMethod.POST == request.method() && request.headers().contains(CONTENT_TYPE) && request.getHeader(CONTENT_TYPE).contains("multipart/form-data");
+        if (postObject) {
+            // AWS POST 只允许一个 file 字段，检测到多个文件时拒绝请求
             request.uploadHandler(upload -> {
-                //也可在这里获取文件的content-type
-                sysMetaMap.remove(CONTENT_TYPE);
-                sysMetaMap.put(CONTENT_TYPE, upload.contentType());
-                upload.handler(bufferHandler);
+                if (fileReceived.compareAndSet(false, true)) {
+                    // 第一个文件：正常处理
+                    if (!"file".equals(upload.name())){
+                        log.error("PostObject: file key is not allowed, key: {}", upload.name());
+                        MsException exception = new MsException(ErrorNo.INVALID_ARGUMENT,
+                                "PostObject file key must be file, found file key is: " + upload.name());
+                        throwableConsumer.accept(exception);
+                    }
+                    sysMetaMap.remove(CONTENT_TYPE);
+                    sysMetaMap.put(CONTENT_TYPE, upload.contentType());
+                    request.addMember(FILENAME, upload.filename());
+                    upload.handler(bufferHandler);
+                } else {
+                    // 检测到第二个文件：拒绝请求
+                    log.error("PostObject: multiple file uploads not allowed, second file: {}", upload.filename());
+                    MsException exception = new MsException(ErrorNo.INVALID_ARGUMENT,
+                            "PostObject allows only one file upload, found additional file: " + upload.filename());
+                    throwableConsumer.accept(exception);
+                }
             });
-
         } else {
             request.handler(bufferHandler);
         }
 
         request.endHandler(v -> {
+            //fallback：处理 "file=字符串"
+            if (postObject && !fileReceived.get()) {
+                String fileValue = request.formAttributes().get("file");
+                if (request.formAttributes().contains("file")) {
+                    bufferHandler.handle(Buffer.buffer(fileValue));
+                }else {
+                    log.error("PostObject: no file uploaded");
+                    MsException exception = new MsException(INVALID_ARGUMENT, "PostObject file key must be file");
+                    throwableConsumer.accept(exception);
+                }
+            }
             AuthorizeV4.checkDecodedContentLength(request, originalDataLength.get(), r -> {
                 log.error("The Authorization was wrong. decoded content length provided in header:["
                         + r + "] is not right");
@@ -1631,12 +1659,30 @@ public class ECUtils {
         };
 
         Handler<Buffer> bufferHandler = bufferHandler(request, null, bytesConsumer, throwableConsumer);
-
-        if (HttpMethod.POST == request.method() && request.headers().contains(CONTENT_TYPE) && request.getHeader(CONTENT_TYPE).contains("multipart/form-data")) {
+        boolean postObject = HttpMethod.POST == request.method() && request.headers().contains(CONTENT_TYPE) && request.getHeader(CONTENT_TYPE).contains("multipart/form-data");
+        AtomicBoolean fileReceived = new AtomicBoolean(false);
+        if (postObject) {
+            // AWS POST 只允许一个 file 字段，检测到多个文件时拒绝请求
             request.uploadHandler(upload -> {
-                sysMetaMap.remove(CONTENT_TYPE);
-                sysMetaMap.put(CONTENT_TYPE, upload.contentType());
-                upload.handler(bufferHandler);
+                if (fileReceived.compareAndSet(false, true)) {
+                    // 第一个文件：正常处理
+                    if (!"file".equals(upload.name())){
+                        log.error("PostObject: file key is not allowed, key: {}", upload.name());
+                        MsException exception = new MsException(ErrorNo.INVALID_ARGUMENT,
+                                "PostObject file key must be file, found file key is: " + upload.name());
+                        throwableConsumer.accept(exception);
+                    }
+                    sysMetaMap.remove(CONTENT_TYPE);
+                    sysMetaMap.put(CONTENT_TYPE, upload.contentType());
+                    request.addMember(FILENAME, upload.filename());
+                    upload.handler(bufferHandler);
+                } else {
+                    // 检测到第二个文件：拒绝请求
+                    log.error("PostObject: multiple file uploads not allowed, second file: {}", upload.filename());
+                    MsException exception = new MsException(ErrorNo.INVALID_ARGUMENT,
+                            "PostObject allows only one file upload, found additional file: " + upload.filename());
+                    throwableConsumer.accept(exception);
+                }
             });
         } else {
             request.handler(buffer -> {
@@ -1645,7 +1691,20 @@ public class ECUtils {
         }
 
         // 有可能在限流情况下，request的数据读完触发endHandler，但由于bytes在byteConsumer中是延时写入的，processor0不能complete，可能会有md5不匹配等问题。
-        request.endHandler(v -> processor0.onComplete());
+        request.endHandler(v -> {
+            //fallback：处理 "file=字符串"
+            if (postObject && !fileReceived.get()) {
+                String fileValue = request.formAttributes().get("file");
+                if (request.formAttributes().contains("file")) {
+                    bufferHandler.handle(Buffer.buffer(fileValue));
+                }else {
+                    log.error("PostObject: no file uploaded");
+                    MsException exception = new MsException(INVALID_ARGUMENT, "PostObject file key must be file.");
+                    throwableConsumer.accept(exception);
+                }
+            }
+            processor0.onComplete();
+        });
 
         CoreSubscriber<byte[]> coreSubscriber = new CoreSubscriber<byte[]>() {
             @Override

@@ -678,8 +678,8 @@ public class FAttr4 {
                 offset += 4;
                 break;
             case change:
-                long cTime = inode != null ? inode.getCtime() : System.currentTimeMillis() / 1000;
-                buf.setLong(offset, cTime);
+                long changeId = inode != null ? (inode.getCtime() * ONE_SECOND_NANO + inode.getCtimensec()) : System.currentTimeMillis() * 1000_000;
+                buf.setLong(offset, changeId);
                 offset += 8;
                 break;
             case size:
@@ -927,6 +927,8 @@ public class FAttr4 {
                 return FAttr3.fType.NF_CHR.type;
             case FsConstants.S_IFFIFO:
                 return FAttr3.fType.NF_FIFO.type;
+            case FsConstants.S_IFSOCK:
+                return FAttr3.fType.NF_SOCK.type;
             default:
                 return FAttr3.fType.NF_BAD.type;
         }
@@ -938,7 +940,7 @@ public class FAttr4 {
                 case type:
                     return getType(inode) == (int) value;
                 case change:
-                    return inode.getCtime() == (long) value;
+                    return inode.getCtime() * ONE_SECOND_NANO + inode.getCtimensec() == (long) value;
                 default:
                     return same;
             }

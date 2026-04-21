@@ -128,8 +128,8 @@ public class DelDeleteMark {
                     if (metaData.isDeleteMark() && metaData.inode > 0) {
                         //处理带缓存池，文件重命名后，删除标记的清除
                         if (metaData.partInfos != null
-                                && metaData.partInfos.length == 0
-                                && "inode".equals(metaData.partUploadId)) {
+                                && metaData.partInfos.length == 0 && metaData.partUploadId != null
+                                && metaData.partUploadId.contains("inode")) {
                             return Mono.just(true);
                         }
                         Node instance = Node.getInstance();

@@ -20,7 +20,7 @@ import java.util.Random;
 
 import static com.macrosan.constants.SysConstants.REDIS_USERINFO_INDEX;
 import static com.macrosan.filesystem.FsConstants.NTStatus.STATUS_INVALID_PARAMETER;
-import static com.macrosan.filesystem.FsConstants.NTStatus.STATUS_NO_SUCH_USER;
+import static com.macrosan.filesystem.FsConstants.NTStatus.STATUS_NO_MAPPED;
 import static com.macrosan.filesystem.cifs.Ipc.IpcBind.createFaultResponse;
 import static com.macrosan.filesystem.cifs.rpc.RPCConstants.*;
 import static com.macrosan.filesystem.cifs.rpc.RPCConstants.rpcOpnum.*;
@@ -280,7 +280,7 @@ public class RpcBindGenerator {
                     String accountName = IpcBind.parseSamrLookupName(stubData);
                     if (accountName == null) {
                         log.debug("Invalid account name");
-                        responsePDU = createFaultResponse(rpcRequestCall.header.callId, rpcRequestCall.header.contextId, STATUS_NO_SUCH_USER);
+                        responsePDU = createFaultResponse(rpcRequestCall.header.callId, rpcRequestCall.header.contextId, STATUS_NO_MAPPED);
                         break;
                     }
 
@@ -303,7 +303,7 @@ public class RpcBindGenerator {
                         if (StringUtils.isEmpty(s3Id)) {
                             responsePDU = createFaultResponse(rpcRequestCall.header.callId,
                                     rpcRequestCall.header.contextId,
-                                    STATUS_NO_SUCH_USER);
+                                    STATUS_NO_MAPPED);
                             break;
                         }
                         int[] uidAndGid = ACLUtils.getUidAndGid(s3Id);
@@ -312,7 +312,7 @@ public class RpcBindGenerator {
                                     accountName, s3Id, Arrays.toString(uidAndGid));
                             responsePDU = createFaultResponse(rpcRequestCall.header.callId,
                                     rpcRequestCall.header.contextId,
-                                    STATUS_NO_SUCH_USER);
+                                    STATUS_NO_MAPPED);
                             break;
                         }
                         fileInfo.uidAndGid = uidAndGid;
@@ -322,7 +322,7 @@ public class RpcBindGenerator {
                         if (StringUtils.isEmpty(s3Id)) {
                             responsePDU = createFaultResponse(rpcRequestCall.header.callId,
                                     rpcRequestCall.header.contextId,
-                                    STATUS_NO_SUCH_USER);
+                                    STATUS_NO_MAPPED);
                             break;
                         }
                         int[] uidAndGid = ACLUtils.getUidAndGid(s3Id);
@@ -331,7 +331,7 @@ public class RpcBindGenerator {
                                     accountName, s3Id, Arrays.toString(uidAndGid));
                             responsePDU = createFaultResponse(rpcRequestCall.header.callId,
                                     rpcRequestCall.header.contextId,
-                                    STATUS_NO_SUCH_USER);
+                                    STATUS_NO_MAPPED);
                             break;
                         }
                         fileInfo.uidAndGid = uidAndGid;

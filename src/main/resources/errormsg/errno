@@ -450,6 +450,8 @@
 
 617=AccountHasRoles/The account has roles./400
 
+618=AccountUidExist/Account uid already exist./400
+
 702=ListLenDiff/The length of type list is not matched to the length of entity list./500
 
 703=AuthExists/The policy authorization already exists./400
@@ -615,6 +617,7 @@
 3202=NoSuchCachePool/The cache pool is not exit./404
 
 3301=CompressServerError/Compress server error./500
+3302=BucketNfsClosed/The bucket nfs is closed,is not allow to open./400
 
 3901=NoSuchDir/The dir is not exit./404
 3902=QuotaIsSetting/The dir is setting quota info./400

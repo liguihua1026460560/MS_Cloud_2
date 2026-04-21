@@ -55,7 +55,7 @@ public class RebuildDeadLetter {
     //    private static int QOS = 10;
     private Map<String, Channel> channelMap = new HashMap<>();
     private ConnectionFactory factory;
-
+    private final FileExistChecker fileExistChecker = FileExistChecker.getInstance();
     public RebuildDeadLetter() {
         factory = new ConnectionFactory();
         factory.setPassword("guest");
@@ -220,9 +220,18 @@ public class RebuildDeadLetter {
                     String lastAccessStamp = task.map.get("lastAccessStamp");
                     String fileOffset = task.map.get("fileOffset");
                     taskRes = TaskHandler.rebuildObjFile(pool, metaKey, lun, errorIndex, fileName, endIndex, fileSize, crypto, secretKey, nodeList, flushStamp, lastAccessStamp, fileOffset)
-                            .doOnNext(b -> {
+                            .flatMap(b -> {
                                 if (b) {
                                     RebuildSpeed.add(Long.parseLong(fileSize));
+                                    return Mono.just(true);
+                                } else {
+                                    // 重构失败
+                                    return fileExistChecker.checkFileNotExists(pool, fileName)
+                                            .doOnNext(notExists -> {
+                                                if (notExists) {
+                                                    log.info("fileName:{} is not exists in all node, not rebuild ", fileName);
+                                                }
+                                            });
                                 }
                             });
                     break;

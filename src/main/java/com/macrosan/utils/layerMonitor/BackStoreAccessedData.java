@@ -274,7 +274,7 @@ public class BackStoreAccessedData {
                         return fsBackStore(bucket, metaData, stamp);
                     }
 
-                    if (metaData.equals(MetaData.NOT_FOUND_META) || metaData.deleteMark || metaData.deleteMarker || metaData.storage.startsWith("cache") || metaData.partInfos != null) {//如果对象已经迁移到了另一个策略中，则该对象不再进行重新存储处理//分段对象不处理
+                    if (metaData.equals(MetaData.NOT_FOUND_META) || metaData.deleteMark || metaData.deleteMarker || metaData.storage.startsWith("cache") || metaData.partInfos != null || (metaData.endIndex + 1) > 262144L) {//如果对象已经迁移到了另一个策略中，则该对象不再进行重新存储处理//分段对象不处理
                         return Mono.just(true);
                     } else {
                         Map<String, String> sysMetaMap = Json.decodeValue(metaData.sysMetaData, new TypeReference<Map<String, String>>() {
@@ -481,9 +481,11 @@ public class BackStoreAccessedData {
             } else if (inodeData.storage.startsWith("data")) {
                 //超过256k的数据块暂不进行回迁
                 if (inodeData.getSize() > 262144L) {
-                    return Mono.just(true);
+                    recordRes = Mono.just(true);
+                } else {
+                    recordRes = recordTask(bucket, inodeData.getFileName().replace("/split/", ""), inodeData.storage, stamp, nodeId, curOffset, inodeData.getSize());
                 }
-                recordRes = recordTask(bucket, inodeData.getFileName().replace("/split/", ""), inodeData.storage, stamp, nodeId, curOffset, inodeData.getSize());
+
             } else if (inodeData.storage.startsWith("cache")) {
                 //如果数据已经在缓存池上了就不进行回迁处理了
                 recordRes = Mono.just(true);
@@ -589,7 +591,13 @@ public class BackStoreAccessedData {
                             .put("vnode", t.var3)
                             .put("compression", cachePool.getCompression())
                             .put("metaKey", metaKey)
-                            .put("dataPool", oldPool.getVnodePrefix());
+                            .put("dataPool", oldPool.getVnodePrefix())
+                            .put("bucket", metaData.bucket)
+                            .put("object", metaData.key)
+                            .put("versionId", metaData.versionId)
+                            .put("storage", cachePool.getVnodePrefix())
+                            .put("fileSize", String.valueOf(metaData.endIndex + 1));
+                    Optional.ofNullable(metaData.snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
 
                     if (isEnableCacheAccessTimeFlush(cachePool)) {
                         msg.put("lastAccessStamp", stamp);//将对象的get访问时间作为缓存池中该数据的访问记录

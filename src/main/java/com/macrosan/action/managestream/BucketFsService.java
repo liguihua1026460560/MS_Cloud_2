@@ -20,8 +20,7 @@ import org.eclipse.collections.impl.map.mutable.UnifiedMap;
 import java.util.List;
 import java.util.Map;
 
-import static com.macrosan.constants.ErrorNo.SUCCESS_STATUS;
-import static com.macrosan.constants.ErrorNo.UNKNOWN_ERROR;
+import static com.macrosan.constants.ErrorNo.*;
 import static com.macrosan.constants.ServerConstants.BUCKET_NAME;
 import static com.macrosan.constants.ServerConstants.USER_ID;
 import static com.macrosan.constants.SysConstants.*;
@@ -43,6 +42,14 @@ public class BucketFsService extends BaseService {
     protected static final String SITE = config.getSite();
 
     private static BucketFsService instance = null;
+
+    private static final int sharedLimit = 1024;
+
+    //默认情况下，uid或gid的最大可设置上限为65534
+    public static int DEFAULT_ANONYMOUS = 65534;
+    public static int RANGE_MAX_ID = DEFAULT_ANONYMOUS;
+
+    public static final String MOUNT_DIR_PREFIX = "/nfs/";
 
     public static BucketFsService getInstance() {
         if (instance == null) {
@@ -101,7 +108,7 @@ public class BucketFsService extends BaseService {
      */
     private void validateStatusValue(String status, String protocol) {
         if (StringUtils.isNotBlank(status) && !"1".equals(status) && !"0".equals(status)) {
-            throw new MsException(ErrorNo.INVALID_FS_STATUS, "Invalid " + protocol + " status value: " + status);
+            throw new MsException(INVALID_ARGUMENT, "Invalid " + protocol + " status value: " + status);
         }
     }
 
@@ -177,7 +184,7 @@ public class BucketFsService extends BaseService {
         log.info("addNfsIpWhitelists {}", paramMap);
         String userId = paramMap.get(USER_ID);
         String bucketName = paramMap.get(BUCKET_NAME);
-        String nfsIpWhiteStr = paramMap.get(NFS_IP_WHITELISTS);
+        String nfsIpWhiteStr = paramMap.get(NFS_IP_WHITE_LISTS);
 
         List<NFSIpWhitelist> nfsIpWhiteLists = parseNfsIpWhitelists(nfsIpWhiteStr);
         Map<String, String> bucketInfo = validateBucketPermission(bucketName, userId);
@@ -207,7 +214,7 @@ public class BucketFsService extends BaseService {
         log.info("delNfsIpWhitelists {}", paramMap);
         String userId = paramMap.get(USER_ID);
         String bucketName = paramMap.get(BUCKET_NAME);
-        String nfsIpWhiteStr = paramMap.get(NFS_IP_WHITELISTS);
+        String nfsIpWhiteStr = paramMap.get(NFS_IP_WHITE_LISTS);
 
         List<NFSIpWhitelist> nfsIpWhiteLists = parseNfsIpWhitelists(nfsIpWhiteStr);
         Map<String, String> bucketInfo = validateBucketPermission(bucketName, userId);
@@ -243,6 +250,13 @@ public class BucketFsService extends BaseService {
         String anonUid = paramMap.get(ANON_UID);
         String anonGid = paramMap.get(ANON_GID);
 
+        if (anonUid == null) {
+            paramMap.put(ANON_UID, "");
+        }
+        if (anonGid == null) {
+            paramMap.put(ANON_GID, "");
+        }
+
         Map<String, String> bucketInfo = validateBucketPermission(bucketName, userId);
 
         validateStatusValue(status, "NFS");
@@ -254,8 +268,56 @@ public class BucketFsService extends BaseService {
             return new ResponseMsg();
         }
 
-        updateNfs(bucketName, status, nfsAcl, squash, anonUid, anonGid);
+        String nfsValue = pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucketName, "nfs");
+        if (status.equals("1") && (StringUtils.isEmpty(nfsValue) || "0".equals(nfsValue))) {
+            /*
+             * 创建桶的时候，如果没开启NFS也没有开启CIFS，后续不允许开启
+             */
+            boolean isCloseFs = isBucketCloseNFS(bucketName) && isBucketCloseCIFS(bucketName) && isBucketCloseFTP(bucketName);
+            if (isCloseFs) {
+                log.error("bucket:" + bucketName + " The bucket nfs is closed,is not allow to open.");
+                throw new MsException(BUCKET_NFS_CLOSED, "The bucket nfs is closed,is not allow to open.");
+            }
 
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "mountPoint", MOUNT_DIR_PREFIX + bucketName);
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "nfs", status);
+        } else if (status.equals("0")) {
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucketName, "mountPoint");
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "nfsAcl", "0");
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "nfs", "0");
+        }
+
+        if (StringUtils.isNotBlank(squash)) {
+            if (squash.equals("0") || squash.equals("1") || squash.equals("2")) {
+                if (squash.equals("1") || squash.equals("0")) {
+                    pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, FS_SQUASH, squash);
+                    pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucketName, ANON_UID);
+                    pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hdel(bucketName, ANON_GID);
+                } else {
+                    pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, FS_SQUASH, squash);
+                }
+            } else {
+                log.error("bucket: " + bucketName + " squash value error");
+                throw new MsException(INVALID_ARGUMENT, "The bucket nfs squash value error.");
+            }
+        }
+
+        String curSquash = pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucketName, FS_SQUASH);
+        boolean isRootSquash = null == curSquash || "0".equals(curSquash) || "1".equals(curSquash);
+
+        //root squash不允许更改映射:
+        // 如果当前是 all_squash，同样 !isRootSquash= true，如果此时设置 uid=65534 则失败
+        // 如果当前是 root_squash，不允许修改映射
+        // 如果当前是 no_root_squash，不允许修改映射
+        if (checkSquashId(anonUid) && !isRootSquash) {
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, ANON_UID, anonUid);
+        }
+
+        if (checkSquashId(anonGid) && !isRootSquash) {
+            pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, ANON_GID, anonGid);
+        }
+
+        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "nfsAcl", nfsAcl);
         notifySlaveAndCheckResult(paramMap, ACTION_SET_BUCKET_NFS);
 
         return new ResponseMsg();
@@ -294,9 +356,9 @@ public class BucketFsService extends BaseService {
             validateStatusValue(status, "CIFS");
             pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "cifs", status);
         }
-        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, CIFS_ACL, acl);
+        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "cifsAcl", acl);
         pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, GUEST, guest);
-        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, CASE_SENSITIVE, saveRes);
+        pool.getShortMasterCommand(REDIS_BUCKETINFO_INDEX).hset(bucketName, "caseSensitive", saveRes);
 
         notifySlaveAndCheckResult(paramMap, ACTION_SET_BUCKET_CIFS);
 
@@ -342,33 +404,6 @@ public class BucketFsService extends BaseService {
     }
 
     /**
-     * 更新 NFS 配置
-     *
-     * @param bucketName 桶名称
-     * @param status 状态值
-     * @param acl NFS 访问控制列表
-     * @param squash 压缩配置
-     * @param anonUid 匿名用户 UID
-     * @param anonGid 匿名用户 GID
-     * @throws MsException 当更新失败时抛出异常
-     */
-    public static void updateNfs(String bucketName, String status, String acl, String squash, String anonUid, String anonGid) {
-        SocketReqMsg msg = new SocketReqMsg("updateNFS", 0)
-                .put("bucketName", bucketName)
-                .put("status", status)
-                .put("nfsAcl", acl)
-                .put("squash", squash)
-                .put("anonUid", anonUid)
-                .put("anonGid", anonGid);
-        StringResMsg addBackSqlRes = SocketSender.getInstance().sendAndGetResponse(msg, StringResMsg.class, true);
-        int code = addBackSqlRes.getCode();
-
-        if (code != SUCCESS_STATUS) {
-            throw new MsException(UNKNOWN_ERROR, "start bucket:" + bucketName + " nfs error!");
-        }
-    }
-
-    /**
      * 添加 NFS IP 白名单到系统
      *
      * @param bucketName 桶名称
@@ -377,7 +412,7 @@ public class BucketFsService extends BaseService {
      */
     public static void addNFSIpWhitelists(String bucketName, String nfsIpWhitelists) {
         SocketReqMsg msg = new SocketReqMsg("addNFSIpWhitelists", 0)
-                .put("bucketName", bucketName)
+                .put("bucket", bucketName)
                 .put("nfsIpWhitelists", nfsIpWhitelists);
 
         StringResMsg addBackSqlRes = SocketSender.getInstance().sendAndGetResponse(msg, StringResMsg.class, true);
@@ -398,7 +433,7 @@ public class BucketFsService extends BaseService {
      */
     public static void delNFSIpWhitelists(String bucketName, String nfsIpWhitelists) {
         SocketReqMsg msg = new SocketReqMsg("delNFSIpWhitelists", 0)
-                .put("bucketName", bucketName)
+                .put("bucket", bucketName)
                 .put("nfsIpWhitelists", nfsIpWhitelists);
 
         StringResMsg addBackSqlRes = SocketSender.getInstance().sendAndGetResponse(msg, StringResMsg.class, true);
@@ -408,6 +443,180 @@ public class BucketFsService extends BaseService {
             log.error("delNFSIpWhitelists error:{}", addBackSqlRes.getData());
             throw new MsException(UNKNOWN_ERROR, "delete bucket:" + bucketName + " nfs ip white list error!");
         }
+    }
+
+    private static boolean isBucketCloseNFS(String bucket) {
+        boolean isBucketCloseNFS = false;
+        try {
+            if ("0".equals(pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucket, "nfs"))) {
+                isBucketCloseNFS = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket bucket nfs close error");
+        }
+        return isBucketCloseNFS;
+    }
+
+    private static boolean isBucketCloseCIFS(String bucket) {
+        boolean isBucketCloseCIFS = false;
+        try {
+            if ("0".equals(pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucket, "cifs"))) {
+                isBucketCloseCIFS = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket bucket nfs close error");
+        }
+        return isBucketCloseCIFS;
+    }
+
+    private static boolean isBucketCloseFTP(String bucket) {
+        boolean isBucketCloseFTP = false;
+        try {
+            if ("0".equals(pool.getCommand(REDIS_BUCKETINFO_INDEX).hget(bucket, "ftp"))) {
+                isBucketCloseFTP = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket bucket ftp close error");
+        }
+        return isBucketCloseFTP;
+    }
+
+    /**
+     * 判断当前环境是否开启了桶散列
+     */
+    public static boolean isBucketHashEnabled() {
+        boolean isEnabled = false;
+        try {
+            isEnabled = "1".equals(pool.getCommand(REDIS_SYSINFO_INDEX).get("bucket_hash_switch"));
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket hash error");
+        }
+        return isEnabled;
+    }
+
+    /**
+     * 检查桶是否已经挂载
+     **/
+    private static boolean isBucketMount(String bucket) {
+        boolean isMount = false;
+        try {
+            isMount = pool.getCommand(REDIS_BUCKETINFO_INDEX).hexists(bucket, "fsid");
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket fsid error");
+        }
+        return isMount;
+    }
+
+    /**
+     * 检查当前开启共享的桶数量是否已经达到限制
+     **/
+    private static boolean isMountTooMany() {
+        boolean isTooMany = false;
+        try {
+            if (pool.getCommand(REDIS_SYSINFO_INDEX).hgetall("fsid_bucket").size() >= sharedLimit) {
+                isTooMany = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check shared buckets error");
+        }
+        return isTooMany;
+    }
+
+    /**
+     * 检查当前桶是否开启多版本或多版本暂停
+     **/
+    private static boolean isEnableVersion(String bucket) {
+        boolean isEnableVersion = false;
+        try {
+            if (pool.getCommand(REDIS_BUCKETINFO_INDEX).hexists(bucket, "versionstatus")) {
+                isEnableVersion = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket version error");
+        }
+        return isEnableVersion;
+    }
+
+    /**
+     * 检查当前桶是否开启桶清单
+     **/
+    private static boolean isBucketInventory(String bucket) {
+        boolean isBucketInventory = false;
+        try {
+            if (pool.getCommand(REDIS_TASKINFO_INDEX).exists(bucket + "_inventory") != 0L) {
+                isBucketInventory = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket inventory error");
+        }
+        return isBucketInventory;
+    }
+
+    /**
+     * 检查当前桶是否开启桶加密
+     **/
+    private static boolean isBucketEncryption(String bucket) {
+        boolean isBucketEncryption = false;
+        try {
+            if (pool.getCommand(REDIS_BUCKETINFO_INDEX).hexists(bucket, "crypto")) {
+                isBucketEncryption = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket crypto error");
+        }
+        return isBucketEncryption;
+    }
+
+    /**
+     * 检查当前桶是否开启桶回收站
+     **/
+    private static boolean isBucketTrashDir(String bucket) {
+        boolean isBucketTrashDir = false;
+        try {
+            if (pool.getCommand(REDIS_BUCKETINFO_INDEX).hexists(bucket, "trashDir")) {
+                isBucketTrashDir = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket trashDir error");
+        }
+        return isBucketTrashDir;
+    }
+
+    /**
+     * 检查当前桶是否存在生命周期
+     **/
+    private static boolean isBucketLifecycle(String bucket) {
+        boolean isBucketLifecycle = false;
+        try {
+            if (pool.getCommand(REDIS_SYSINFO_INDEX).exists("bucket_lifecycle_rules") != 0L
+                    && pool.getCommand(REDIS_SYSINFO_INDEX).hexists("bucket_lifecycle_rules", bucket)) {
+                isBucketLifecycle = true;
+            }
+        } catch (Exception e) {
+            throw new MsException(UNKNOWN_ERROR, "check bucket lifecycle_rules error");
+        }
+        return isBucketLifecycle;
+    }
+
+    public static boolean checkSquashId(String id) {
+        try {
+            if (StringUtils.isBlank(id)) {
+                return false;
+            }
+
+            int i = Integer.parseInt(id);
+            if (i == 65534) {
+                return true;
+            }
+            //映射的账户允许为0、65534以及其它id>0的账户
+            if (i < 0 || i > RANGE_MAX_ID) {
+                return false;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+
+        return true;
     }
 
 }

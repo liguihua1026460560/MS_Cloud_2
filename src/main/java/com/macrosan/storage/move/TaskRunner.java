@@ -588,7 +588,7 @@ public class TaskRunner {
             return result.flatMap(b -> {
                 if (b) {
                     delete.incrementAndGet();
-                    if (retryNum <= 0) {
+                    if (retryNum <= 0 || !value.equals(metaData.fileName)) {//如果当前fileName与元数据中的不同，那么不重试
                         putMq(taskKey, ROCKS_OBJ_META_DELETE_MARKER + value);
                     } else {
                         String prefix = ROCKS_LATEST_KEY + (retryNum - 1);
@@ -704,7 +704,14 @@ public class TaskRunner {
                             .put("lun", t.var2)
                             .put("vnode", t.var3)
                             .put("compression", targetPool.getCompression())
-                            .put("metaKey", metaKey);
+                            .put("metaKey", metaKey)
+                            .put("bucket", metaData.bucket)
+                            .put("object", metaData.key)
+                            .put("versionId", metaData.versionId)
+                            .put("storage", targetPool.getVnodePrefix())
+                            .put("fileSize", String.valueOf(metaData.endIndex + 1));
+                    Optional.ofNullable(metaData.snapshotMark).ifPresent(v -> msg.put("snapshotMark", v));
+
 
                     CryptoUtils.putCryptoInfoToMsg(metaData.getCrypto(), secretKey.get(), msg);
 

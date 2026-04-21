@@ -26,6 +26,7 @@ import static com.macrosan.constants.SysConstants.*;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.SWITCH_ON;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.SWITCH_SUSPEND;
 import static com.macrosan.filesystem.FsConstants.BUCKET_CASE_SENSITIVE;
+import static com.macrosan.filesystem.FsConstants.FSConfig.FTP_ANONYMOUS_SWITCH;
 import static com.macrosan.filesystem.FsConstants.SMB_MAX_FILE_NAME_LENGTH;
 import static com.macrosan.filesystem.async.AsyncUtils.MOUNT_CLUSTER;
 import static com.macrosan.filesystem.nfs.NFSBucketInfo.FSID_BUCKET;
@@ -517,5 +518,27 @@ public class CheckUtils {
             return false;
         }
         return true;
+    }
+
+    public static Mono<Boolean> checkFtpAnonymousPrimarySwitch() {
+        return RedisConnPool.getInstance().getReactive(REDIS_SYSINFO_INDEX).get(FTP_ANONYMOUS_SWITCH)
+                .defaultIfEmpty("true")
+                .map(boolStr -> {
+                    if (StringUtils.isBlank(boolStr)) {
+                        //默认开
+                        return true;
+                    } else {
+                        boolean res = true;
+                        try {
+                            res = Boolean.parseBoolean(boolStr);
+                        } catch (Exception e) {
+                            log.error("parse ftp anonymoust switch error", e);
+                            res = false;
+                        }
+
+                        return res;
+                    }
+                })
+                .onErrorReturn(false);
     }
 }

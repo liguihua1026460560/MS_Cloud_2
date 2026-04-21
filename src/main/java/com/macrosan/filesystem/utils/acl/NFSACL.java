@@ -133,6 +133,82 @@ public class NFSACL {
                 });
     }
 
+    /**
+     * 在nfs access中调用，用于获取当前 inode 的权限
+     * 暂用于nfsv4简单权限校验，不校验cifs权限
+     * @return 返回当前 inode 具备的权限，该权限需要与请求的 access取交集
+     **/
+    public static Mono<Integer> getNFSAccess0(Inode inode, ReqInfo reqHeader, RpcCallHeader callHeader) {
+        String bucket = reqHeader.bucket;
+        return NFSBucketInfo.getBucketInfoReactive(bucket)
+                .flatMap(bucketInfo -> {
+
+                    //为兼容旧版本权限，如果nfs权限未开启，则仅进行nfs挂载时共享权限的校验
+                    if (!NFS_ACL_START) {
+                        int readAndWrite = (READ | LOOK_UP | MODIFY | EXTEND | DELETE | EXECUTE);
+                        int read = (READ | LOOK_UP | EXECUTE);
+                        boolean mountFlag = CheckUtils.writePermissionCheck(bucketInfo);
+                        int resRight = mountFlag ? readAndWrite : read;
+
+                        if (inode.getNodeId() > 1 && null != callHeader.auth && callHeader.auth.flavor == 1) {
+                            if (callHeader.getAuth() instanceof AuthUnix) {
+                                AuthUnix auth = (AuthUnix) callHeader.getAuth();
+                                int uid = auth.getUid();
+                                //访问或所属用户不为root，且访问用户不为文件所属用户，只有只读权限
+                                if (inode.getUid() != 0 && uid != 0 && uid != inode.getUid()) {
+                                    resRight = FsConstants.NFSAccessAcl.READ;
+                                }
+                            }
+                        }
+
+                        return Mono.just(resRight);
+                    }
+
+                    if (null != bucketInfo) {
+                        FSIpACL ipACL = FSIPACLUtils.getIpACL(bucketInfo, FSIPACLUtils.getClientIp(reqHeader.nfsHandler));
+                        if (ipACL == null ) {
+                            return Mono.just(0);
+                        }
+                        reqHeader.ipACL = ipACL;
+                        if (isNotNfsIpAclSquash(reqHeader, callHeader)) {
+                            nfsSquash(reqHeader, callHeader);
+                        }
+                    }
+
+                    int[] uidAndGid = ACLUtils.getUidAndGid(callHeader);
+                    Tuple2<FSIdentity, Boolean> tuple2 = getIdtAndJudgeByUidAndInode(inode, callHeader);
+                    FSIdentity identity = tuple2.var1;
+                    boolean isIdtPromote = tuple2.var2;
+
+                    //判断桶ACL；当前账户是否包含该桶的权限
+                    return checkBucketACL(bucketInfo, identity.getS3Id(), bucket)
+                            .flatMap(bucketACLRes -> {
+                                if (!bucketACLRes.var1) {
+                                    log.error("uid: {}, gid: {}, dose not have bucket permission of obj {}:{}", uidAndGid[0], uidAndGid[1], inode.getNodeId(), inode.getObjName());
+                                    return Mono.just(0);
+                                }
+
+                                int[] right = {bucketACLRes.var2};
+                                //判断nfs挂载是公共读还是公共读写
+                                boolean mountFlag = CheckUtils.writePermissionCheck(bucketInfo);
+                                right[0] &= (mountFlag ? (READ | LOOK_UP | MODIFY | EXTEND | DELETE | EXECUTE) : (READ | LOOK_UP | EXECUTE));
+
+                                //判断对象ACL与UGO、NFS ACL; cifs acl粒度比nfs acl小，因此不在access接口中判断
+                                return Flux.just(
+                                                parseObjACLToNFSRight(inode, identity.getS3Id(), callHeader.opt, bucketInfo, null),
+                                                parseUGOAndNFSACLToRight(inode, createNfsHeader(callHeader.opt, identity, isIdtPromote, callHeader), null)
+                                                )
+
+                                        .collectList()
+                                        .map(list -> {
+                                            right[0] &= list.get(0).var2;
+                                            right[0] &= list.get(1).var2;
+                                            return right[0];
+                                        });
+                            });
+                });
+    }
+
 
     /**
      * 在nfs access中调用，用于获取当前 inode 的权限
@@ -212,6 +288,86 @@ public class NFSACL {
                             });
                 });
     }
+
+    /**
+     * 在nfs access中调用，用于获取当前 inode 的权限
+     * 暂时用于nfsv4简单做权限校验，不校验cifs权限
+     * @param cifsJudgeFlag 用于cifs判断权限的标志位
+     * @return 返回当前 inode 具备的权限，该权限需要与请求的 access取交集
+     **/
+    public static Mono<Boolean> judgeNFSOptAccess0(Inode inode, ReqInfo reqHeader, RpcCallHeader callHeader, boolean writeFlag, Map<String, String> extraParam, int cifsJudgeFlag) {
+        String bucket = reqHeader.bucket;
+
+        // todo accessKey
+        String accessKey = "";
+        return NFSBucketInfo.getBucketInfoReactive(bucket)
+                .flatMap(bucketInfo -> {
+                    reqHeader.bucketInfo = bucketInfo;
+
+                    //如果nfs权限未开启，则不进行权限校验
+                    if (!NFS_ACL_START) {
+                        boolean notPass = writeFlag && !CheckUtils.writePermissionCheck(bucketInfo);
+                        return Mono.just(!notPass);
+                    }
+
+                    if (null != bucketInfo) {
+                        FSIpACL ipACL = FSIPACLUtils.getIpACL(bucketInfo, FSIPACLUtils.getClientIp(reqHeader.nfsHandler));
+                        if (ipACL == null) {
+                            return Mono.just(false);
+                        }
+                        reqHeader.ipACL = ipACL;
+                        if (isNotNfsIpAclSquash(reqHeader, callHeader)) {
+                            nfsSquash(reqHeader, callHeader);
+                        }
+                    }
+
+                    int[] uidAndGid = ACLUtils.getUidAndGid(callHeader);
+                    Tuple2<FSIdentity, Boolean> tuple2 = getIdtAndJudgeByUidAndInode(inode, callHeader);
+                    FSIdentity identity = tuple2.var1;
+                    boolean isIdtPromote = tuple2.var2;
+
+                    return findSecretAccessKeyByIamFS(bucket, inode.getObjName(), callHeader.opt, accessKey)
+                            .flatMap(b -> {
+                                if (!b) {
+                                    log.error("uid: {}, gid: {}, dose not have iam permission of obj {}:{}", uidAndGid[0], uidAndGid[1], inode.getNodeId(), inode.getObjName());
+                                    return Mono.just(false);
+                                }
+
+                                //判断桶ACL；当前账户是否包含该桶的权限
+                                return checkBucketACL(bucketInfo, identity.getS3Id(), bucket)
+                                        .flatMap(bucketACLRes -> {
+                                            if (!bucketACLRes.var1) {
+                                                log.error("uid: {}, gid: {}, dose not have bucket acl permission of obj {}:{}", uidAndGid[0], uidAndGid[1], inode.getNodeId(), inode.getObjName());
+                                                return Mono.just(false);
+                                            } else {
+                                                //根据桶ACL返回的权限，判断当前操作是否通过
+                                                boolean isDir = inode.getObjName().endsWith("/") || inode.getNodeId() == 1;
+                                                boolean isBucketACLPass = isOptPass(bucketACLRes.var2, callHeader.opt, isDir, extraParam);
+                                                if (!isBucketACLPass) {
+                                                    log.error("uid: {}, gid: {}, dose not have bucket acl permission of obj {}:{}", uidAndGid[0], uidAndGid[1], inode.getNodeId(), inode.getObjName());
+                                                    return Mono.just(false);
+                                                }
+                                            }
+
+                                            //判断nfs挂载是公共读还是公共读写
+                                            boolean mountPerm = CheckUtils.writePermissionCheck(bucketInfo);
+                                            if (writeFlag && !mountPerm) {
+                                                log.error("uid: {}, gid: {}, dose not have nfs permission of obj {}:{}", uidAndGid[0], uidAndGid[1], inode.getNodeId(), inode.getObjName());
+                                                return Mono.just(false);
+                                            }
+
+                                            //判断对象ACL与UGO、NFS ACL与CIFS ACL
+                                            return Flux.just(
+                                                            parseObjACLToNFSRight(inode, identity.getS3Id(), callHeader.opt, bucketInfo, extraParam).var1(),
+                                                            parseUGOAndNFSACLToRight(inode, createNfsHeader(callHeader.opt, identity, isIdtPromote, callHeader), extraParam).var1()
+                                                            )
+                                                    .collectList()
+                                                    .map(list -> list.get(0) && list.get(1));
+                                        });
+                            });
+                });
+    }
+
     /**
      * 置为 true 则不再判断该操作的 cifs 权限，一般不判断的接口其nfs权限与cifs 权限存在差异，需要单独判断
      *

@@ -97,6 +97,10 @@ public class ComponentRecord {
     public static String rocksKeyPrefix(String bucket, String type, String taskMarker) {
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
         String bucketVnode = storagePool.getBucketVnodeId(bucket);
+        return rocksKeyPrefix(bucket, type, taskMarker, bucketVnode);
+    }
+
+    public static String rocksKeyPrefix(String bucket, String type, String taskMarker, String bucketVnode) {
         if (StringUtils.isEmpty(taskMarker)) {
             return Type.valueOf(type).mark + File.separator + bucketVnode + File.separator + bucket;
         }

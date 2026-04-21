@@ -413,7 +413,7 @@ public class FsConstants {
         public static final int STATUS_DATA_ERROR = 0xc000003E;
         public static final int STATUS_DIRECTORY_NOT_EMPTY = 0xc0000101;
         public static final int STATUS_NO_SUCH_FILE = 0xC000000F;
-        public static final int STATUS_NO_SUCH_USER = 0xC0000064;
+        public static final int STATUS_NO_MAPPED = 0xC0000073;
         public static final int STATUS_OBJECT_NAME_EXISTS = 0x40000000;
         public static final int STATUS_OBJECT_NAME_COLLISION = 0xC0000035;
         public static final int STATUS_FILE_TOO_LARGE = 0xC0000904;
@@ -705,5 +705,7 @@ public class FsConstants {
 
         //990 ftps端口
         public static String FTPS_CONTROL_PORT = "ftps_control_port";
+
+        public static String FTP_ANONYMOUS_SWITCH = "ftp_anonymous_enabled";
     }
 }

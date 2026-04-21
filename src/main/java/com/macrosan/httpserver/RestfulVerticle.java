@@ -181,13 +181,18 @@ public class RestfulVerticle extends AbstractVerticle {
             }
 
             String sign = getRequestSign(req, authType);
-            if ("POST///".equals(sign)) {//表单上传对象
-                if (req.headers().contains(CONTENT_TYPE) && req.getHeader(CONTENT_TYPE).contains("multipart/form-data")) {
-                    //如果存在Content-Type为multipart/form-data，表示为表单上传对象请求
-                    req.addMember("service", AuthorizeV4.SERVICE_S3);
-                    //这里需要把路由转为PUT
-                    sign = "PUT///";
+            boolean[] postObject = new boolean[]{false};
+            if ("POST//".equals(sign)) {
+                //表单上传对象
+                if (!req.headers().contains(CONTENT_TYPE) || !req.getHeader(CONTENT_TYPE).startsWith("multipart/form-data;")) {
+                    throw new MsException(ErrorNo.INVALID_ARGUMENT, "Content-Type is not multipart/form-data");
                 }
+                //如果存在Content-Type为multipart/form-data，表示为表单上传对象请求
+                req.addMember("service", AuthorizeV4.SERVICE_S3);
+                // 通过表单字段进行权限校验，移除请求头中的鉴权字段
+                req.headers().remove(AUTHORIZATION);
+                req.headers().remove(X_AUTH_TOKEN);
+                postObject[0] = true;
             } else if (IAM_ROUTE.equals(sign)) {
                 //aws iam 会有不带 X_AMZ_CONTENT_SHA_256的请求
 //                req.getHeader(AuthorizeV4.X_AMZ_CONTENT_SHA_256) == null &&
@@ -230,7 +235,10 @@ public class RestfulVerticle extends AbstractVerticle {
             } else {
                 req.addMember("service", AuthorizeV4.SERVICE_S3);
             }
-            if (req.headers().contains(AUTHORIZATION)) {
+
+            if (postObject[0]) {
+                authType = "";
+            } else if (req.headers().contains(AUTHORIZATION)) {
                 String[] array = req.getHeader(AUTHORIZATION).split(" ");
                 authType = array[0];
                 if (authType.equals(AuthorizeFactory.AWS)) {
@@ -262,7 +270,7 @@ public class RestfulVerticle extends AbstractVerticle {
             getAuthorizer(authType).apply(req, iamSign == null ? sign : iamSign, accessKey, signature)
                     .doOnNext(flag -> {
                         storeManagement[0] = req.getMember(STORE_MANAGEMENT_HEADER) != null;
-                        if (StatisticsRecorder.start) {
+                        if (StatisticsRecorder.start && !postObject[0]) {
                             String account = req.getUserId();
                             String bucket = req.getBucketName();
                             StatisticsRecorder.RequestType requestType = getRequestType(req.method());
@@ -319,7 +327,7 @@ public class RestfulVerticle extends AbstractVerticle {
                         if (b) {
                             final long[] timerId = new long[1];
                             Mono<Long> mono;
-                            if (PASSWORD.equals(req.getHeader(SYNC_AUTH))) {
+                            if (postObject[0] || PASSWORD.equals(req.getHeader(SYNC_AUTH))) {
                                 // 多站点相关的内部请求全部不受性能配额限制
                                 mono = Mono.just(0L);
                             } else {
@@ -792,12 +800,10 @@ public class RestfulVerticle extends AbstractVerticle {
 
         String sign0 = getRequestSign(request, authType);
 
-        if ("POST///".equals(sign0)) {//表单上传对象
-            if (request.headers().contains(CONTENT_TYPE) && request.getHeader(CONTENT_TYPE).contains("multipart/form-data")) {
-                //如果存在Content-Type为multipart/form-data，表示为表单上传对象请求
-                //这里需要把路由转为PUT
-                sign0 = "PUT///";
-            }
+        if ("POST//".equals(sign0)) {
+            //表单上传对象
+            normalRequest.onNext(request);
+            return;
         }
         // 不需要转发的请求直接走正常流程
         if (localExecutionSignTypeSet.contains(sign0)) {

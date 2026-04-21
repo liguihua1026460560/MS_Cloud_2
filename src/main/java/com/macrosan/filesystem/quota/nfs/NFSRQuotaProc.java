@@ -44,14 +44,16 @@ public class NFSRQuotaProc {
                     if (path.endsWith("/")) {
                         path = path.substring(0, path.length() - 1);
                     }
+
+                    boolean isV3 = path.startsWith("/");
                     String[] split = path.split("/");
-                    if (split.length < 3) {
+                    if (split.length < 2 && isV3) {
                         reply.status = NFS3ERR_NOENT;
                         return Mono.just(reply);
                     }
-                    String bucket = split[2];
+                    String bucket = isV3 ? split[2] : split[0];
                     //查询的为根目录，桶配额
-                    if (split.length == 3) {
+                    if (split.length == 3 && isV3 || split.length == 1) {
                         return redisConnPool.getReactive(REDIS_BUCKETINFO_INDEX)
                                 .exists(bucket)
                                 .flatMap(isExist -> {
@@ -108,14 +110,15 @@ public class NFSRQuotaProc {
                     if (path[0].endsWith("/")) {
                         path[0] = path[0].substring(0, path[0].length() - 1);
                     }
+                    boolean isV3 = path[0].startsWith("/");
                     String[] split = path[0].split("/");
 
                     //不允许对根目录设置配额，如需设置，要在控制台设置桶配额
-                    if (split.length <= 3) {
+                    if (split.length <= 3 && isV3 || split.length == 1) {
                         reply.status = Q_EPERM;
                         return Mono.just(reply);
                     }
-                    String bucket = split[2];
+                    String bucket = isV3 ? split[2] : split[0];
                     return NFSBucketInfo.getBucketInfoReactive(bucket)
                             .flatMap(bucketInfo -> {
                                 if (bucketInfo.isEmpty()) {

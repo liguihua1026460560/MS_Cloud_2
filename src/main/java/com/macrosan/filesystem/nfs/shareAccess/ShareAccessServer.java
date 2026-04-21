@@ -12,9 +12,11 @@ import reactor.core.publisher.MonoProcessor;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.macrosan.filesystem.lock.LockKeeper.KEEP_NAN;
 import static com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock.*;
+import static com.macrosan.filesystem.nfs.shareAccess.ShareAccessLock.OPEN_CHECK_VERIFIER_TYPE;
 
 @Log4j2
 public class ShareAccessServer extends LockServer<ShareAccessLock> {
@@ -25,7 +27,7 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
 
     private static final ShareAccessServer instance = new ShareAccessServer(Lock.NFS4_SHARE_ACCESS_TYPE, ShareAccessLock.class);
     public static ConcurrentHashMap<ShareAccessLock, Long> unLockMap = new ConcurrentHashMap<>();
-    public static Map<ShareAccessLock, Object> unLocker = new ConcurrentHashMap<>();
+    public static Map<ShareAccessLock, AtomicInteger> unLocker = new ConcurrentHashMap<>();
     static MsExecutor executor = new MsExecutor(1, 1, new MsThreadFactory("NFS4Share-timeout"));
 
     public static ShareAccessServer getInstance() {
@@ -72,7 +74,7 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
 
 
     public Mono<ShareAccessLock> tryShare(String bucket, String key, ShareAccessLock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             MonoProcessor<ShareAccessLock> res = MonoProcessor.create();
             tryShare(bucket, key, value, res);
@@ -84,6 +86,10 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
                         clone.setType(ADD_SHARE_TYPE);
                         addKeep(bucket, key, clone);
                     }
+                }
+                int i = o.decrementAndGet();
+                if (((value.type != ADD_SHARE_TYPE && value.type != EXIST_SHARE_TYPE) || lock.getShareAccess() < 0) && i == 0){
+                    unLocker.remove(value, o);
                 }
             });
         }
@@ -102,18 +108,18 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
             switch (value.type) {
                 case ADD_SHARE_TYPE:
                     //addOpen or upgradeOpen
-                    Optional<ShareAccessLock> conflictLock = set.stream().filter(l -> (value.shareAccess & l.shareDeny) != 0 || (value.shareDeny & l.shareAccess) != 0).findAny();
+                    Optional<ShareAccessLock> conflictLock = set.stream().filter(l -> (value.shareAccess & l.shareDeny) != 0
+                                    || (value.shareDeny & l.shareAccess) != 0).filter(l -> !l.stateId.equals(value.stateId))
+                            .filter(l -> !Arrays.equals(l.owner,value.owner)).findAny();
                     if (!conflictLock.isPresent()) {
                         ShareAccessLock existShare = null;
                         for (ShareAccessLock lock : set) {
                             if (lock.equals(value) && lock.stateId.equals(value.stateId)) {
-                                if (lock.stateId.seqId <= value.stateId.seqId){
-                                    lock.shareAccess |= value.shareAccess;
-                                    lock.shareDeny |= value.shareDeny;
-                                    lock.stateId = value.stateId;
-                                    lock.versionNum = value.versionNum;
-                                    lock.type = EXIST_SHARE_TYPE;
-                                }
+                                lock.shareAccess |= value.shareAccess;
+                                lock.shareDeny |= value.shareDeny;
+                                lock.stateId = value.stateId;
+                                lock.versionNum = value.versionNum;
+                                lock.type = EXIST_SHARE_TYPE;
                                 res.onNext(lock);
                                 return set;
                             }
@@ -178,6 +184,16 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
                     }
                     res.onNext(NOT_FOUND_SHARE);
                     return set;
+                case OPEN_CHECK_VERIFIER_TYPE:
+                    Optional<ShareAccessLock> verifierLock = set.stream()
+                            .filter(l -> (l.verifier == value.verifier)).findFirst();
+                    if (verifierLock.isPresent()){
+                        set.remove(verifierLock.get());
+                        res.onNext(verifierLock.get());
+                    }else {
+                        res.onNext(NOT_FOUND_SHARE);
+                    }
+                    return set;
                 default:
                     res.onNext(NOT_FOUND_SHARE);
                     return set;
@@ -189,31 +205,41 @@ public class ShareAccessServer extends LockServer<ShareAccessLock> {
 
     @Override
     protected Mono<Boolean> tryUnLock(String bucket, String key, ShareAccessLock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             String k = String.valueOf(value.nodeId);
             shareAccessMap.computeIfPresent(k, (k0, set) -> {
                 boolean b = set.removeIf(v -> v.stateId != null && value.stateId != null && v.stateId.equals(value.stateId));
-                if (b) {
-                    unLockMap.put(value, System.nanoTime());
-                }
+                unLockMap.put(value, System.nanoTime());
                 return set.isEmpty() ? null : set;
             });
             removeKeep(bucket, key, value);
+            o.decrementAndGet();
             return Mono.just(true);
         }
     }
 
     @Override
     protected Mono<Boolean> keep(String bucket, String key, ShareAccessLock value) {
-        Object o = unLocker.computeIfAbsent(value, k -> new Object());
+        AtomicInteger o = getLock(value);
         synchronized (o) {
             if (unLockMap.containsKey(value)) {
                 return Mono.just(true);
             }
             MonoProcessor<ShareAccessLock> res = MonoProcessor.create();
             tryShare(bucket, key, value, res);
+            o.decrementAndGet();
             return res.map(f -> true);
         }
+    }
+
+    public AtomicInteger getLock(ShareAccessLock value){
+       return unLocker.compute(value, (k, v) ->{
+            if (v == null){
+                return new AtomicInteger(1);
+            }
+            v.incrementAndGet();
+            return v;
+        });
     }
 }

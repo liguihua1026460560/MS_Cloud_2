@@ -1,6 +1,7 @@
 package com.macrosan.filesystem.async;
 
 import com.macrosan.database.redis.RedisConnPool;
+import com.macrosan.doubleActive.DataSynChecker;
 import com.macrosan.doubleActive.DoubleActiveUtil;
 import com.macrosan.doubleActive.HeartBeatChecker;
 import com.macrosan.doubleActive.arbitration.Arbitrator;
@@ -13,6 +14,8 @@ import com.macrosan.message.jsonmsg.UnSynchronizedRecord;
 import com.macrosan.message.socketmsg.SocketReqMsg;
 import com.macrosan.storage.StoragePool;
 import com.macrosan.storage.StoragePoolFactory;
+import io.lettuce.core.KeyValue;
+import io.lettuce.core.ScanIterator;
 import io.vertx.core.json.Json;
 import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
@@ -21,10 +24,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.util.function.Tuple2;
 
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.macrosan.constants.SysConstants.*;
@@ -32,6 +32,7 @@ import static com.macrosan.doubleActive.HeartBeatChecker.heartBeatIsNormal;
 import static com.macrosan.doubleActive.arbitration.Arbitrator.MASTER_INDEX;
 import static com.macrosan.doubleActive.arbitration.BucketSyncSwitchCache.*;
 import static com.macrosan.filesystem.async.AsyncUtils.SYNC_TYPE.LOCAL;
+import static com.macrosan.filesystem.quota.FSQuotaConstants.QUOTA_SUFFIX;
 import static com.macrosan.httpserver.MossHttpClient.*;
 
 @Log4j2
@@ -42,8 +43,8 @@ public class AsyncUtils {
     // opt码
     public static IntHashSet set = new IntHashSet();
 
-    /**
-     * 对应InodeOperator中的操作
+    /*
+      对应InodeOperator中的操作
      */
     static {
         /* updateInodeData */
@@ -62,6 +63,8 @@ public class AsyncUtils {
         set.add(7);
         /* updateInodeLinkN，覆盖或删除文件时更新元数据 */
         set.add(10);
+        /* createS3Inode */
+        set.add(11);
         /* updateObjACL */
         set.add(16);
         /* updateCIFSACL */
@@ -83,11 +86,21 @@ public class AsyncUtils {
         REJECT
     }
 
+    // 0=接收nfs客户端后发起的请求，需要进入写预提交记录的复制流程；1=差异记录发起的请求，不需要进入复制的流程；
+    public final static String ASYNC = "async";
+    public final static String ASYNC_NODEID = "asyncNodeId";
+    public final static String ASYNC_RECHECK = "async_recheck";
+
+    // 由于多站点模块的启动顺序靠后（晚于ErasureServer的InodeOperator，早于文件模块），所以由接收nfs请求的节点判断是否要进入多站点流程，否则转发的节点若还未启动多站点模块会导致丢失预提交记录
     public static boolean checkOptForAsync(int opt, SocketReqMsg msg) {
-        return HeartBeatChecker.isMultiAliveStarted && set.contains(opt) && !"1".equals(msg.get("async"));
+        return HeartBeatChecker.isMultiAliveStarted && set.contains(opt) && !"1".equals(msg.get(ASYNC));
     }
 
+    public static boolean checkOptForAsync(SocketReqMsg msg) {
+        return "0".equals(msg.get(ASYNC));
+    }
 
+    @Deprecated
     public static Mono<Inode> async(String bucket, long nodeID, int opt, SocketReqMsg msg, Mono<Inode> localMono) {
         return getSyncType(bucket)
                 .flatMap(sync_type -> {
@@ -96,7 +109,7 @@ public class AsyncUtils {
                         case ASYNC: {
                             StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
                             String bucketVnode = storagePool.getBucketVnodeId(bucket);
-                            return beforeService(bucket, nodeID, opt, msg.dataMap)
+                            return beforeService(bucket, nodeID, msg.dataMap)
                                     .flatMap(tuple2 -> {
                                         Boolean b = tuple2.getT1();
                                         UnSynchronizedRecord record = tuple2.getT2();
@@ -143,11 +156,12 @@ public class AsyncUtils {
     /**
      * 适配InodeCache批量处理。差异记录的预提交写失败一次就视为整体失败。
      */
-    public static Mono<Inode> asyncBatch(String bucket, long nodeID, int opt, List<SocketReqMsg> msgs, Mono<Inode> localMono) {
+    public static Mono<Inode> asyncBatch(String bucket, long nodeID, List<SocketReqMsg> msgs, Mono<Inode> localMono) {
         return getSyncType(bucket)
                 .flatMap(sync_type -> {
-                    // todo del
-                    log.debug("opt5 : {} {}, {}, {}", bucket, nodeID, opt, sync_type);
+                    if (DataSynChecker.isDebug) {
+                        log.info("asyncBatch0. {} {}", nodeID, msgs);
+                    }
                     switch (sync_type) {
                         case ASYNC: {
                             StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
@@ -159,12 +173,7 @@ public class AsyncUtils {
                                     // opt7可能会出现oldInodeData
                                     .filter(msg -> StringUtils.isBlank(msg.get("oldInodeData")))
                                     // concatMap保证执行顺序
-                                    .concatMap(msg -> beforeService(bucket, nodeID, opt, msg.dataMap))
-                                    .doOnNext(tuple2 -> {
-                                        if (!tuple2.getT1()) {
-                                            log.error("Some beforeService operations failed. {} {} {}", opt, bucket, nodeID);
-                                        }
-                                    })
+                                    .concatMap(msg -> beforeService(bucket, nodeID, msg.dataMap))
                                     .collectList()  // 收集所有 beforeService 结果
                                     .flatMap(beforeResults -> {
                                         // 检查所有 beforeService 是否都成功
@@ -172,7 +181,7 @@ public class AsyncUtils {
                                                 .allMatch(Tuple2::getT1);
 
                                         if (!allSuccess) {
-                                            return Mono.error(new RuntimeException("Some beforeService operations failed."));
+                                            return Mono.error(new RuntimeException("Some beforeService operations failed." + nodeID));
                                         }
 
                                         // 提取所有记录
@@ -193,7 +202,7 @@ public class AsyncUtils {
                                                                             return ECUtils.updateSyncRecord(record, nodeList, WRITE_ASYNC_RECORD)
                                                                                     .doOnNext(i0 -> {
                                                                                         if (i0 == 0) {
-                                                                                            log.error("updateSyncRecord err. {} {} {}", opt, bucket, nodeID);
+                                                                                            log.error("updateSyncRecord err. {} {} {}", Json.encode(record), bucket, nodeID);
                                                                                         }
                                                                                     });
                                                                         })
@@ -202,7 +211,7 @@ public class AsyncUtils {
                                                         .map(results -> inode);
                                             } else {
                                                 // 所有记录都删除
-                                                log.info("opt8 : {}, {}, {}, {}", nodeID, opt, records.size(), inode);
+                                                log.info("opt8 : {}, {}, {}", nodeID, records.size(), inode);
                                                 return Flux.fromIterable(records)
                                                         .flatMap(record -> {
                                                             if (IS_THREE_SYNC) {
@@ -312,22 +321,68 @@ public class AsyncUtils {
     /**
      * 本地写之前的预提交记录
      */
-    public static Mono<reactor.util.function.Tuple2<Boolean, UnSynchronizedRecord>> beforeService(String bucket, long nodeID, int opt, Map<String, String> map) {
+    public static Mono<reactor.util.function.Tuple2<Boolean, UnSynchronizedRecord>> beforeService(String bucket, long nodeID, Map<String, String> map) {
         StoragePool storagePool = StoragePoolFactory.getMetaStoragePool(bucket);
         String bucketVnode = storagePool.getBucketVnodeId(bucket);
 
+        int opt = Integer.parseInt(map.get("opt"));
+        String objectName = map.get("objName");
         return VersionUtil.getVersionNum(bucket, String.valueOf(nodeID))
                 .flatMap(syncStamp -> {
                     // 这里生成syncStamp，注意传递给后续业务流程
 //                    inode.setSyncStamp(syncStamp);
-                    UnSynchronizedRecord record = new UnSynchronizedRecord(bucket, opt, syncStamp, nodeID);
+                    if (DataSynChecker.isDebug) {
+                        log.info("write record. {} {}", nodeID, map);
+                    }
+                    UnSynchronizedRecord record = new UnSynchronizedRecord(bucket, opt, syncStamp, nodeID, objectName);
                     if (map != null) {
                         record.setHeaders(map);
+                        if ("1".equals(map.get("commit"))) {
+                            record.setCommited(true);
+                        }
                     }
                     return storagePool.mapToNodeInfo(bucketVnode).flatMap(nodeList -> ECUtils.putSynchronizedRecord(storagePool, record.rocksKey(), Json.encode(record), nodeList, WRITE_ASYNC_RECORD)
                             .zipWith(Mono.just(record)));
+                })
+                .doOnError(e -> log.error("beforeService err, {}, {}, {}", nodeID, opt, map, e))
+                .doOnNext(tuple2 -> {
+                    if (!tuple2.getT1()) {
+                        log.error("Some beforeService operations failed. {} {} {}", opt, bucket, nodeID);
+                    }
                 });
     }
 
+    public static void refreshFSQuota(String bucket, long oldNodeId, long newNodeId) {
+        String bucketQuotaKey = bucket + QUOTA_SUFFIX;
+        List<String> delKeyList = new ArrayList<>();
+        ScanIterator<KeyValue<String, String>> iterator = ScanIterator.hscan(pool.getCommand(REDIS_FS_QUOTA_INFO_INDEX), bucketQuotaKey);
+        while (iterator.hasNext()) {
+            KeyValue<String, String> next = iterator.next();
+            String key0 = next.getKey();
+            String key = next.getKey();
+            String value = next.getValue();
+            boolean reset = false;
+            if (key.contains(String.valueOf(oldNodeId))) {
+                key = key.replace(String.valueOf(oldNodeId), String.valueOf(newNodeId));
+                reset = true;
+            }
+            if (value.contains(String.valueOf(oldNodeId))) {
+                value = value.replace(String.valueOf(oldNodeId), String.valueOf(newNodeId));
+                reset = true;
+            }
+            if (!key.equals(key0)) {
+                delKeyList.add(key0);
+            }
+
+            if (reset) {
+                pool.getShortMasterCommand(REDIS_FS_QUOTA_INFO_INDEX).hset(bucketQuotaKey, key, value);
+            }
+        }
+        if (!delKeyList.isEmpty()) {
+            log.info("refreshFSQuota, {}, {} to {}, {}", bucket, oldNodeId, newNodeId, Json.encode(delKeyList));
+            pool.getShortMasterCommand(REDIS_FS_QUOTA_INFO_INDEX).hdel(bucketQuotaKey, delKeyList.toArray(new String[0]));
+        }
+
+    }
 
 }

@@ -418,33 +418,35 @@ public class MigrateUtil {
         int[] finalNum = {retryNum};
         String finalUuid = uuid;
         return res.flatMap(b -> {
-            if (!b) {
-                if (RemovedDisk.getInstance().contains(finalUuid + "@" + dstDisk)) {
-                    return Mono.just(true);
-                } else if (finalNum[0] < 10) {
-                    finalNum[0]++;
-                    long delay = (finalNum[0] - 1) * 5L;
-                    return Mono.delay(Duration.ofSeconds(delay < 30 ? delay : 30))//每隔30秒重试迁移一次
-                            .flatMap(l -> {
-                                SocketReqMsg msg0 = new SocketReqMsg("MIGRATE_FILE_REMOTE", 0)
-//                                        .put("migrateType", "MIGRATE_FILE_REMOTE")
-                                        .put("fileMeta", Json.encode(fileMeta))
-                                        .put("srcDisk", srcDisk)
-                                        .put("dstIP", dstIP)
-                                        .put("dstDisk", dstDisk)
-                                        .put("poolType", poolType)
-                                        .put("retryNum", String.valueOf(finalNum[0]));
-
-                                RebuildDeadLetter.getInstance().publishMigrateTask(msg0);
-                                return Mono.just(true);
-//                                migrateFileFromOther(fileMeta, srcDisk, dstIP, dstDisk, poolType, finalNum[0])
-                            });
-                } else {
-                    return Mono.just(true);
-                }
-            } else {
+            if (b || RemovedDisk.getInstance().contains(finalUuid + "@" + dstDisk)) {
                 return Mono.just(true);
             }
+            return FileExistChecker.getInstance().checkFileNotExists(storagePool, fileMeta.getFileName())
+                    .flatMap(notExists -> {
+                        if (notExists) {
+                            // 所有节点数据块都不存在，则不在进行迁移
+                            log.info("fileName:{} is not exists in all nodes, not migrate", fileMeta.getFileName());
+                            return Mono.just(true);
+                        }
+                        if (finalNum[0] >= 10) {
+                            return Mono.just(true);
+                        }
+                        finalNum[0]++;
+                        long delay = (finalNum[0] - 1) * 5L;
+                        return Mono.delay(Duration.ofSeconds(delay < 30 ? delay : 30))//每隔30秒重试迁移一次
+                                .flatMap(l -> {
+                                    SocketReqMsg msg0 = new SocketReqMsg("MIGRATE_FILE_REMOTE", 0)
+                                            .put("fileMeta", Json.encode(fileMeta))
+                                            .put("srcDisk", srcDisk)
+                                            .put("dstIP", dstIP)
+                                            .put("dstDisk", dstDisk)
+                                            .put("poolType", poolType)
+                                            .put("retryNum", String.valueOf(finalNum[0]));
+
+                                    RebuildDeadLetter.getInstance().publishMigrateTask(msg0);
+                                    return Mono.just(true);
+                                });
+                    });
         });
 
     }
